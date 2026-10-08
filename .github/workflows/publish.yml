@@ -1,11 +1,16 @@
 name: publish
 
-# Operator-triggered release: a human pushes a `v*` tag, or runs this workflow
-# by hand. The publish commands need a CRATES_IO_API_TOKEN secret.
+# Operator-triggered release: a human pushes a `v<faer version>` tag (for
+# example `v0.24.4`), or runs this workflow by hand. Publishing needs a
+# CRATES_IO_API_TOKEN secret.
 #
-# A `dry-run-only` dispatch does not upload, so it can only preflight a crate
-# whose dependencies already exist on the registry. It cannot validate the very
-# first publication of `t4a-faer-traits` together with `t4a-faer`.
+# `t4a-faer` resolves `t4a-faer-traits` from the registry, so traits goes first.
+# A crate whose version is already on crates.io is skipped, so a release that
+# bumps only one of the two still succeeds.
+#
+# A `dry-run-only` dispatch does not upload, so it can only preflight crates
+# whose dependencies are already on the registry. It cannot validate the first
+# publication of `t4a-faer-traits` together with `t4a-faer`.
 
 on:
   push:
@@ -26,20 +31,34 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Dry run t4a-faer-traits
+      - name: Read crate versions
+        id: versions
+        run: |
+          meta=$(cargo metadata --no-deps --format-version 1)
+          echo "traits=$(jq -r '.packages[] | select(.name == "t4a-faer-traits") | .version' <<<"$meta")" >> "$GITHUB_OUTPUT"
+          echo "faer=$(jq -r '.packages[] | select(.name == "t4a-faer") | .version' <<<"$meta")" >> "$GITHUB_OUTPUT"
+
+      - name: Dry run
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run-only }}
-        run: cargo publish -p t4a-faer-traits --dry-run
+        run: |
+          cargo publish -p t4a-faer-traits --dry-run
+          cargo publish -p t4a-faer --dry-run
 
-      - name: Dry run t4a-faer
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run-only }}
-        run: cargo publish -p t4a-faer --dry-run
-
-      # `cargo publish` waits for the upload it just made to reach the index, so
-      # the second publish resolves the version the first one pushed.
-      - name: Publish t4a-faer-traits
+      - name: Publish
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry-run-only) }}
-        run: cargo publish -p t4a-faer-traits --token "${{ secrets.CRATES_IO_API_TOKEN }}"
-
-      - name: Publish t4a-faer
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry-run-only) }}
-        run: cargo publish -p t4a-faer --token "${{ secrets.CRATES_IO_API_TOKEN }}"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
+          TRAITS_VERSION: ${{ steps.versions.outputs.traits }}
+          FAER_VERSION: ${{ steps.versions.outputs.faer }}
+        run: |
+          publish() {
+            local crate="$1" version="$2"
+            if curl -sf -H "User-Agent: tensor4all-faer-release" \
+                 "https://crates.io/api/v1/crates/${crate}/${version}" > /dev/null; then
+              echo "${crate} ${version} is already published; skipping"
+            else
+              cargo publish -p "${crate}"
+            fi
+          }
+          publish t4a-faer-traits "$TRAITS_VERSION"
+          publish t4a-faer "$FAER_VERSION"

@@ -17,7 +17,7 @@ upstream `faer`.
 | --- | --- |
 | Crate names | `faer` → `t4a-faer`, `faer-traits` → `t4a-faer-traits`. `[lib] name` stays `faer` / `faer_traits`, so downstream `use faer::...` is unchanged. |
 | Workspace | `faer-ffi` is excluded (the C API and its cbindgen build are unused by tensor4all). |
-| Publication | crates.io, in the order `t4a-faer-traits` then `t4a-faer`. |
+| Publication | crates.io, in the order `t4a-faer-traits` then `t4a-faer`. The tag is `v<faer version>`. A version that is already on crates.io is skipped, so a release that bumps only one crate still succeeds. |
 | LICENSE | A `LICENSE` copy lives in each crate directory so the published archive ships the MIT text (`license-file` next to `license` makes Cargo warn). |
 
 ## Experiments
