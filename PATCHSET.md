@@ -1,39 +1,45 @@
 # PATCHSET
 
-このフォークで試している実験の台帳。上流 `faer` との差分をここに残す。
+The ledger of the experiments this fork runs. It records the diff against
+upstream `faer`.
 
-## 状態の凡例
+## Status legend
 
-- **未着手** — 着手前。関連 issue があるものは issue 列に、無いものは「—」で示す。
-- **実験中** — ブランチ上で実装中。壊してよい。
-- **採用** — tensor4all 側で使い続ける。上流に送るかは別途判断。
-- **破棄** — 試したが捨てた。理由を残す。
+- **TODO** — not started. The issue column names the driving issue, or `—`.
+- **EXPERIMENT** — being implemented on a branch. Breaking things is fine.
+- **KEEP** — tensor4all keeps using it. Whether it goes upstream is a separate
+  decision.
+- **DROPPED** — tried and thrown away. The reason stays here.
 
-## フォーク基盤（上流に送る対象ではない）
+## Fork infrastructure (not candidates for upstream)
 
-| 変更 | 内容 |
+| Change | What |
 | --- | --- |
-| crate 名 | `faer` → `t4a-faer`、`faer-traits` → `t4a-faer-traits`。`[lib] name` は `faer` / `faer_traits` のままなので、依存側の `use faer::...` は不変。 |
-| workspace | `faer-ffi` を exclude（C API と cbindgen build は tensor4all で未使用）。 |
-| 公開 | crates.io へ `t4a-faer-traits` → `t4a-faer` の順で公開。 |
-| LICENSE | 各 crate ディレクトリに `LICENSE` を複製して同梱（`license-file` は `license` と併用すると Cargo が警告するため）。 |
+| Crate names | `faer` → `t4a-faer`, `faer-traits` → `t4a-faer-traits`. `[lib] name` stays `faer` / `faer_traits`, so downstream `use faer::...` is unchanged. |
+| Workspace | `faer-ffi` is excluded (the C API and its cbindgen build are unused by tensor4all). |
+| Publication | crates.io, in the order `t4a-faer-traits` then `t4a-faer`. |
+| LICENSE | A `LICENSE` copy lives in each crate directory so the published archive ships the MIT text (`license-file` next to `license` makes Cargo warn). |
 
-## 実験
+## Experiments
 
-| 実験 | 内容 | 状態 | 関連 | 備考 |
+| Experiment | What | Status | Issues | Notes |
 | --- | --- | --- | --- | --- |
-| unpivoted QR の列スキップ | Householder QR が `16·(m−k)·ε` 未満の列をゼロ扱いで落とす。tall/wide の `svd` もこの経路を通る。LAPACK には無いスキップ。 | 未着手 | tlinalg-rs#28, tensor4all-rs#836 | 上流のバグ候補。上流への issue/PR はフォークのメンテナ確認後。 |
-| 型付き未初期化上書き先 | `MatUninitMut<T>` のような、初期化前の出力を読まない overwrite 専用の宛先を `matmul_with_conj` に渡せるようにする。 | 未着手 | strided-rs#198 | strided-rs 側に Faer 専用の `Unsupported` 分岐がある。 |
-| SVD / eigh の native 直接出力 | nbatch=1 で U・固有ベクトルを中間 `Mat` に取ってからコピーしているのをやめ、呼び出し側の出力領域に直接書く。 | 未着手 | tlinalg-rs#25 | 出力の形状・初期化・失敗時の後始末を保つこと。 |
-| reflector 列の借用 | コンパクト QR バッファから reflector をスナッチ用 `basis` にコピーしているのをやめ、列分割で借用する。 | 未着手 | tlinalg-rs#17 | 数値・tau 規約・diagonal beta は不変。 |
-| スレッドポリシー | 呼び出し側の rayon プール / work-model（lanes × item threads）を `faer::Par` に写す経路。ambient global state に頼らない。 | 未着手 | tenferro-rs#2000, strided-rs#6 | ネスト並列とスレッド予算が主題。 |
-| scratch / plan 再利用 | 呼び出しをまたいで workspace・scratch・計画を保持する。 | 未着手 | — | 起票するかは着手時に決める。 |
-| strided / batched view | 汎用 stride とバッチを、packing 無しで直接受ける。 | 未着手 | — | — |
-| c64 planar | 複素の実部・虚部分離レイアウトを直接受ける。 | 未着手 | — | — |
+| Unpivoted QR column skip | Householder QR drops a column whose part orthogonal to the previous ones is below `16·(m−k)·ε`. The tall/wide `svd` path goes through it too. LAPACK has no such skip. | TODO | tlinalg-rs#28, tensor4all-rs#836 | Likely an upstream bug. Any upstream issue or PR is opened only after the fork maintainer confirms. |
+| Typed uninitialized overwrite destination | A `MatUninitMut<T>`-style destination that never reads the prior output, accepted by `matmul_with_conj`. | TODO | strided-rs#198 | strided-rs currently returns a Faer-only `Unsupported`. |
+| Native SVD / eigh direct output | At nbatch=1, stop writing U and the eigenvectors into an intermediate `Mat` and copying them out; write into the caller's output region instead. | TODO | tlinalg-rs#25 | Preserve output shape, initialization, and failure cleanup. |
+| Borrowed reflector columns | Stop copying reflectors out of the compact QR buffer into `basis` scratch; borrow them through a column split. | TODO | tlinalg-rs#17 | Numerics, the tau convention, and the restored diagonal beta stay identical. |
+| Thread policy | A path that maps the caller's rayon pool / work model (lanes × item threads) onto `faer::Par` without relying on ambient global state. | TODO | tenferro-rs#2000, strided-rs#6 | Nested parallelism and the thread budget are the subject. |
+| Scratch / plan reuse | Hold workspaces, scratch, and plans across calls. | TODO | — | Decide whether to file an issue when work starts. |
+| Strided / batched views | Accept general strides and batches directly, without packing. | TODO | — | — |
+| c64 planar | Accept a split real/imaginary complex layout directly. | TODO | — | — |
 
-## 運用
+## Ground rules
 
-- 1 実験 = 1 ブランチ。上流 release tag に rebase しやすいよう差分は小さく保つ。
-- 無関係な format 変更や依存 bump を載せない（rebase コストになる）。
-- 各実験は専用テストを持つ。動かした本人がローカルで実行し、PR ゲート（build）とは別に結果を残す。
-- 上流に送るつもりのものは、送る前にクリーンアップとレビューを別途行う。
+- One experiment per branch. Keep the diff small enough to rebase onto an
+  upstream release tag.
+- No unrelated formatting churn or dependency bumps; every extra diff is a
+  rebase cost.
+- Every experiment carries its own test, run locally by whoever wrote it. The PR
+  gate (build) is not a substitute for recording the result.
+- Anything intended for upstream is cleaned up and reviewed separately before it
+  is proposed.
