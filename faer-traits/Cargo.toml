@@ -1,13 +1,16 @@
 [package]
-name = "faer-traits"
+name = "t4a-faer-traits"
 version = "0.24.0"
 edition = "2021"
 authors = ["sarah quiñones <sarah@veganb.tw>"]
-description = "linear algebra library"
+description = "Temporary tensor4all fork of faer-traits."
 readme = "../README.md"
-repository = "https://codeberg.org/sarah-quinones/faer"
+repository = "https://github.com/tensor4all/faer"
 license = "MIT"
 keywords = ["math", "linear-algebra"]
+
+[lib]
+name = "faer_traits"
 
 [dependencies]
 bytemuck = "1.24.0"

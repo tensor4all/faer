@@ -1,0 +1,21 @@
+t4a-faer is a fork of faer.
+
+Upstream project
+  faer
+  https://codeberg.org/sarah-quinones/faer
+  Copyright (c) 2026 sarah quiñones el kazdadi
+  License: MIT (see LICENSE)
+
+This fork
+  https://github.com/tensor4all/faer
+  Maintained by tensor4all contributors.
+
+The source in this repository is upstream faer with tensor4all modifications.
+The upstream copyright and the MIT license apply to all of it. Modifications
+made in this fork are Copyright (c) tensor4all contributors and are released
+under the same MIT license.
+
+The packages published from this repository are the temporary tensor4all fork
+names `t4a-faer` and `t4a-faer-traits`. They exist so downstream crates can
+depend on fork content through crates.io, where a `git` dependency cannot be
+published.

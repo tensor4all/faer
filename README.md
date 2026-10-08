@@ -1,3 +1,24 @@
+> **tensor4all による AI 主導の高速実験フォークです。**
+>
+> [faer](https://codeberg.org/sarah-quinones/faer) の tensor4all フォークです
+> （GitHub の `sarah-ek/faer-rs` はミラーです）。ここから公開する `t4a-faer*` crate は
+> `tenferro-rs` / `tlinalg-rs` / `tprims-rs` 向けの実験ビルドです。
+>
+> ### スタンス
+>
+> - **AI による高速な実験場。** このリポジトリは、コーディングエージェントが高速に
+>   反復するための実験場です。コミット・テスト・レビューは素早い試行に最適化されて
+>   おり、上流のレビュー基準に合わせることは目的にしていません。
+> - **破壊的な実験をする場所。** tensor4all / tenferro のワークロードに最適化した機能
+>   — strided・batched のエントリ、型付きの未初期化上書き先、呼び出し側が持つ
+>   ワークスペース、明示的なスレッドポリシーなど — を、遠慮なく試して壊します。
+>   API の変更と破棄は前提で、互換性は保証しません。
+> - **実験の記録。** 何を試し、何を残し、何を捨てたかは
+>   [`PATCHSET.md`](./PATCHSET.md) に残します。
+>
+> ライセンスは上流の著作権表示と出典を保ったまま `MIT` です（[`NOTICE`](./NOTICE)
+> 参照）。固定した git revision か、公開済みの `t4a-faer*` 経由でのみ使ってください。
+
 <p align="center">
   <img src="https://faer.veganb.tw/faer-logo-color.png" alt="faer logo"/ width="25%">
 </p>

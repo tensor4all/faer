@@ -1,14 +1,18 @@
 [package]
-name = "faer"
+name = "t4a-faer"
 version = "0.24.4"
 edition = "2021"
 authors = ["sarah quiñones <sarah@veganb.tw>"]
-description = "linear algebra library"
+description = "Temporary tensor4all fork of faer: an AI-driven experiment build for tenferro-rs."
 readme = "../README.md"
-repository = "https://codeberg.org/sarah-quinones/faer"
+repository = "https://github.com/tensor4all/faer"
 license = "MIT"
 keywords = ["math", "linear-algebra"]
 rust-version = "1.84.0"
+
+# The dependency key stays `faer`, so downstream `use faer::...` is unchanged.
+[lib]
+name = "faer"
 
 [dependencies]
 bytemuck = "1.24.0"
@@ -29,7 +33,7 @@ dyn-stack = { version = "0.13.2", default-features = false, features = ["core-er
 pulp = { version = "0.22.2", default-features = false, features = ["x86-v3"] }
 equator = { version = "0.6.0" }
 
-faer-traits = { path = "../faer-traits", version = "0.24.0", default-features = false }
+faer-traits = { package = "t4a-faer-traits", path = "../faer-traits", version = "0.24.0", default-features = false }
 
 gemm = { version = "0.19.0", default-features = false }
 nano-gemm = { version = "0.2.2", default-features = false }

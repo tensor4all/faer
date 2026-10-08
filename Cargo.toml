@@ -3,11 +3,13 @@ members = [
   "faer-traits",
   "faer",
   "faer-macros",
-  "faer-ffi",
 ]
+# faer-ffi carries the C API and its cbindgen build; tensor4all does not consume
+# it, so the fork excludes it instead of keeping it in the workspace build.
 exclude = [
   "faer-no-std-test",
-  "eigen-bench-setup"
+  "eigen-bench-setup",
+  "faer-ffi",
 ]
 
 resolver = "2"

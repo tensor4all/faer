@@ -1,0 +1,44 @@
+name: publish
+
+# Publication is human-only: this workflow is triggered by a human pushing a
+# release tag or running it by hand, and needs a CRATES_IO_API_TOKEN secret.
+# `t4a-faer-traits` publishes first because `t4a-faer` depends on it.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry-run-only:
+        description: "Run the publish commands in dry-run mode (no upload)"
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Dry run t4a-faer-traits
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run-only }}
+        run: cargo publish -p t4a-faer-traits --dry-run
+
+      - name: Dry run t4a-faer
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run-only }}
+        run: cargo publish -p t4a-faer --dry-run
+
+      - name: Publish t4a-faer-traits
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry-run-only) }}
+        run: cargo publish -p t4a-faer-traits --token "${{ secrets.CRATES_IO_API_TOKEN }}"
+
+      - name: Wait for the registry index
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry-run-only) }}
+        run: sleep 30
+
+      - name: Publish t4a-faer
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry-run-only) }}
+        run: cargo publish -p t4a-faer --token "${{ secrets.CRATES_IO_API_TOKEN }}"
