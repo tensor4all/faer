@@ -530,6 +530,52 @@ mod tests {
 			}
 		}
 	}
+	/// Factor `A`, rebuild `Q` and `R`, and return `||A - QR|| / ||A||`.
+	fn qr_reconstruction_error(A: MatRef<'_, f64>, block_size: usize) -> f64 {
+		let (m, n) = (A.nrows(), A.ncols());
+		let k = Ord::min(m, n);
+		let mut QR = A.cloned();
+		let mut H = Mat::zeros(block_size, k);
+		qr_in_place(
+			QR.as_mut(),
+			H.as_mut(),
+			Par::Seq,
+			MemStack::new(&mut MemBuffer::new(qr_in_place_scratch::<f64>(
+				m,
+				n,
+				block_size,
+				Par::Seq,
+				default(),
+			))),
+			default(),
+		);
+
+		let mut Q = Mat::<f64>::zeros(m, m);
+		let mut R = QR.as_ref().cloned();
+		for j in 0..m {
+			Q[(j, j)] = 1.0;
+		}
+		for j in 0..k {
+			for i in j + 1..m {
+				R[(i, j)] = 0.0;
+			}
+		}
+		householder::apply_block_householder_sequence_on_the_left_in_place_with_conj(
+			QR.as_ref().subcols(0, k),
+			H.as_ref(),
+			Conj::No,
+			Q.as_mut(),
+			Par::Seq,
+			MemStack::new(&mut MemBuffer::new(
+				householder::apply_block_householder_sequence_on_the_left_in_place_scratch::<f64>(
+					m, block_size, m,
+				),
+			)),
+		);
+		(&A - &Q * &R).norm_l2() / A.norm_l2()
+	}
+
+	/// `A = [a, a + 1e-10 e_0, a + 1e-6 e_1]`, `a = (1, ..., 1)`, tall `m x 3`.
 	#[test]
 	fn test_near_dependent_columns_are_not_skipped() {
 		for m in [100, 1000, 8192] {
@@ -539,49 +585,37 @@ mod tests {
 				2 => 1.0 + if i == 1 { 1e-6 } else { 0.0 },
 				_ => unreachable!(),
 			});
-			let block_size = recommended_block_size::<f64>(m, 3);
-			let mut QR = A.cloned();
-			let mut H = Mat::zeros(block_size, 3);
-			qr_in_place(
-				QR.as_mut(),
-				H.as_mut(),
-				Par::Seq,
-				MemStack::new(&mut MemBuffer::new(qr_in_place_scratch::<f64>(
-					m,
-					3,
-					block_size,
-					Par::Seq,
-					default(),
-				))),
-				default(),
+			let relative_error = qr_reconstruction_error(
+				A.as_ref(),
+				recommended_block_size::<f64>(m, 3),
 			);
-
-			let mut Q = Mat::<f64>::zeros(m, m);
-			let mut R = QR.as_ref().cloned();
-			for j in 0..m {
-				Q[(j, j)] = 1.0;
-			}
-			for j in 0..3 {
-				for i in j + 1..m {
-					R[(i, j)] = 0.0;
-				}
-			}
-			householder::apply_block_householder_sequence_on_the_left_in_place_with_conj(
-				QR.as_ref(),
-				H.as_ref(),
-				Conj::No,
-				Q.as_mut(),
-				Par::Seq,
-				MemStack::new(&mut MemBuffer::new(
-					householder::apply_block_householder_sequence_on_the_left_in_place_scratch::<f64>(
-						m, block_size, m,
-					),
-				)),
-			);
-			let relative_error = (&A - &Q * &R).norm_l2() / A.norm_l2();
 			assert!(
 				relative_error <= 1e-13,
 				"m={m}: relative reconstruction error {relative_error:e}"
+			);
+		}
+	}
+
+	/// The same fixture transposed, so the nearly dependent columns are the
+	/// rows: wide `3 x n`. This is the shape that a caller sees as "wide", and
+	/// it exercises the blocked path's recursion into the unblocked core.
+	#[test]
+	fn test_near_dependent_rows_are_not_skipped() {
+		for n in [100, 1000, 8192] {
+			// W = A^T, i.e. W[(i, j)] = A[(j, i)] for the fixture above.
+			let W = Mat::from_fn(3, n, |i, j| match i {
+				0 => 1.0,
+				1 => 1.0 + if j == 0 { 1e-10 } else { 0.0 },
+				2 => 1.0 + if j == 1 { 1e-6 } else { 0.0 },
+				_ => unreachable!(),
+			});
+			let relative_error = qr_reconstruction_error(
+				W.as_ref(),
+				recommended_block_size::<f64>(3, n),
+			);
+			assert!(
+				relative_error <= 1e-13,
+				"3x{n}: relative reconstruction error {relative_error:e}"
 			);
 		}
 	}
