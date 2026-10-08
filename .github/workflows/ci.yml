@@ -15,9 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # The fork gate is a build plus the one light crate's tests. faer's own
-      # test dependencies (openssl-sys vendored, curl/tar, nalgebra, ...) are
-      # heavy, so the full upstream suite is run locally, not here.
+      # The designated lightweight gate: build both crates and test the light
+      # one. The inherited upstream workflows (`run-tests.yml`,
+      # `code-quality.yml`) also run on these events with the heavier upstream
+      # suite.
       - run: cargo build -p t4a-faer-traits -p t4a-faer
       - run: cargo build -p t4a-faer --no-default-features --features std
       - run: cargo test -p t4a-faer-traits

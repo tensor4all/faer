@@ -4,7 +4,7 @@
 
 ## 状態の凡例
 
-- **未着手** — 起票だけ。まだコードは無い。
+- **未着手** — 着手前。関連 issue があるものは issue 列に、無いものは「—」で示す。
 - **実験中** — ブランチ上で実装中。壊してよい。
 - **採用** — tensor4all 側で使い続ける。上流に送るかは別途判断。
 - **破棄** — 試したが捨てた。理由を残す。
@@ -16,6 +16,7 @@
 | crate 名 | `faer` → `t4a-faer`、`faer-traits` → `t4a-faer-traits`。`[lib] name` は `faer` / `faer_traits` のままなので、依存側の `use faer::...` は不変。 |
 | workspace | `faer-ffi` を exclude（C API と cbindgen build は tensor4all で未使用）。 |
 | 公開 | crates.io へ `t4a-faer-traits` → `t4a-faer` の順で公開。 |
+| LICENSE | 各 crate ディレクトリに `LICENSE` を複製して同梱（`license-file` は `license` と併用すると Cargo が警告するため）。 |
 
 ## 実験
 

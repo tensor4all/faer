@@ -20,7 +20,9 @@ rule files the task needs.
   * package name `t4a-faer` / `t4a-faer-traits`;
   * `[lib] name = "faer"` / `"faer_traits"`, and dependency keys unchanged, so
     downstream `use faer::...` and `use faer_traits::...` are untouched;
-  * `faer-ffi` stays out of the workspace (unused, cbindgen build).
+  * `faer-ffi` stays out of the workspace (unused, cbindgen build);
+  * each crate directory keeps a `LICENSE` copy so the published archive ships
+    the MIT text (`license-file` plus `license` makes Cargo warn).
 * Do not carry unrelated formatting churn or dependency bumps. Every extra diff
   is a rebase cost against upstream.
 * Upstream remote is Codeberg (`git remote add upstream
@@ -28,6 +30,7 @@ rule files the task needs.
   `sarah-quinones/faer-rs` is a mirror; do not treat it as the source of truth.
 * Every experiment carries one focused test. Run it locally; the fork CI gate is
   a build, not the full upstream suite (faer's test dependencies are heavy).
+  The inherited upstream workflows still run their own heavier jobs.
 * When an experiment uncovers a likely upstream bug, report it to the fork
   maintainer and get explicit permission before preparing or opening an upstream
   issue or PR.

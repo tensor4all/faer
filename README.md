@@ -14,10 +14,12 @@
 >   ワークスペース、明示的なスレッドポリシーなど — を、遠慮なく試して壊します。
 >   API の変更と破棄は前提で、互換性は保証しません。
 > - **実験の記録。** 何を試し、何を残し、何を捨てたかは
->   [`PATCHSET.md`](./PATCHSET.md) に残します。
+>   [`PATCHSET.md`](https://github.com/tensor4all/faer/blob/main/PATCHSET.md) に残します。
 >
-> ライセンスは上流の著作権表示と出典を保ったまま `MIT` です（[`NOTICE`](./NOTICE)
-> 参照）。固定した git revision か、公開済みの `t4a-faer*` 経由でのみ使ってください。
+> 本文は上流 faer の著作権・出典を保ったまま MIT です。同梱のサードパーティ由来
+> コードには個別の COPYING が付き、その条件はそちらに従います（詳細は
+> [`NOTICE`](https://github.com/tensor4all/faer/blob/main/NOTICE)）。固定した git
+> revision か、公開済みの `t4a-faer*` 経由でのみ使ってください。
 
 <p align="center">
   <img src="https://faer.veganb.tw/faer-logo-color.png" alt="faer logo"/ width="25%">

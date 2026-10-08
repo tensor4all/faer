@@ -1,8 +1,11 @@
 name: publish
 
-# Publication is human-only: this workflow is triggered by a human pushing a
-# release tag or running it by hand, and needs a CRATES_IO_API_TOKEN secret.
-# `t4a-faer-traits` publishes first because `t4a-faer` depends on it.
+# Operator-triggered release: a human pushes a `v*` tag, or runs this workflow
+# by hand. The publish commands need a CRATES_IO_API_TOKEN secret.
+#
+# A `dry-run-only` dispatch does not upload, so it can only preflight a crate
+# whose dependencies already exist on the registry. It cannot validate the very
+# first publication of `t4a-faer-traits` together with `t4a-faer`.
 
 on:
   push:
@@ -31,13 +34,11 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run-only }}
         run: cargo publish -p t4a-faer --dry-run
 
+      # `cargo publish` waits for the upload it just made to reach the index, so
+      # the second publish resolves the version the first one pushed.
       - name: Publish t4a-faer-traits
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry-run-only) }}
         run: cargo publish -p t4a-faer-traits --token "${{ secrets.CRATES_IO_API_TOKEN }}"
-
-      - name: Wait for the registry index
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry-run-only) }}
-        run: sleep 30
 
       - name: Publish t4a-faer
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry-run-only) }}
