@@ -22,7 +22,6 @@ fn qr_in_place_unblocked<T: ComplexField>(
 	let mut row = row_start;
 
 	while row < Ord::min(size, m) && col < n {
-		let norm = A.rb().col(col).get(..row).norm_l2();
 		let (mut A00, A01, A10, A11) =
 			A.rb_mut().split_at_mut(row + 1, col + 1);
 
@@ -49,11 +48,6 @@ fn qr_in_place_unblocked<T: ComplexField>(
 			(info, A10l.rb().col(row))
 		};
 
-		let norm = &info.norm.hypot(norm);
-		let eps = &eps::<T::Real>();
-		let leeway = &from_f64::<T::Real>((m - row) as f64 * 16.0);
-		let threshold = eps * leeway * norm;
-
 		let tau_inv = &info.tau.recip();
 		H[row] = info.tau.to_cplx();
 
@@ -61,7 +55,7 @@ fn qr_in_place_unblocked<T: ComplexField>(
 			if info.norm > zero() {
 				row += 1;
 			}
-		} else if info.norm > threshold {
+		} else if info.norm > zero() {
 			for (head, tail) in
 				core::iter::zip(A01.iter_mut(), A11.col_iter_mut())
 			{
@@ -536,6 +530,62 @@ mod tests {
 			}
 		}
 	}
+	#[test]
+	fn test_near_dependent_columns_are_not_skipped() {
+		for m in [100, 1000, 8192] {
+			let A = Mat::from_fn(m, 3, |i, j| match j {
+				0 => 1.0,
+				1 => 1.0 + if i == 0 { 1e-10 } else { 0.0 },
+				2 => 1.0 + if i == 1 { 1e-6 } else { 0.0 },
+				_ => unreachable!(),
+			});
+			let block_size = recommended_block_size::<f64>(m, 3);
+			let mut QR = A.cloned();
+			let mut H = Mat::zeros(block_size, 3);
+			qr_in_place(
+				QR.as_mut(),
+				H.as_mut(),
+				Par::Seq,
+				MemStack::new(&mut MemBuffer::new(qr_in_place_scratch::<f64>(
+					m,
+					3,
+					block_size,
+					Par::Seq,
+					default(),
+				))),
+				default(),
+			);
+
+			let mut Q = Mat::<f64>::zeros(m, m);
+			let mut R = QR.as_ref().cloned();
+			for j in 0..m {
+				Q[(j, j)] = 1.0;
+			}
+			for j in 0..3 {
+				for i in j + 1..m {
+					R[(i, j)] = 0.0;
+				}
+			}
+			householder::apply_block_householder_sequence_on_the_left_in_place_with_conj(
+				QR.as_ref(),
+				H.as_ref(),
+				Conj::No,
+				Q.as_mut(),
+				Par::Seq,
+				MemStack::new(&mut MemBuffer::new(
+					householder::apply_block_householder_sequence_on_the_left_in_place_scratch::<f64>(
+						m, block_size, m,
+					),
+				)),
+			);
+			let relative_error = (&A - &Q * &R).norm_l2() / A.norm_l2();
+			assert!(
+				relative_error <= 1e-13,
+				"m={m}: relative reconstruction error {relative_error:e}"
+			);
+		}
+	}
+
 	#[test]
 	fn test_rank_deficient() {
 		let i = c64::new(0.0, 1.0);
