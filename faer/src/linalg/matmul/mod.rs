@@ -14,6 +14,34 @@ use faer_traits::{ByRef, ComplexField, Conjugate};
 use pulp::Simd;
 use reborrow::*;
 const NANO_GEMM_THRESHOLD: usize = 16 * 16 * 16;
+/// The most rows a destination may have for its thread budget to be paid out by splitting its own
+/// columns instead of handing the whole panel to the kernel.
+///
+/// The native kernel hands out one microkernel tile at a time through a shared queue, and a shape
+/// whose destination is short and narrow does not give it enough tiles to cover the queue: the whole
+/// budget buys nothing, and past a few threads it makes the call slower than one thread.
+///
+/// The number is measured, not derived - this crate cannot see the kernel's tile sizes. At eight
+/// threads, `M x 240 x 4096` goes 8.0x, 6.9x and 2.5x faster at `M` = 16, 64 and 128; `256^3` gains
+/// 1.18x at best; and `512^3` and `4096x64x64` *lose* 1.58x and 2.9x. Past this row count the budget is
+/// better spent on rows the kernel can already decompose, and splitting the columns only multiplies
+/// the share of the operand every thread has to re-read.
+const COLUMN_SLAB_MAX_ROWS: usize = 128;
+/// The narrowest column slab worth its own share of the budget.
+const COLUMN_SLAB_MIN_COLS: usize = 16;
+
+/// How many column slabs an `m x n` destination is split into, or `None` to leave it whole.
+///
+/// A destination this short cannot fill the budget with rows, so `matmul_imp` splits its columns
+/// and runs each slab on the kernel's serial path. Above `COLUMN_SLAB_MAX_ROWS` the kernel's own
+/// decomposition is left alone, and so is anything too narrow to give a slab to a thread.
+fn column_slab_count(m: usize, n: usize, budget: usize) -> Option<usize> {
+	if budget < 2 || m > COLUMN_SLAB_MAX_ROWS {
+		return None;
+	}
+	let slabs = Ord::min(budget, n / COLUMN_SLAB_MIN_COLS);
+	(slabs >= 2).then_some(slabs)
+}
 pub(crate) mod internal;
 /// triangular matrix multiplication module, where some of the operands are
 /// treated as triangular matrices
@@ -1308,6 +1336,26 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 				return;
 			}
 		}
+		// The budget the kernel below is handed. It threads whatever it is given and has no
+		// work floor of its own, so the decision is made here, in *flops* rather than in the
+		// dtype's byte width: a complex MAC is four real MACs, and the work a region has to
+		// buy is the same either way. The floor is the one the `gemm` crate applies to its own
+		// kernels (`48 * 48 * 256` MACs, f64) expressed in flops, so a shape the generic kernel
+		// would run sequentially is not handed a budget here either. Below it a region costs
+		// more than the multiplication: f64 `32^3` (65 ki flops) is 2.3 us serial and 12.0 us
+		// at eight threads, `64^3` (524 ki flops) keeps its best time but pays 1.2-1.4x in the
+		// median; `96^3` (1.8 Mflops) is 2x faster at eight threads, and c64 `64^3` (2.1 Mflops)
+		// 2x, which is why the floor cannot be a MAC count alone.
+		let budget = if (*M)
+			.saturating_mul(*N)
+			.saturating_mul(*K)
+			.saturating_mul(if T::IS_REAL { 2 } else { 8 })
+			>= 2 * gemm::get_threading_threshold()
+		{
+			par.degree()
+		} else {
+			1
+		};
 		macro_rules! gemm_call {
 			($kind:ident, $ty:ty, $nanogemm:ident) => {
 				unsafe {
@@ -1399,31 +1447,7 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 									rhs.col_stride(),
 									conj_rhs == Conj::Yes,
 									&raw const alpha as *const (),
-									// The kernel below (`private_gemm_x86`) threads whenever it is
-									// handed more than one thread and has no work floor of its own,
-									// so the decision is faer's. It is made in *flops*, not in the
-									// dtype's byte width: a complex MAC is four real MACs, and the
-									// work a region has to buy is the same either way. The floor
-									// is the one the `gemm` crate applies to its own kernels
-									// (`48 * 48 * 256` MACs, f64) expressed in flops, so a shape
-									// the generic kernel would run sequentially is not handed a
-									// budget here either. Below it a region costs more than the
-									// multiplication: f64 `32^3` (65 ki flops) is 2.3 us serial
-									// and 12.0 us at eight threads, `64^3` (524 ki flops) keeps
-									// its best time but pays 1.2-1.4x in the median; `96^3`
-									// (1.8 Mflops) is 2x faster at eight threads, and c64 `64^3`
-									// (2.1 Mflops) 2x, which is why the floor cannot be a MAC
-									// count alone.
-									if (*M)
-										.saturating_mul(*N)
-										.saturating_mul(*K)
-										.saturating_mul(if T::IS_REAL { 2 } else { 8 })
-										>= 2 * gemm::get_threading_threshold()
-									{
-										par.degree()
-									} else {
-										1
-									},
+									budget,
 								);
 								return;
 							}
@@ -1466,6 +1490,37 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 					}
 				};
 			};
+		}
+		#[cfg(feature = "rayon")]
+		if const {
+			T::IS_NATIVE_F64 || T::IS_NATIVE_C64 || T::IS_NATIVE_F32 || T::IS_NATIVE_C32
+		} {
+			if let Some(slabs) = column_slab_count(*M, *N, budget) {
+				// This destination is too short to fill the budget with rows, so the native
+				// kernel's per-tile queue would cost more than the tiles it hands out: split
+				// the columns, one slab per thread, and let each slab reach the kernel's
+				// serial path through the public entry point.
+				use rayon::prelude::*;
+				spindle::for_each(
+					slabs,
+					dst.par_col_partition_mut(slabs).zip(rhs.par_col_partition(slabs)),
+					|(dst, rhs)| {
+						let (rows, cols) = (dst.nrows(), dst.ncols());
+						with_dim!(slab_n, cols);
+						matmul_imp(
+							dst.as_shape_mut(rows, slab_n),
+							beta,
+							lhs,
+							conj_lhs,
+							rhs.as_shape(rhs.nrows(), slab_n),
+							conj_rhs,
+							alpha,
+							Par::Seq,
+						);
+					},
+				);
+				return;
+			}
 		}
 		if const { T::IS_NATIVE_F64 } {
 			gemm_call!(F64, f64, execute_f64);
@@ -1769,7 +1824,7 @@ mod tests {
 	use super::*;
 	use crate::mat::{Mat, MatMut, MatRef};
 	use crate::stats::prelude::*;
-	use crate::{assert, c32};
+	use crate::{assert, c32, c64};
 	use std::num::NonZeroUsize;
 	/// Below the flop floor `matmul` runs the sequential kernel whatever budget
 	/// the caller passes, and above it the kernel threads: both must compute the
@@ -1815,6 +1870,139 @@ mod tests {
 				}
 			}
 		}
+	}
+	/// The split must reproduce the one-thread product slab by slab: uneven slab widths, an
+	/// accumulated destination, conjugation on both operands, and a row-major destination, which
+	/// is the layout the campaign's C-order cells have.
+	#[test]
+	fn column_slab_split_matches_the_serial_product() {
+		let pool = rayon::ThreadPoolBuilder::new()
+			.num_threads(8)
+			.build()
+			.unwrap();
+		for (m, k, n) in [(16, 512, 240), (16, 512, 231), (24, 512, 288)] {
+			for accum in [Accum::Replace, Accum::Add] {
+				let lhs = Mat::<f64>::from_fn(m, k, |i, j| {
+					((i * 7 + j * 13) % 11) as f64 * 0.5 - 2.5
+				});
+				let rhs = Mat::<f64>::from_fn(k, n, |i, j| {
+					((i * 5 + j * 3) % 7) as f64 * 0.25 - 1.0
+				});
+				let seed = Mat::<f64>::from_fn(m, n, |i, j| ((i + 3 * j) % 5) as f64 * 0.125);
+				let (mut sequential, mut threaded) = (seed.clone(), seed);
+				matmul(
+					sequential.as_mut(),
+					accum,
+					lhs.as_ref(),
+					rhs.as_ref(),
+					1.0,
+					Par::Seq,
+				);
+				pool.install(|| {
+					matmul(
+						threaded.as_mut(),
+						accum,
+						lhs.as_ref(),
+						rhs.as_ref(),
+						1.0,
+						Par::rayon(8),
+					)
+				});
+				for i in 0..m {
+					for j in 0..n {
+						let d = (sequential[(i, j)] - threaded[(i, j)]).abs();
+						assert!(d < 1e-12, "({i}, {j}): {d}");
+					}
+				}
+			}
+		}
+		let (m, k, n) = (16usize, 512usize, 240usize);
+		let lhs = Mat::<c64>::from_fn(m, k, |i, j| {
+			c64::new(((i + 2 * j) % 7) as f64 * 0.5, ((3 * i + j) % 5) as f64 * 0.25)
+		});
+		let rhs = Mat::<c64>::from_fn(k, n, |i, j| {
+			c64::new(
+				((i + j) % 3) as f64 - 1.0,
+				((2 * i + 3 * j) % 4) as f64 * 0.5,
+			)
+		});
+		let alpha = c64::new(1.0, 0.5);
+		let mut sequential = Mat::<c64>::zeros(m, n);
+		let mut threaded = Mat::<c64>::zeros(m, n);
+		matmul_with_conj(
+			sequential.as_mut(),
+			Accum::Replace,
+			lhs.as_ref(),
+			Conj::Yes,
+			rhs.as_ref(),
+			Conj::Yes,
+			alpha,
+			Par::Seq,
+		);
+		pool.install(|| {
+			matmul_with_conj(
+				threaded.as_mut(),
+				Accum::Replace,
+				lhs.as_ref(),
+				Conj::Yes,
+				rhs.as_ref(),
+				Conj::Yes,
+				alpha,
+				Par::rayon(8),
+			)
+		});
+		for i in 0..m {
+			for j in 0..n {
+				let d = (sequential[(i, j)] - threaded[(i, j)]).abs();
+				assert!(d < 1e-12, "c64 ({i}, {j}): {d}");
+			}
+		}
+		let lhs = Mat::<f64>::from_fn(m, k, |i, j| {
+			((i * 7 + j * 13) % 11) as f64 * 0.5 - 2.5
+		});
+		let rhs = Mat::<f64>::from_fn(k, n, |i, j| ((i * 5 + j * 3) % 7) as f64 * 0.25 - 1.0);
+		// The same product in row-major views of all three operands: an `m x n` row-major view is
+		// the transpose of an `n x m` column-major buffer, which is the layout the campaign's
+		// C-order cells hand in.
+		let lhs_rm = lhs.transpose().to_owned();
+		let rhs_rm = rhs.transpose().to_owned();
+		let mut sequential = Mat::<f64>::zeros(n, m);
+		let mut threaded = Mat::<f64>::zeros(n, m);
+		matmul(
+			sequential.as_mut().transpose_mut(),
+			Accum::Replace,
+			lhs_rm.as_ref().transpose(),
+			rhs_rm.as_ref().transpose(),
+			1.0,
+			Par::Seq,
+		);
+		pool.install(|| {
+			matmul(
+				threaded.as_mut().transpose_mut(),
+				Accum::Replace,
+				lhs_rm.as_ref().transpose(),
+				rhs_rm.as_ref().transpose(),
+				1.0,
+				Par::rayon(8),
+			)
+		});
+		for i in 0..m {
+			for j in 0..n {
+				let d = (sequential[(j, i)] - threaded[(j, i)]).abs();
+				assert!(d < 1e-12, "row-major ({i}, {j}): {d}");
+			}
+		}
+	}
+	/// The gate: which destinations are split, and into how many slabs.
+	#[test]
+	fn column_slab_boundaries() {
+		assert_eq!(column_slab_count(128, 240, 8), Some(8));
+		assert_eq!(column_slab_count(129, 240, 8), None);
+		assert_eq!(column_slab_count(16, 31, 8), None);
+		assert_eq!(column_slab_count(16, 32, 8), Some(2));
+		assert_eq!(column_slab_count(16, 240, 1), None);
+		assert_eq!(column_slab_count(16, 240, 4), Some(4));
+		assert_eq!(column_slab_count(16, 4096, 8), Some(8));
 	}
 	#[test]
 	#[ignore = "takes too long"]
