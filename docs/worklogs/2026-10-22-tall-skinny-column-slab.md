@@ -101,3 +101,38 @@ pre-filled destination; the same in `c64` with `Conj::Yes`; and one with a rever
 unit test on `column_slab_count` pins the boundaries (`M = 32` splits, `M = 33` does not; `N = 31`
 does not, `N = 32` gives two slabs; a budget of one never splits). The lib is also built without the
 `rayon` feature, which is what keeps the new block's `cfg` honest.
+
+## Diagnostic measurements (not the acceptance arm)
+
+`probes/small-gemm`, f64 column-major unless it says c64, best of 11, 1T on CPU 4, 4T on 4-7, 8T on
+4-11, the observing process on 0-3,12-15. The baseline is `extern/t4a-faer` at `50c2b98`, the
+candidate is this branch, and both were built from the same driver.
+
+Target, `m = 16, n = 240, k = 4096` (µs, baseline -> candidate):
+
+| threads | baseline | candidate | |
+| --- | --- | --- | --- |
+| 1 | 1019 | 1018 | unchanged: a budget of one never splits |
+| 4 | 666 | 264 | 2.5x |
+| 8 | 1092 | 137 | 8.0x |
+| 8, c64 | 2373 | 544 | 4.4x |
+
+At 8 threads the candidate is 137 µs against OpenBLAS's 223 and MKL's 347 on the same shape.
+
+Where the row cap comes from, at 8 threads, `n = 240, k = 4096`, split taken for every `M` (the cap
+lifted to 4096 for the sweep), against leaving the destination whole:
+
+| shape | whole (baseline) | split | |
+| --- | --- | --- | --- |
+| `16x240x4096` | 1092 | 135 | 8.1x faster |
+| `64x240x4096` | 3687 | 540 | 6.8x faster |
+| `128x240x4096` | 2933 | 1147 | 2.6x faster |
+| `128^3` | 48.7 | 27.4 | 1.8x faster |
+| `256^3` | 173 | 146 | 1.2x faster |
+| `512^3` | 1157 | 1831 | **1.6x slower** |
+| `4096x64x64` | 164 | 479 | **2.9x slower** |
+
+So the defect is not "one row tile": `M` up to 128 is worth splitting, and past that the budget is
+better spent on rows the kernel can already decompose, because each slab makes every thread re-read
+its share of the left operand. `COLUMN_SLAB_MAX_ROWS = 128` is that measured edge; `256^3` sits
+outside it because it gains 1.2x at best.
