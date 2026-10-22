@@ -26,7 +26,7 @@ const NANO_GEMM_THRESHOLD: usize = 16 * 16 * 16;
 /// 1.18x at best; and `512^3` and `4096x64x64` *lose* 1.58x and 2.9x. Past this row count the budget is
 /// better spent on rows the kernel can already decompose, and splitting the columns only multiplies
 /// the share of the operand every thread has to re-read.
-const COLUMN_SLAB_MAX_ROWS: usize = 128;
+const COLUMN_SLAB_MAX_ROWS: usize = 0;
 /// The narrowest column slab worth its own share of the budget.
 const COLUMN_SLAB_MIN_COLS: usize = 16;
 
