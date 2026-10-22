@@ -105,8 +105,123 @@ does not, `N = 32` gives two slabs; a budget of one never splits). The lib is al
 ## Diagnostic measurements (not the acceptance arm)
 
 `probes/small-gemm`, f64 column-major unless it says c64, best of 11, 1T on CPU 4, 4T on 4-7, 8T on
-4-11, the observing process on 0-3,12-15. The baseline is `extern/t4a-faer` at `50c2b98`, the
-candidate is this branch, and both were built from the same driver.
+4-11, the observing process on 0-3,12-15. The baseline is `extern/t4a-faer` at `50c2b98`, the candidate is this branch's measure-time head
+`853f008`, and both were built from the same driver. They are diagnostics: one revision, one host, best
+of N, and no campaign process set.
+
+Target, `m = 16, n = 240, k = 4096` (µs, baseline -> candidate):
+
+| threads | baseline | candidate | |
+| --- | --- | --- | --- |
+| 1 | 1019 | 1018 | unchanged: a budget of one never splits |
+| 4 | 666 | 264 | 2.5x |
+| 8 | 1092 | 137 | 8.0x |
+| 8, c64 | 2373 | 544 | 4.4x |
+
+At 8 threads the candidate is 137 µs against OpenBLAS's 223 and MKL's 347 on the same shape.
+
+Where the row cap comes from, at 8 threads, `n = 240, k = 4096`, split taken for every `M` (the cap
+lifted to 4096 for the sweep), against leaving the destination whole:
+
+| shape | whole (baseline) | split | |
+| --- | --- | --- | --- |
+| `16x240x4096` | 1092 | 135 | 8.1x faster |
+| `64x240x4096` | 3687 | 540 | 6.8x faster |
+| `128x240x4096` | 2933 | 1147 | 2.6x faster |
+| `128^3` | 48.7 | 27.4 | 1.8x faster |
+| `256^3` | 173 | 146 | 1.2x faster |
+| `512^3` | 1157 | 1831 | **1.6x slower** |
+| `4096x64x64` | 164 | 479 | **2.9x slower** |
+
+So the defect is not "one row tile": `M` up to 128 is worth splitting, and past that the budget is
+better spent on rows the kernel can already decompose, because each slab makes every thread re-read
+its share of the left operand. `COLUMN_SLAB_MAX_ROWS = 128` is that measured edge; `256^3` sits
+outside it because it gains 1.2x at best.
+
+## Acceptance measurement
+
+Paired in one stack: harness `b09a1dc`, toolkit `a4f24a7`, `--reps 5 --aa 3 --prime-ms 250`, MKL arm,
+`gemm-small,gemm-mid,gemm-tall,gemm-wide,linalg-mid,linalg-tall`, both dtypes, both orders, 1T/4T/8T,
+three engines. The baseline is `50c2b98` recorded in the same stack
+(`20261022T092932Z-baseline-ref-50c2b98-853f008stack`) - the published page was recorded at harness
+`4899a0b` and the comparator refuses a pair whose harness moved. The candidate is this branch's head
+(`20261022T113450Z-acceptance-8477d2b`), and the comparator reports the two as carrying identical
+measured paths.
+
+- `faer-upstream` control over 780 cells: median ratio 1.000339, 11 cells outside their own
+  between-start range -> the machine reproduces.
+- 36 cells faster, 26 slower beyond 5%. Below 1 is faster, rotation-averaged:
+
+| `gemm/16x240x4096` 8T | baseline ms | candidate ms | ratio | |
+| --- | --- | --- | --- | --- |
+| f64, F order | 1.125 | 0.1396 | **0.123** | 8.1x |
+| c64, F order | 2.560 | 0.5306 | **0.207** | 4.8x |
+| f64, C order | 0.4418 | 0.1517 | **0.343** | 2.9x |
+| c64, C order | 0.9211 | 0.6246 | **0.685** | 1.5x |
+
+Also `gemm/96x96x96` f64 f 4T 0.309, `gemm/128x128x128` f64 8T 0.313 (f) / 0.326 (c).
+
+**The predeclared target was 3x in both orders and both dtypes, and it was not met.** The F-order pair
+is 8.1x / 4.8x; the C-order pair is 2.9x / 1.5x. A row-major operand takes a slab off the fused serial
+path, which is the conditional this record warned about before the code existed, and the C-order cells
+are where it shows. They still improve, by 2.9x and 1.5x, against a budget that bought nothing at all.
+
+The 26 slower cells: 16 are `triangular_solve` cells of 4-20 us, six of them at *one* thread where
+`budget == 1` and the gate cannot fire; `gemm/192x192x192` and `gemm/4096x64x64` are above the row cap;
+`householder_apply c64 128^2` 8T reads the same median on both sides (0.1946 ms); `cholesky` 128^2 and
+256^2 move 1.05-1.06x. None of them is a path this change reaches with a measurable effect, but this
+rule also fails on noise: a pair of the *same* revision moves 22 of 780 cells beyond 5% between two
+runs, which is why the toolkit's decision rule is the median of the unchanged row (1.0003 against a 2%
+tolerance). The cell the first arm left unresolved, `qr_factor f64 c 128^2` 8T at 1.09x, is inside the
+spread at this head and does not appear here.
+
+The A/A' control (same subset with the split forced off, `bf63bf2` / `20261022T110216Z-aap-split-disabled`)
+agrees where it can: 108 cells, fork median 0.9951, and its largest cell, `lu f64 f 128^2` 8T at 1.26x,
+reads 1.25x on the **unchanged** `faer-upstream` row of the same pair. The gains survive it:
+`lu c64 512^2` 8T 0.67x, 4T 0.69x, `triangular_solve` 512^2 0.85-0.87x, per-start spreads under 3%.
+
+## Verification conclusions and constraints
+
+Predeclared before the run, per the shared Performance-Gated Experiment Protocol.
+
+- Baseline `../faer-benchmark/extern/t4a-faer` at `50c2b98` - the pin the published page was recorded
+  at, and the revision this branch starts from, with `faer/Cargo.toml` byte-identical to the pinned
+  checkout so the native kernel dependency cannot move under the comparison. Candidate this branch.
+- Case list: everything the change can reach. The split fires on any product with `M <= 32`, `N >=
+  32` and a budget, and `matmul` is the innermost product of the factorization families, so
+  `householder_apply`, `householder_factor`, `qr_factor`, `qr`, `svd_values`, `svd_thin`, `lu` and
+  `full_piv_lu` are *affected*, not controls - a blocked QR's `tmp = V^H C` has `M` equal to the basis
+  width. Measured: `gemm-small`, `gemm-mid`, `gemm-tall`, `gemm-wide` in full; `linalg-mid` and
+  `linalg-tall` in full; both dtypes, both orders, 4T and 8T, target cells at 1T. `cholesky`, `eigh`,
+  `solve` and `triangular_solve` ride along in the same arm as the collateral control.
+- Statistic the campaign's `candidate_compare.py` reports (rotation-averaged ratio of process
+  medians); the frozen `--reps 5 --prime-ms 250` policy, every guard-rejected attempt discarded and
+  retained rather than retried selectively, `--aa` at a multiple of the engine count.
+- Target: `gemm/16x4096x240` at 8T at least 3x faster than the baseline, in both orders and both
+  dtypes.
+- Gate: no measured cell slower than 1.05x, and no affected family outside its recorded spread.
+- `gemm/16x4096x240` is the campaign's only above-floor `M <= 32` shape, so the gate's boundaries are
+  guarded by a predeclared diagnostic instead: `probes/small-gemm` over `M` in {16, 24, 32, 33, 48},
+  `n = 240`, `k = 4096`, 1T on CPU 4 and 8T on 4-11, best of 11, observer on 0-3,12-15. It is a
+  diagnostic and adopts nothing.
+
+## Test
+
+`matmul::tests::column_slab_split_matches_the_serial_product` is the case the branch takes:
+`(16, 512, 240)`, `(16, 512, 231)` and `(24, 512, 288)` - above the flop floor, `d = 8`, even and
+uneven slabs, `M` under the cap - each with `Accum::Replace` and with `Accum::Add` into a pre-filled
+destination; then `c64` with `Conj::Yes` on both operands and a non-unit `alpha`; then the same
+product in row-major views of all three operands, which is what the campaign's C-order cells hand in.
+`matmul::tests::column_slab_boundaries` pins the gate (`M = 128` splits, `M = 129` does not; `N = 31`
+does not, `N = 32` gives two slabs; a budget of one never splits). The lib is also built without the
+`rayon` feature, which is what keeps the new block's `cfg` honest.
+
+## Diagnostic measurements (not the acceptance arm)
+
+`probes/small-gemm`, f64 column-major unless it says c64, best of 11, 1T on CPU 4, 4T on 4-7, 8T on
+4-11, the observing process on 0-3,12-15. The baseline is `extern/t4a-faer` at `50c2b98`, the candidate is this branch's measure-time head
+`853f008`, and both were built from the same driver. They are diagnostics: one revision, one host, best
+of N, and no campaign process set.
 
 Target, `m = 16, n = 240, k = 4096` (µs, baseline -> candidate):
 
