@@ -15,17 +15,11 @@ use pulp::Simd;
 use reborrow::*;
 const NANO_GEMM_THRESHOLD: usize = 16 * 16 * 16;
 /// The most rows a destination may have for its thread budget to be paid out by splitting its own
-/// columns instead of handing the whole panel to the kernel.
-///
-/// The native kernel hands out one microkernel tile at a time through a shared queue, and a shape
-/// whose destination is short and narrow does not give it enough tiles to cover the queue: the whole
-/// budget buys nothing, and past a few threads it makes the call slower than one thread.
-///
-/// The number is measured, not derived - this crate cannot see the kernel's tile sizes. At eight
-/// threads, `M x 240 x 4096` goes 8.0x, 6.9x and 2.5x faster at `M` = 16, 64 and 128; `256^3` gains
-/// 1.18x at best; and `512^3` and `4096x64x64` *lose* 1.58x and 2.9x. Past this row count the budget is
-/// better spent on rows the kernel can already decompose, and splitting the columns only multiplies
-/// the share of the operand every thread has to re-read.
+/// columns. A shape whose destination is short and narrow does not give the native kernel's per-tile
+/// queue enough tiles to break even, so the whole budget buys nothing and past a few threads it makes
+/// the call slower than one thread. Measured, not derived: see
+/// `docs/worklogs/2026-10-22-tall-skinny-column-slab.md` for the sweep and for where the cap's upper
+/// edge stops paying.
 const COLUMN_SLAB_MAX_ROWS: usize = 128;
 /// The narrowest column slab worth its own share of the budget.
 const COLUMN_SLAB_MIN_COLS: usize = 16;
@@ -1350,7 +1344,7 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 			.saturating_mul(*N)
 			.saturating_mul(*K)
 			.saturating_mul(if T::IS_REAL { 2 } else { 8 })
-			>= 2 * gemm::get_threading_threshold()
+			>= 2usize.saturating_mul(gemm::get_threading_threshold())
 		{
 			par.degree()
 		} else {
@@ -1491,10 +1485,10 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 				};
 			};
 		}
+		// Only the two dtypes the campaign measures. `f32` and `c32` have the same shape of kernel but
+		// no measurement behind them, so they keep the kernel's own decomposition until they have one.
 		#[cfg(feature = "rayon")]
-		if const {
-			T::IS_NATIVE_F64 || T::IS_NATIVE_C64 || T::IS_NATIVE_F32 || T::IS_NATIVE_C32
-		} {
+		if const { T::IS_NATIVE_F64 || T::IS_NATIVE_C64 } {
 			if let Some(slabs) = column_slab_count(*M, *N, budget) {
 				// This destination is too short to fill the budget with rows, so the native
 				// kernel's per-tile queue would cost more than the tiles it hands out: split

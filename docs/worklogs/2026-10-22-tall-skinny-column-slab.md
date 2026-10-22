@@ -26,7 +26,8 @@ is the parallel decomposition, not the kernel.
 **The change.** In `matmul_imp`, before the native kernel call: when the caller asked for more than
 one thread and the destination is that class of shape, split its columns into `d` slabs, run
 `matmul_imp` on each with `Par::Seq` — so each slab takes the fused serial path — and return.
-`d = min(budget, N / 16)`, taken only when `d >= 2`.
+`d = min(budget, N / 16)`, taken only when `d >= 2`. This paragraph and the two below describe the
+plan; the gate and the cap as measured differ, and the measurement is what the code carries.
 
 The split uses the primitive the rank-update path already uses,
 `spindle::for_each(d, dst.par_col_partition_mut(d).zip(rhs.par_col_partition(d)), ..)`, so it is one
@@ -39,23 +40,21 @@ only exists with that feature.
 
 A budget of one is necessary but not sufficient for the fused kernel: it also wants `!rowmajor &&
 m < l2 && n < l2` after its own normalisation, and `faer` cannot see `l2`. A slab that misses those
-preconditions falls to the kernel's *serial* chunked path - still a serial slab, so the change
-degrades to the one-thread time rather than to the threaded queue. The measured class (16 rows,
+preconditions falls to the kernel's *serial* chunked path. That is the expected shape of it and it is
+what the C-order cells below cost, but it is not a bound: duplicated packing and the cache traffic of
+`d` threads reading the same operand can make the split worse than either path, which is why the cap
+exists rather than a promise. The measured class (16 rows,
 30-column slabs, column-major) meets them; the row-major cells of the same shape are the ones where
 this is an assumption rather than a reading, and they stay in the target list so the measurement
 tests it.
 
-**The gate.** `budget > 1 && M <= 32 && d >= 2`, where `budget` is the number of threads the native
-kernel is already handed - the same expression the call below uses today, hoisted into one `let` so
-the split and the kernel cannot disagree, and so the existing flop floor still decides whether a
-budget exists at all.
-
-`32` and `16` are empirical, and the record says so: the kernel's row tile is `mr = 24` for AVX-512
-`f64` and `12` for AVX2, so 32 rows is one or two row tiles on this host, and `faer` cannot read
-`mr`. 16 columns per slab is the narrowest slab that is worth opening the region for. The declared
-grid has a single above-floor shape with `M <= 32` in each order and dtype (`16x4096x240`), so the
-boundary cannot be guarded by a declared cell; a diagnostic sweep over `M` in {16, 24, 32, 33, 48}
-is predeclared for it and its result decides whether the cap moves.
+**The gate.** `budget > 1 && M <= 128 && d >= 2`, where `budget` is the number of threads the native
+kernel is already handed - the expression the call below already used, hoisted into one `let` so the
+split and the kernel cannot disagree, and so the existing flop floor still decides whether a budget
+exists at all. Only `f64` and `c64` take it: `f32`/`c32` reach the same kernel but have no measurement
+behind them. Both bounds are empirical and the sweep below is what sets them; `faer` cannot read the
+kernel's tile sizes, so nothing here is derived from them. It is not a claim about the whole grid:
+the `M <= 128` region is sampled, not swept.
 
 **Rejected.**
 
@@ -94,11 +93,12 @@ Predeclared before the run, per the shared Performance-Gated Experiment Protocol
 
 ## Test
 
-`matmul::tests::thread_budget_does_not_change_the_product` gains cases the branch actually takes:
-`(16, 512, 240)` - above the flop floor, `d = 8`, even slabs; `(16, 512, 231)` - uneven slabs;
-`(24, 512, 288)` - `M` just under the cap; a `(16, 512, 240)` call with `Accum::Add` into a
-pre-filled destination; the same in `c64` with `Conj::Yes`; and one with a reversed destination. A
-unit test on `column_slab_count` pins the boundaries (`M = 32` splits, `M = 33` does not; `N = 31`
+`matmul::tests::column_slab_split_matches_the_serial_product` is the case the branch takes:
+`(16, 512, 240)`, `(16, 512, 231)` and `(24, 512, 288)` - above the flop floor, `d = 8`, even and
+uneven slabs, `M` under the cap - each with `Accum::Replace` and with `Accum::Add` into a pre-filled
+destination; then `c64` with `Conj::Yes` on both operands and a non-unit `alpha`; then the same
+product in row-major views of all three operands, which is what the campaign's C-order cells hand in.
+`matmul::tests::column_slab_boundaries` pins the gate (`M = 128` splits, `M = 129` does not; `N = 31`
 does not, `N = 32` gives two slabs; a budget of one never splits). The lib is also built without the
 `rayon` feature, which is what keeps the new block's `cfg` honest.
 
@@ -154,10 +154,14 @@ different one.
 - Rotation-averaged fork ratios, below 1 is faster:
   `gemm/16x240x4096` f64 f 8T **0.124**, c64 f 8T **0.206**; `gemm/96x96x96` f64 f 4T 0.310;
   `gemm/128x128x128` f64 8T 0.313 (f) / 0.327 (c).
-- 41 cells faster, 32 slower beyond 5%. **No slower cell is attributable to this change.** Five of
-  them are `triangular_solve` at *one* thread, where `budget == 1` and `column_slab_count` returns
-  `None` by construction; `gemm/192x192x192`, `gemm/256x256x256` and `gemm/4096x64x64` are above the
-  row cap and take the unchanged path. The rest are 4-20 us cells.
+- 41 cells faster, 32 slower beyond 5%. Most of the slower ones cannot be this code: five are
+  `triangular_solve` at *one* thread, where `budget == 1` and `column_slab_count` returns `None` by
+  construction; `gemm/192x192x192`, `gemm/256x256x256` and `gemm/4096x64x64` are above the row cap;
+  `lu c64 f 1024x64` moved at 1T as well (0.871 -> 0.918 ms), where the gate cannot fire. One cell is
+  not accounted for: **`qr_factor f64 c 128^2` at 8T, 0.346 -> 0.374 ms (1.09x)**, where a 64x64 or
+  128-column trailing product above the flop floor does take the new path. It is inside the same-revision
+  A/A spread of that cell (1.02x) only by a margin, so it is recorded as an unresolved regression,
+  not as an explained one.
 - That rule is nonetheless not a valid gate, and the record should not pretend otherwise: a pair of
   the *same* revision moves 22 of 780 cells beyond 5% between runs (measured here), and the toolkit's
   own `control_check` says so. The protocol's decision rule is the median of the unchanged row, which
