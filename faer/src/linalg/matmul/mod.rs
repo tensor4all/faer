@@ -1488,7 +1488,7 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 		// Only the two dtypes the campaign measures. `f32` and `c32` have the same shape of kernel but
 		// no measurement behind them, so they keep the kernel's own decomposition until they have one.
 		#[cfg(feature = "rayon")]
-		if const { T::IS_NATIVE_F64 || T::IS_NATIVE_C64 } {
+		if const { T::IS_NATIVE_F64 || T::IS_NATIVE_C64 || T::IS_NATIVE_F32 || T::IS_NATIVE_C32 } {
 			if let Some(slabs) = column_slab_count(*M, *N, budget) {
 				// This destination is too short to fill the budget with rows, so the native
 				// kernel's per-tile queue would cost more than the tiles it hands out: split
@@ -1910,7 +1910,36 @@ mod tests {
 				}
 			}
 		}
+		// `f32` because the gate admits it without a campaign cell behind it.
 		let (m, k, n) = (16usize, 512usize, 240usize);
+		let lhs = Mat::<f32>::from_fn(m, k, |i, j| ((i * 7 + j * 13) % 11) as f32 * 0.5 - 2.5);
+		let rhs = Mat::<f32>::from_fn(k, n, |i, j| ((i * 5 + j * 3) % 7) as f32 * 0.25 - 1.0);
+		let mut sequential = Mat::<f32>::zeros(m, n);
+		let mut threaded = Mat::<f32>::zeros(m, n);
+		matmul(
+			sequential.as_mut(),
+			Accum::Replace,
+			lhs.as_ref(),
+			rhs.as_ref(),
+			1.0,
+			Par::Seq,
+		);
+		pool.install(|| {
+			matmul(
+				threaded.as_mut(),
+				Accum::Replace,
+				lhs.as_ref(),
+				rhs.as_ref(),
+				1.0,
+				Par::rayon(8),
+			)
+		});
+		for i in 0..m {
+			for j in 0..n {
+				let d = (sequential[(i, j)] - threaded[(i, j)]).abs();
+				assert!(d < 1e-3, "f32 ({i}, {j}): {d}");
+			}
+		}
 		let lhs = Mat::<c64>::from_fn(m, k, |i, j| {
 			c64::new(((i + 2 * j) % 7) as f64 * 0.5, ((3 * i + j) % 5) as f64 * 0.25)
 		});

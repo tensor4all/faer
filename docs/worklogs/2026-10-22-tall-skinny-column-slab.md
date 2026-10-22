@@ -174,3 +174,31 @@ Limits that stay open:
   cap is calibrated to it.
 - `256^3` was inside the cap in the diagnostic sweep and gained only 1.18x; the declared arm reads it
   at 1.00-1.02 either way, so the cap's exact upper edge is not settled to better than one shape.
+
+## `f32` and `c32`, which the campaign cannot measure
+
+`fbench`'s `Dtype` has two variants and every adapter is typed `ComplexField<Real = f64>`, so the
+campaign has no `f32`/`c32` cell and cannot get one without extending the harness. A standalone driver
+(`probes/dtype-gemm`, system OpenBLAS `?gemm` linked for the vendor side, one arm per process because
+the vendor's workers spin and are otherwise measured as contention) answers both questions, on the
+same host and pin discipline: best of 11, 1T on CPU 4, 4T on 4-7, 8T on 4-11, observer on 0-3,12-15.
+
+**No side effect where the floor says there is none.** `32^3` is 131 ki flops, far below the floor, so
+no budget is handed over and `column_slab_count` returns `None` before it looks at the shape. Measured
+on both revisions, all four dtypes, three thread counts (us): `f64` 2.29 / 2.30 / 2.29 against the same
+three on `50c2b98`; `c64` 8.87 / 8.76 / 8.76 against 8.74 / 8.78 / 8.73; `f32` 1.21 / 1.21 / 1.20
+against 1.21 / 1.21 / 1.21; `c32` 4.45 / 4.48 / 4.46 against 4.44 / 4.45 / 4.44. `64^3` (524 ki flops)
+is in the same band, `f64` and `f32` unchanged at 16.95 and 8.57.
+
+**The split pays for them too**, at 8T, split off -> on: `f32` `16x240x4096` 550 -> **80.3** us,
+`128^3` 38.9 -> **16.1**, `96^3` 18.9 -> **13.8**; `c32` `16x240x4096` 1175 -> **263**, `96^3` 48.3 ->
+**29.0**, `64^3` 28.9 -> **22.5**. `32^3` stays at 1.21 / 4.45.
+
+Against the system OpenBLAS on the same shapes, 8T (a different build from the campaign's static arm,
+so a reference and not an arm): the target shape was `f32` 515 us against 109 (4.7x behind) and `c32`
+1175 against 341 (3.5x behind) with the gate excluding them; with them admitted it is **80 against
+109** and **263 against 341**, so 1.35x and 1.29x ahead. `96^3` `f32` is 13.8 against 28.3.
+
+So the gate admits `f32`/`c32` too. The evidence for those two dtypes is this diagnostic, not a
+campaign cell: it is not a paired arm, and the harness would have to grow a dtype axis before one
+could exist.
