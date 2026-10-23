@@ -285,7 +285,10 @@ fn compute_bidiag_real_svd<T: RealField>(
 			return Err(SvdError::NoConvergence);
 		}
 	}
-	if u.is_none() && v.is_none() {
+	// TEMP: the split-off control. The kernel stays compiled and is never called, so the binary's
+	// layout moves with the change while the algorithm does not.
+	const DQDS_ENABLED: bool = false;
+	if DQDS_ENABLED && u.is_none() && v.is_none() {
 		// Values only: dqds applies no rotations, so a sweep costs one division and one
 		// multiplication per entry instead of a rotation's hypot and its two-sided update, and it
 		// is what LAPACK's values-only route uses at every size (`DBDSDC(compq='N')` ->
