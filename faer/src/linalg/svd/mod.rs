@@ -16,6 +16,7 @@ use linalg::qr::no_pivoting::factor::QrParams;
 /// bidiagonalization
 pub mod bidiag;
 pub(crate) mod bidiag_svd;
+pub(crate) mod dqds;
 /// whether the singular vectors should be computed
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ComputeSvdVectors {
@@ -57,6 +58,21 @@ impl<T: ComplexField> Auto<T> for SvdParams {
 		}
 	}
 }
+/// rows to allocate for an `m`-row work copy of the input.
+///
+/// a column stride that is a multiple of 1 KiB maps the entries of one row onto a few L1 sets (a 512-row
+/// `f64` copy has a 4 KiB stride and every entry of a row lands in the same set), and the
+/// bidiagonalisation reads and writes rows at every step. 64 more bytes per column spread a row over
+/// the sets; measured on the bidiagonalisation alone at eight threads: 512 18.6 -> 15.3 ms, 256
+/// 5.3 -> 4.8 ms, with 500 and 520 at 14.6 and 15.8.
+fn work_rows<T>(m: usize) -> usize {
+	let size = core::mem::size_of::<T>();
+	if size > 0 && (m * size) % 1024 == 0 {
+		m + 64usize.div_ceil(size)
+	} else {
+		m
+	}
+}
 fn svd_imp_scratch<T: ComplexField>(
 	m: usize,
 	n: usize,
@@ -75,7 +91,7 @@ fn svd_imp_scratch<T: ComplexField>(
 	assert!(m >= n);
 	let householder_block_size =
 		linalg::qr::no_pivoting::factor::recommended_block_size::<T>(m, n);
-	let bid = temp_mat_scratch::<T>(m, n);
+	let bid = temp_mat_scratch::<T>(work_rows::<T>(m), n);
 	let householder_left = temp_mat_scratch::<T>(householder_block_size, n);
 	let householder_right = temp_mat_scratch::<T>(householder_block_size, n);
 	let compute_bidiag =
@@ -308,6 +324,19 @@ fn compute_bidiag_real_svd<T: RealField>(
 			return Err(SvdError::NoConvergence);
 		}
 	}
+	if u.is_none() && v.is_none() {
+		// Values only: dqds applies no rotations, so a sweep costs one division and one
+		// multiplication per entry instead of a rotation's hypot and its two-sided update, and it
+		// is what LAPACK's values-only route uses at every size (`DBDSDC(compq='N')` ->
+		// `DLASDQ` -> `DBDSQR`'s `ROTATE`-false branch -> `DLASQ1`). It is serial, and still
+		// cheaper than the threaded divide-and-conquer at every size and budget measured
+		// (`docs/worklogs/2026-10-23-dqds-shift.md`: 6.6 ms against 13.3 ms at n = 512 on eight
+		// threads, 25 against 43 at 1024). A rank-deficient bidiagonal keeps the rotation path
+		// below, because the qd transform divides by the factors.
+		if !diag.rb().iter().any(|x| *x == zero()) {
+			return dqds::singular_values(diag.as_slice_mut(), subdiag.as_slice_mut());
+		}
+	}
 	if n < params.recursion_threshold {
 		if let Some(mut u) = u.rb_mut() {
 			u.fill(zero());
@@ -515,8 +544,9 @@ fn svd_imp<T: ComplexField>(
 	let m = matrix.nrows();
 	let n = matrix.ncols();
 	let bs = linalg::qr::no_pivoting::factor::recommended_block_size::<T>(m, n);
-	let (mut bid, stack) = unsafe { temp_mat_uninit::<T, _, _>(m, n, stack) };
-	let mut bid = bid.as_mat_mut();
+	let (mut bid_store, stack) =
+		unsafe { temp_mat_uninit::<T, _, _>(work_rows::<T>(m), n, stack) };
+	let mut bid = bid_store.as_mat_mut().subrows_mut(0, m);
 	let (mut Hl, stack) = unsafe { temp_mat_uninit::<T, _, _>(bs, n, stack) };
 	let (mut Hr, stack) =
 		unsafe { temp_mat_uninit::<T, _, _>(bs, n - 1, stack) };
