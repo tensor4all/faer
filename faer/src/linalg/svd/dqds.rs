@@ -41,6 +41,7 @@
 
 use crate::internal_prelude::*;
 use crate::linalg::svd::SvdError;
+use alloc::vec;
 
 
 /// How many sweeps one entry may take before the block gives up.
