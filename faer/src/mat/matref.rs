@@ -1174,7 +1174,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	/// if the number of columns is a multiple of `chunk_size`, then all chunks
 	/// have `chunk_size` columns
 	///
-	/// only available with the `rayon` feature
+	/// available in every build
 	#[inline]
 	#[track_caller]
 	#[cfg(feature = "rayon")]
@@ -1203,7 +1203,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	/// returns a parallel iterator that provides exactly `count` successive
 	/// chunks of the columns of this matrix
 	///
-	/// only available with the `rayon` feature
+	/// available in every build
 	#[inline]
 	#[track_caller]
 	#[cfg(feature = "rayon")]
@@ -1238,7 +1238,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	/// if the number of rows is a multiple of `chunk_size`, then all chunks
 	/// have `chunk_size` rows
 	///
-	/// only available with the `rayon` feature
+	/// available in every build
 	#[inline]
 	#[track_caller]
 	#[cfg(feature = "rayon")]
@@ -1263,7 +1263,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	/// returns a parallel iterator that provides exactly `count` successive
 	/// chunks of the rows of this matrix
 	///
-	/// only available with the `rayon` feature
+	/// available in every build
 	#[inline]
 	#[track_caller]
 	#[cfg(feature = "rayon")]

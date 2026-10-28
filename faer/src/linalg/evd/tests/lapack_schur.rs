@@ -209,6 +209,7 @@ fn schur_case(
 		}
 	}
 }
+#[cfg(feature = "rayon")]
 #[test]
 fn lapack_schur_checkers() {
 	let t = Mat::from_fn(2, 2, |i, j| {
@@ -252,7 +253,6 @@ fn lapack_schur_cases() {
 	}
 	run.finish(10 * 9 * 4 * 4);
 }
-#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_schur_parallel() {
@@ -260,13 +260,9 @@ fn lapack_schur_parallel() {
 	let h = hessenberg_input(257, 8);
 	schur_case(&mut run, h.as_ref(), 8, 0, Par::Seq);
 	for threads in [2, 4] {
-		rayon::ThreadPoolBuilder::new()
-			.num_threads(threads)
-			.build()
-			.unwrap()
-			.install(|| {
-				schur_case(&mut run, h.as_ref(), 8, 0, Par::rayon(threads))
-			});
+		crate::team::with_team(threads, |par| {
+			schur_case(&mut run, h.as_ref(), 8, 0, par)
+		});
 	}
 	run.finish(12);
 }

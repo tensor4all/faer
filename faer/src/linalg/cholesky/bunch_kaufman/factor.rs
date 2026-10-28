@@ -150,7 +150,7 @@ fn rank_1_update_and_argmax<T: ComplexField>(
 			IdxInc::ZERO,
 			N.end(),
 		),
-		#[cfg(feature = "rayon")]
+	#[cfg(feature = "rayon")]
 		_ => {
 		let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 			use rayon::prelude::*;
@@ -218,7 +218,7 @@ fn rank_2_update_and_argmax<'N, T: ComplexField>(
 			IdxInc::ZERO,
 			N.end(),
 		),
-		#[cfg(feature = "rayon")]
+	#[cfg(feature = "rayon")]
 		_ => {
 		let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 			use rayon::prelude::*;
@@ -774,7 +774,7 @@ fn lblt_blocked<T: ComplexField>(
 						}
 					}
 				},
-				#[cfg(feature = "rayon")]
+	#[cfg(feature = "rayon")]
 				_ => {
 				let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 					let nthreads = nthreads.get();

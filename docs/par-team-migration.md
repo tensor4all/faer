@@ -215,3 +215,29 @@ a region runs in parallel when `estimate >= PAYS * sections * dispatch_cost(widt
   `--features threadteam`, each with `--all-targets`.
 * x86_64: a `Team` never hands its size to an outside runtime; the kernel forks on the team itself (`utils::team::kernel`); tests in `utils::team::tests` (records: `docs/worklogs/2026-10-26-team-authority-x86.md`, `docs/worklogs/2026-10-26-team-gemm-executor.md`).
 * x86_64, `exp/team-gemm-executor`: a `Team` runs the `private_gemm_x86` kernel itself. The kernel forks its packing and its job queue through a `Fork` executor (`private_gemm_x86::gemm_with`), which `utils::team::kernel` implements over the team (`TeamExec::run` on a sub-team of the gate's width). Plain GEMM, `spicy_matmul` and the triangular product use it, gated by `pays(estimate, 2 sections, width)`; `thread::outside_threads` is removed because no team size reaches an outside runtime any more (record: `docs/worklogs/2026-10-26-team-gemm-executor.md`).
+
+## After #85: the team is the only route
+
+tensor4all/faer#85 removed the second parallel route. The sections above describe the design as it
+was when it landed, including the `Rayon` variant and its `cfg` fallback; what stands now is:
+
+```rust
+pub enum Par<'team> { Seq, Team(threadteam::TeamExec<'team>) }
+pub enum ParShape { Seq, Team(NonZeroUsize, DispatchCosts) }
+```
+
+- `Par::rayon`, `ParShape::rayon`, `Par::__Lifetime` and `par_for_each` are gone, and so are the
+  Rayon cost model (`rayon_cost`, `min_rayon_cost`, `in_pool_cost_of`, `outside_cost_of`,
+  `caller_in_pool`) and the spindle route: `ParShape::dispatch_cost` reads the costs of the team
+  a token came from, and `utils::cost` keeps only the serial `Rates` table and the rule.
+- A caller that owns no team but has a thread budget uses `team::with_team(width, |par| ..)`, which
+  owns a pool for the closure (a width of one hands out `Par::Seq`). This is also the answer #59
+  was waiting for: the caller of `with_team` holds the group.
+- The route is the `threadteam` feature, on by default: it compiles `Par::Team`, `team::with_team`
+  and the team module, and pulls `rayon` (the substrate the team iterates through). With it off
+  there is no `Par::Team` and no team module, while `rayon` alone keeps the `gemm` dependency's
+  Rayon arm and the public `par_*` iterators. A build with neither - what a no_std build is - has
+  `Par::Seq` only.
+- `faer-ffi` is excluded from this workspace and still returns `Par` by value from the C API; a C
+  caller cannot own a scoped team, so that crate needs its own execution-ownership redesign and
+  is not built here.

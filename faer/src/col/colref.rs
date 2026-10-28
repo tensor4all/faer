@@ -403,7 +403,7 @@ impl<'a, T, Rows: Shape, RStride: Stride> ColRef<'a, T, Rows, RStride> {
 	/// returns a parallel iterator that provides exactly `count` successive
 	/// chunks of the elements of this column
 	///
-	/// only available with the `rayon` feature
+	/// available in every build
 	#[inline]
 	#[track_caller]
 	#[cfg(feature = "rayon")]

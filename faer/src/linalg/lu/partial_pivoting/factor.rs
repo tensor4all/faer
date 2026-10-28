@@ -206,6 +206,7 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 		} else {
 			Par::Seq
 		};
+	#[cfg(feature = "rayon")]
 		{
 			linalg::triangular_solve::solve_unit_lower_triangular_in_place(
 				A00.rb(),
@@ -264,7 +265,7 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 			swap(A_left);
 			swap(A_right);
 		},
-		#[cfg(feature = "rayon")]
+	#[cfg(feature = "rayon")]
 		_ => {
 		let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 			let nthreads = nthreads.get();
@@ -461,8 +462,9 @@ mod tests {
 	use crate::stats::prelude::*;
 	use crate::utils::approx::*;
 	use crate::{Mat, assert, c32, c64};
-	use crate::utils::cost::{HostClass, Rates, outside_cost_of, pays_at, rate, serial_time};
+	use crate::utils::cost::{pays_at, rate, serial_time};
 	use dyn_stack::MemBuffer;
+	#[cfg(feature = "rayon")]
 	#[test]
 	fn region_rules_follow_the_serial_time() {
 		use core::num::NonZeroUsize;
@@ -470,9 +472,8 @@ mod tests {
 		// sequential never pays, whatever the size
 		assert!(!trailing_update_pays::<f64>(seq, ParThreshold::Derived, 4096, 4096, 256));
 		assert!(!swap_stage_pays::<f64>(seq, ParThreshold::Derived, 4096, 256, 4096, false));
-		#[cfg(feature = "rayon")]
 		{
-			let par = ParShape::Rayon(NonZeroUsize::new(6).unwrap());
+			let par = ParShape::team(6);
 			// tiny regions stay serial, huge ones go parallel
 			assert!(!trailing_update_pays::<f64>(par, ParThreshold::Derived, 16, 16, 8));
 			assert!(trailing_update_pays::<f64>(par, ParThreshold::Derived, 2048, 2048, 128));
@@ -483,20 +484,10 @@ mod tests {
 			// dtypes; the same region counted as the two sided split (four sections) is what kept
 			// it serial. The verdict itself depends on the class, so the test states the rule.
 			for w in [4, 8] {
-				let par = ParShape::Rayon(NonZeroUsize::new(w).unwrap());
+				let par = ParShape::team(w);
 				let rule = |ns: f64| pays_at(serial_time(64 * 960, ns), SWAP_ONE_SIDE_SECTIONS, par.dispatch_cost(NonZeroUsize::new(w).unwrap()));
 				assert_eq!(swap_stage_pays::<f64>(par, ParThreshold::Derived, 64, 64, 960, true), rule(rate::lu_swap().of::<f64>()), "f64 {w}");
 				assert_eq!(swap_stage_pays::<c64>(par, ParThreshold::Derived, 64, 64, 960, true), rule(rate::lu_swap().of::<c64>()), "c64 {w}");
-			}
-			// on the measured Zen 5 row (avx512) it pays: 60 us (`f64`) and 80 us (`c64`) serial
-			// against 6 us of dispatch (the Rayon cost from outside the pool of that class)
-			for w in [4, 8] {
-				let class = HostClass::X86_64Avx512;
-				let rt = Rates::for_class(class);
-				let cost = outside_cost_of(class, NonZeroUsize::new(w).unwrap());
-				assert!(pays_at(serial_time(64 * 960, rt.lu_swap.of::<f64>()), SWAP_ONE_SIDE_SECTIONS, cost), "f64 {w}");
-				assert!(pays_at(serial_time(64 * 960, rt.lu_swap.of::<c64>()), SWAP_ONE_SIDE_SECTIONS, cost), "c64 {w}");
-				assert!(!pays_at(serial_time(64 * 960, rt.lu_swap.of::<f64>()), SWAP_STAGE_SECTIONS, cost), "two sided {w}");
 			}
 			// a complex trailing update reaches the floor at fewer elements than a real one
 			let (r, c) = (160, 160);
@@ -512,7 +503,7 @@ mod tests {
 
 	/// The wide shape of the merge gate (`64 x 1024`): every column of the swap stage is on one
 	/// side (one section), and the right block goes through the flat split of the triangular
-	/// solve, both inside a held spindle group (a worker of the pool) and from outside it.
+	/// solve, at the widths the caller reserves.
 	#[cfg(feature = "rayon")]
 	#[test]
 	fn wide_matrix_parallel_agrees_with_serial() {
@@ -531,20 +522,16 @@ mod tests {
 			};
 			let (want, perm_want) = run(Par::Seq);
 			for threads in [4, 8] {
-				for held in [false, true] {
-					let (got, perm_got) = if held {
-						spindle::with_lock(threads, || run(Par::rayon(threads)))
-					} else {
-						run(Par::rayon(threads))
-					};
-					assert_eq!(perm_want, perm_got, "{m}x{n} {threads} threads, held {held}");
+				{
+					let (got, perm_got) = crate::team::with_team(threads, run);
+					assert_eq!(perm_want, perm_got, "{m}x{n} {threads} threads");
 					let mut d: f64 = 0.0;
 					for j in 0..n {
 						for i in 0..m {
 							d = d.max((want[(i, j)].clone() - got[(i, j)].clone()).abs());
 						}
 					}
-					assert!(d < 1e-9, "{m}x{n} {threads} threads, held {held}: {d}");
+					assert!(d < 1e-9, "{m}x{n} {threads} threads: {d}");
 				}
 			}
 		}
@@ -553,7 +540,6 @@ mod tests {
 		check::<f64>(48, 700);
 	}
 
-	#[cfg(feature = "rayon")]
 	#[test]
 	fn derived_gates_keep_the_factorization() {
 		let rng = &mut StdRng::seed_from_u64(7);
@@ -572,7 +558,9 @@ mod tests {
 			let mut perm_bi = vec![0usize; n];
 			let mut mem = MemBuffer::new(lu_in_place_scratch::<usize, f64>(n, n, Par::Seq.shape(), default()));
 			lu_in_place(want.as_mut(), &mut perm_a, &mut perm_ai, Par::Seq, MemStack::new(&mut mem), default());
-			lu_in_place(got.as_mut(), &mut perm_b, &mut perm_bi, Par::rayon(4), MemStack::new(&mut mem), default());
+			crate::team::with_team(4, |par| {
+				lu_in_place(got.as_mut(), &mut perm_b, &mut perm_bi, par, MemStack::new(&mut mem), default())
+			});
 			assert_eq!(perm_a, perm_b, "n = {n}");
 			let mut d: f64 = 0.0;
 			for j in 0..n {
@@ -720,10 +708,6 @@ mod tests {
 	#[test]
 	fn threaded_lu_matches_the_sequential_one() {
 		let rng = &mut StdRng::seed_from_u64(0);
-		let pool = rayon::ThreadPoolBuilder::new()
-			.num_threads(4)
-			.build()
-			.unwrap();
 		let approx_eq = CwiseMat(ApproxEq {
 			abs_tol: 1e-12,
 			rel_tol: 1e-12,
@@ -737,7 +721,7 @@ mod tests {
 			.rand::<Mat<f64>>(rng);
 			let (seq, perm_seq, trans_seq) = factor_lu(&A, Par::Seq);
 			let (par, perm_par, trans_par) =
-				pool.install(|| factor_lu(&A, Par::rayon(4)));
+				crate::team::with_team(4, |par| factor_lu(&A, par));
 			assert!(seq.as_ref() ~ par.as_ref());
 			assert!(perm_seq == perm_par);
 			assert!(trans_seq == trans_par);
@@ -758,7 +742,7 @@ mod tests {
 			let A = Mat::<c64>::from_fn(n, n, |i, j| c64::new(real[(i, j)], imag[(i, j)]));
 			let (seq, perm_seq, trans_seq) = factor_lu_c64(&A, Par::Seq);
 			let (par, perm_par, trans_par) =
-				pool.install(|| factor_lu_c64(&A, Par::rayon(4)));
+				crate::team::with_team(4, |par| factor_lu_c64(&A, par));
 			for j in 0..n {
 				for i in 0..n {
 					let diff = (seq[(i, j)] - par[(i, j)]).abs();
@@ -829,7 +813,7 @@ mod tests {
 			rel_tol: tol,
 		});
 		let n = a.nrows();
-		for mut par in [Par::Seq, Par::rayon(8)] {
+		let run = |mut par: Par| {
 			let par_shape = par.shape();
 			let mut LU = a.cloned();
 			let perm = &mut *vec![0usize; n];
@@ -874,6 +858,8 @@ mod tests {
 						<= eps::<T::Real>() * from_f64::<T::Real>(4.0)
 				);
 			}
-		}
+		};
+		run(Par::Seq);
+		crate::team::with_team(8, run);
 	}
 }

@@ -293,7 +293,7 @@ mod matmul_vertical {
 							job(row, col_inner);
 						}
 					},
-					#[cfg(feature = "rayon")]
+	#[cfg(feature = "rayon")]
 					_ => {
 					let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 						let nthreads = nthreads.get();
@@ -566,7 +566,7 @@ mod matmul_horizontal {
 							job(row, col_inner);
 						}
 					},
-					#[cfg(feature = "rayon")]
+	#[cfg(feature = "rayon")]
 					_ => {
 					let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 						let nthreads = nthreads.get();
@@ -854,7 +854,7 @@ mod matvec_rowmajor {
 					T
 				);
 			},
-			#[cfg(feature = "rayon")]
+	#[cfg(feature = "rayon")]
 			_ => {
 			let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 				let nthreads = nthreads.get();
@@ -997,7 +997,7 @@ mod matvec_colmajor {
 					T
 				)
 			},
-			#[cfg(feature = "rayon")]
+	#[cfg(feature = "rayon")]
 			_ => {
 			let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 				use rayon::prelude::*;
@@ -1173,7 +1173,7 @@ mod rank_update {
 			Par::Seq => {
 				rank_update_imp(dst, beta, lhs, conj_lhs, rhs, conj_rhs, alpha);
 			},
-			#[cfg(feature = "rayon")]
+	#[cfg(feature = "rayon")]
 			_ => {
 			let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 				let nthreads = nthreads.get();
@@ -1379,10 +1379,10 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 						);
 						return;
 					} else {
-						#[cfg(feature = "threadteam")]
 						let par = match par {
+							#[cfg(feature = "threadteam")]
 							Par::Team(team) => {
-							// the team path replaces the Rayon calls of both kernels below. On
+							// the team path runs both kernels below on the team. On
 							// x86_64 the `private_gemm_x86` kernel runs on the team's own members
 							// (its packing and job queue, gated by `pays(.., 2 sections)`); elsewhere
 							// one sequential gemm per member on its own tile of the output
@@ -1481,6 +1481,9 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 									} else {
 										1
 									},
+									// a team is the only parallel route: the `gemm` crate's own
+									// parallelism is never handed a thread (the team runs the
+									// kernel on its members instead, or the kernel stays serial)
 								);
 								return;
 							}
@@ -1510,30 +1513,7 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 								false,
 								conj_lhs == Conj::Yes,
 								conj_rhs == Conj::Yes,
-								match par {
-									Par::Seq => gemm::Parallelism::None,
-									// the `gemm` crate keeps its own, lower, floor under this
-									// one: the decision is the serial time against the cost
-									// of a section of this shape
-									#[cfg(feature = "rayon")]
-									Par::Rayon(nthreads) => {
-										if par.shape().pays_full(
-											$crate::utils::cost::serial_time(
-												M.unbound()
-													.saturating_mul(N.unbound())
-													.saturating_mul(K.unbound()),
-												$crate::utils::cost::gemm_ns_per_mac::<T>(),
-											),
-											1,
-										) {
-											gemm::Parallelism::Rayon(nthreads.get())
-										} else {
-											gemm::Parallelism::None
-										}
-									},
-									#[cfg(feature = "threadteam")]
-									Par::Team(_) => gemm::Parallelism::None,
-								},
+								gemm::Parallelism::None,
 							);
 							return;
 						}
@@ -1611,7 +1591,7 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 				}
 			}
 		},
-		#[cfg(feature = "rayon")]
+	#[cfg(feature = "rayon")]
 		_ => {
 		let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 			use rayon::prelude::*;
@@ -1851,10 +1831,6 @@ mod tests {
 	/// same product, at the sizes on each side of the floor.
 	#[test]
 	fn thread_budget_does_not_change_the_product() {
-		let pool = rayon::ThreadPoolBuilder::new()
-			.num_threads(8)
-			.build()
-			.unwrap();
 		for (m, k, n) in [(32, 32, 32), (64, 64, 64), (17, 23, 31), (128, 128, 128)]
 		{
 			let lhs = Mat::<f64>::from_fn(m, k, |i, j| {
@@ -1873,14 +1849,14 @@ mod tests {
 				Par::Seq,
 			);
 			let mut threaded = Mat::<f64>::zeros(m, n);
-			pool.install(|| {
+			crate::team::with_team(8, |par| {
 				matmul(
 					threaded.as_mut(),
 					Accum::Replace,
 					lhs.as_ref(),
 					rhs.as_ref(),
 					1.0,
-					Par::rayon(8),
+					par,
 				)
 			});
 			for i in 0..m {
@@ -1898,13 +1874,16 @@ mod tests {
 		if option_env!("CI") == Some("true") {
 			return;
 		}
+		/// the sequential arm, then the parallel one on a team of four
+		fn for_each_par(mut f: impl FnMut(Par<'_>)) {
+			f(Par::Seq);
+			crate::team::with_team(4, |par| f(par));
+		}
 		let betas = [Accum::Replace, Accum::Add];
 		#[cfg(not(miri))]
 		let bools = [false, true];
 		#[cfg(not(miri))]
 		let alphas = [c32::ONE, c32::ZERO, c32::new(21.04, -12.13)];
-		#[cfg(not(miri))]
-		let par = || [Par::Seq, Par::Rayon(NonZeroUsize::new(4).unwrap())];
 		#[cfg(not(miri))]
 		let conjs = [Conj::Yes, Conj::No];
 		#[cfg(miri)]
@@ -2006,7 +1985,7 @@ mod tests {
 												}
 												for conj_a in conjs {
 													for conj_b in conjs {
-														for mut par in par() {
+														for_each_par(|mut par| {
 															for beta in betas {
 																for alpha in
 																	alphas
@@ -2028,7 +2007,7 @@ mod tests {
 																	);
 																}
 															}
-														}
+																										});
 													}
 												}
 											}
@@ -2252,7 +2231,7 @@ mod tests {
 		let dst_orig = dst.as_ref().to_owned();
 		let lhs = generate_structured_matrix(false, m, k, lhs_structure);
 		let rhs = generate_structured_matrix(false, k, n, rhs_structure);
-		for mut par in [Par::Seq, Par::rayon(8)] {
+		let mut run = |mut par: Par| {
 			triangular::matmul_with_conj(
 				dst.as_mut(),
 				dst_structure,
@@ -2347,7 +2326,9 @@ mod tests {
 					}
 				}
 			}
-		}
+		};
+		run(Par::Seq);
+		crate::team::with_team(8, run);
 	}
 	#[test]
 	fn test_triangular() {

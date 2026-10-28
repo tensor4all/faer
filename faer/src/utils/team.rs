@@ -12,14 +12,105 @@
 //! Nothing here starts a Rayon job: the team members are threadteam members that spin while the
 //! reservation is held, and the section dispatch is a write to their slots.
 
+use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use rayon::iter::plumbing::{Producer, ProducerCallback};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator};
 use threadteam::TeamExec;
 
+/// Runs `f` with the exclusive authority over a team of `width` participants.
+///
+/// This is how a caller owns the parallelism: the team is created for the duration of the closure,
+/// `Par::Team` carries the authority to the calls inside it, and the members are returned when the
+/// closure ends. A caller with a thread budget wraps its work once, rather than handing a number to
+/// every call:
+///
+/// ```
+/// use faer::{Accum, Mat};
+/// let a = Mat::<f64>::from_fn(8, 8, |i, j| (i + j) as f64);
+/// let mut dst = Mat::<f64>::zeros(8, 8);
+/// faer::team::with_team(2, |par| {
+///     // every faer call in here runs its regions on the two reserved members
+///     faer::linalg::matmul::matmul(dst.as_mut(), Accum::Replace, a.as_ref(), a.as_ref(), 1.0, par);
+/// });
+/// ```
+///
+/// `width` is clamped to at least one; a width of one is [`crate::Par::Seq`] and reserves nothing.
+/// The pool is the host's own ([`threadteam::Pool::builder`], `width` threads); a caller that
+/// already owns a pool or a team should borrow from it directly instead, because two pools do not
+/// share their members.
+///
+/// Panics if the team cannot be built or acquired: the closure's members wake asynchronously, so
+/// the acquisition waits as long as the team tests do (30 s) instead of threadteam's 2 ms default,
+/// which a loaded machine can miss.
+pub fn with_team<R>(width: usize, f: impl FnOnce(crate::Par<'_>) -> R) -> R {
+	// the dispatch counters are process wide: in tests, one team at a time keeps a test that reads
+	// them from seeing another test's regions
+	#[cfg(test)]
+	let _gate = team_turn();
+	let width = width.max(1);
+	if width == 1 {
+		return f(crate::Par::Seq);
+	}
+	let pool = threadteam::Pool::builder()
+		.threads(width)
+		.acquire_timeout(core::time::Duration::from_secs(30))
+		.build()
+		.expect("a thread pool for the team");
+	let team = pool
+		.into_team(width)
+		.expect("an idle pool: it was just created");
+	let mut exec = team.exec(width);
+	exec.team(|team| f(crate::Par::Team(team)))
+		.ok()
+		.expect("a team token for an idle team")
+}
+
+
+/// Serializes the tests that hold a team (`utils::team::with_team` and the tests below), so the
+/// process-wide dispatch counters belong to one test at a time.
+///
+/// Reentrant on one thread: the outer acquisition takes the mutex, an inner one (a `with_team`
+/// inside a `with_team`, or a test that takes the gate itself) only counts its depth, so a nested
+/// scope cannot deadlock on a non-reentrant lock.
+#[cfg(test)]
+pub(crate) static TEAM_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The gate's guard: holds the mutex only at depth one on this thread.
+#[cfg(test)]
+pub(crate) struct TeamTurn(Option<std::sync::MutexGuard<'static, ()>>);
+#[cfg(test)]
+thread_local! {
+	static TEAM_DEPTH: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+#[cfg(test)]
+impl Drop for TeamTurn {
+	fn drop(&mut self) {
+		TEAM_DEPTH.with(|d| d.set(d.get() - 1));
+		drop(self.0.take());
+	}
+}
+/// Takes the team turn for the current scope.
+#[cfg(test)]
+pub(crate) fn team_turn() -> TeamTurn {
+	let nested = TEAM_DEPTH.with(|d| {
+		d.set(d.get() + 1);
+		d.get() > 1
+	});
+	if nested {
+		TeamTurn(None)
+	} else {
+		TeamTurn(Some(TEAM_GATE.lock().unwrap_or_else(|e| e.into_inner())))
+	}
+}
+
 /// Optional counters of how the team regions were dispatched, for probes that ask "did the
 /// parallel path engage at this size". Off by default (one relaxed load per region).
+///
+/// The counters are process wide, so a test that reads them must be the only one dispatching a
+/// team while they are on: `TEAM_GATE` is what serializes that (see `with_team`).
 pub mod stats {
+	use alloc::vec::Vec;
 	use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 	pub(super) static ON: AtomicBool = AtomicBool::new(false);
 	const W: usize = 17;
@@ -121,9 +212,8 @@ impl<T: Send> ProducerCallback<T> for Collect<'_, T> {
 	}
 }
 
-/// The team version of `spindle::for_each`: the items of `iter` are dealt out in contiguous
-/// static blocks over `min(n_jobs, items, team size)` parts (the same static distribution the
-/// spindle region uses), each part processed by the leader of a sub-team.
+/// A flat item loop on the team: the items of `iter` are dealt out in contiguous static blocks
+/// over `min(n_jobs, items, team size)` parts, each part processed by the leader of a sub-team.
 pub(crate) fn for_each<T: Send, I>(
 	team: TeamExec<'_>,
 	n_jobs: usize,
@@ -295,12 +385,26 @@ pub(crate) mod kernel {
 			stats::bump(&stats::GEMM_BELOW_FLOOR);
 			return None;
 		}
-		let width = team.width_for(estimate, 2);
-		if width.get() >= 2 && team.pays(estimate, 2, width) {
-			Some(width.get())
-		} else {
-			stats::bump(&stats::GEMM_BELOW_FLOOR);
-			None
+		// the widest width that pays, on the cost the shapes read (`Exec::width_for` searches the
+		// raw table, which is flat beyond the measured widths and would always answer the full
+		// width); the cost never falls with the width, so the first width that does not pay ends
+		// the search
+		let size = team.size().get();
+		let mut best = None;
+		for w in 2..=size {
+			let width = core::num::NonZeroUsize::new(w).unwrap();
+			if crate::utils::cost::pays_at(estimate, 2, crate::utils::cost::team_section_cost(team.dispatch_costs(), width)) {
+				best = Some(w);
+			} else {
+				break;
+			}
+		}
+		match best {
+			Some(width) => Some(width),
+			None => {
+				stats::bump(&stats::GEMM_BELOW_FLOOR);
+				None
+			},
 		}
 	}
 
@@ -489,7 +593,16 @@ pub(crate) unsafe fn gemm_tiled<E: 'static + Copy + Send + Sync>(
 	// rate) against `PAYS` times the cost of one section of this team. A complex MAC is 4.5
 	// real ones, so the floor of a complex product is that much lower in MACs.
 	let estimate = crate::utils::cost::serial_time(m.saturating_mul(n).saturating_mul(k), ns_per_mac);
-	if nt <= 1 || !team.pays(estimate, 1, team.size()) {
+	if nt <= 1
+		|| !crate::utils::cost::pays_at(
+			estimate,
+			1,
+			crate::utils::cost::team_section_cost(
+				team.dispatch_costs(),
+				core::num::NonZeroUsize::new(nt).unwrap(),
+			),
+		)
+	{
 		stats::bump(&stats::GEMM_BELOW_FLOOR);
 		return seq(dst, lhs, rhs, m, n);
 	}
@@ -541,11 +654,11 @@ mod tests {
 	}
 
 	/// Team tests take turns: one pool at a time, and the dispatch counters are not shared.
-	static TEAM_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+	use super::team_turn;
 
 	/// Runs `f` with the authority over a team of `width` participants.
 	fn with_par<R>(width: usize, f: impl FnOnce(Par<'_>) -> R) -> R {
-		let _turn = TEAM_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+		let _turn = team_turn();
 		let team = team_of(width);
 		let mut exec = team.exec(width);
 		exec.team(|team| f(Par::Team(team))).ok().expect("a team token")
@@ -610,7 +723,7 @@ mod tests {
 	fn kernel_width_rejects_at_the_cheapest_width() {
 		use threadteam::{DispatchCosts, DispatchKind, WidthCosts};
 		use core::time::Duration;
-		let _turn = TEAM_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+		let _turn = team_turn();
 		let us = Duration::from_micros;
 		let costs = DispatchCosts::for_class(threadteam::HostClass::Generic).with(DispatchKind::Team, WidthCosts::new([us(2), us(7), us(12)]));
 		let team = Pool::builder()
@@ -995,6 +1108,8 @@ mod tests {
 	#[test]
 	fn a_team_of_one_behaves_exactly_like_seq() {
 		use crate::utils::cost::{par_pays, rate, ParThreshold};
+		// it reads the process-wide counters
+		let _turn = team_turn();
 		threadteam::Exec::serial()
 			.team(|team| {
 				let par = Par::Team(team);
@@ -1190,7 +1305,7 @@ mod tests {
 		let b = rand_mat(k, n, 2);
 		let mut want = Mat::<f64>::zeros(m, n);
 		matmul(want.as_mut(), Accum::Replace, a.as_ref(), b.as_ref(), 1.0, Par::Seq);
-		let _turn = TEAM_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+		let _turn = team_turn();
 		let team = team_of(6);
 		let mut exec = team.exec(6);
 		exec.team(|mut token| {

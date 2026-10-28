@@ -2717,7 +2717,6 @@ dependencies = [
  "serde_json",
  "serde_test",
  "simba",
- "spindle",
  "suitesparse_sys",
  "t4a-faer-traits",
  "t4a-private-gemm-x86",

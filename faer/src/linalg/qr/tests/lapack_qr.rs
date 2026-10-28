@@ -191,6 +191,7 @@ fn qr_case(
 		);
 	}
 }
+#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_qr_cases() {
@@ -234,7 +235,6 @@ fn lapack_qr_cases() {
 	}
 	run.finish(18 * 8 * 2 * 2 * 2);
 }
-#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_qr_parallel() {
@@ -242,22 +242,18 @@ fn lapack_qr_parallel() {
 	for pivot in [false, true] {
 		qr_case(&mut run, 257, 257, 2, 0, 8, pivot, Par::Seq);
 		for threads in [2, 4] {
-			rayon::ThreadPoolBuilder::new()
-				.num_threads(threads)
-				.build()
-				.unwrap()
-				.install(|| {
-					qr_case(
-						&mut run,
-						257,
-						257,
-						2,
-						threads / 2,
-						8,
-						pivot,
-						Par::rayon(threads),
-					)
-				});
+			crate::team::with_team(threads, |par| {
+				qr_case(
+					&mut run,
+					257,
+					257,
+					2,
+					threads / 2,
+					8,
+					pivot,
+					par,
+				)
+			});
 		}
 	}
 	run.finish(12);

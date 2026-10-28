@@ -96,6 +96,7 @@ fn lu_reference(
 	}
 	a
 }
+#[cfg(feature = "rayon")]
 #[test]
 fn lapack_lu_checkers() {
 	let lu = Mat::from_fn(3, 3, |i, j| {
@@ -333,7 +334,6 @@ fn lapack_lu_cases() {
 	}
 	run.finish(planned);
 }
-#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_lu_parallel() {
@@ -341,21 +341,17 @@ fn lapack_lu_parallel() {
 	for full in [false, true] {
 		lu_case(&mut run, 513, 513, 8, 0, full, Par::Seq);
 		for threads in [2, 4] {
-			rayon::ThreadPoolBuilder::new()
-				.num_threads(threads)
-				.build()
-				.unwrap()
-				.install(|| {
-					lu_case(
-						&mut run,
-						513,
-						513,
-						8,
-						threads / 2,
-						full,
-						Par::rayon(threads),
-					)
-				});
+			crate::team::with_team(threads, |par| {
+				lu_case(
+					&mut run,
+					513,
+					513,
+					8,
+					threads / 2,
+					full,
+					par,
+				)
+			});
 		}
 	}
 	run.finish(12);

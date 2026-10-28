@@ -691,10 +691,12 @@ mod tests {
 			(300, 8),
 		] {
 			for flipped in [false, true] {
-				for mut par in [Par::Seq, Par::rayon(8)] {
+				let run = |mut par: Par<'_>| {
 					check_cpqr::<f64>(m, n, flipped, par.reborrow());
 					check_cpqr::<crate::c64>(m, n, flipped, par);
-				}
+				};
+				run(Par::Seq);
+				crate::team::with_team(8, |par| run(par));
 			}
 		}
 		for (m, n) in [
@@ -707,12 +709,14 @@ mod tests {
 			(300, 17),
 		] {
 			for flipped in [false, true] {
-				for mut par in [Par::Seq, Par::rayon(8)] {
+				let run = |mut par: Par<'_>| {
 					check_plu::<f64>(m, n, flipped, par.reborrow());
 					check_plu::<crate::c64>(m, n, flipped, par.reborrow());
 					check_flu::<f64>(m, n, flipped, par.reborrow());
 					check_flu::<crate::c64>(m, n, flipped, par);
-				}
+				};
+				run(Par::Seq);
+				crate::team::with_team(8, |par| run(par));
 			}
 		}
 	}

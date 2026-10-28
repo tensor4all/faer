@@ -101,9 +101,9 @@ pub fn bidiag_in_place<T: ComplexField>(
 	let mut par = par;
 	// blocked phase: whole panels while the remaining dimension clears the floor. its regions are
 	// two vector products per step and one update per panel, and they run fastest when the caller
-	// holds the worker group around the call (`faer::spindle::with_lock`, see the crate docs):
-	// spinning workers that keep their column range of the trailing block. the library does not
-	// take the lock itself; measured at n = 512, 8T: 19.2 ms held against 25.5 ms with plain regions.
+	// holds a team around the call (see the crate docs): spinning members that keep their column
+	// range of the trailing block. the library takes no reservation itself; measured at n = 512,
+	// 8T: 19.2 ms with the team held against 25.5 ms with members woken per region.
 	let mut p = 0;
 	if size > BLOCK_FLOOR {
 		p = bidiag_blocked_phase(
@@ -310,6 +310,7 @@ fn bidiag_blocked_panel<T: ComplexField>(
 		// 3. Y[i+1.., i] = A_i[i.., i+1..]^H u_i / tl_i, with A_i expressed through the stored
 		//    A and the corrections:
 		//    A[i.., i+1..]^H u - Y[i+1.., ..i] (V[i.., ..i]^H u) - R[..i, i+1..]^H (X[i.., ..i]^H u)
+	#[cfg(feature = "rayon")]
 		{
 			let u = A.rb().col(i).get(i..);
 			let (y_prev, y_i) = Y.rb_mut().split_at_col_mut(i);
@@ -568,7 +569,7 @@ fn bidiag_unblocked<T: ComplexField>(
 					vp,
 					simd_align(row_offset + k + 1),
 				),
-				#[cfg(feature = "rayon")]
+	#[cfg(feature = "rayon")]
 				_ => {
 					use rayon::prelude::*;
 					let nthreads =
@@ -865,20 +866,14 @@ mod tests {
 	const SHAPES: [(usize, usize); 5] =
 		[(8, 4), (8, 8), (300, 300), (400, 300), (200, 200)];
 
-	fn budgets() -> alloc::vec::Vec<(Par<'static>, BidiagParams)> {
-		let seq = (Par::Seq, <BidiagParams as Auto<f64>>::auto());
-		#[cfg(feature = "rayon")]
-		{
-			// the default floor (`ParThreshold::Derived`) leaves a small trailing area sequential,
-			// so the threaded case pins it to zero to exercise the threaded panel update and tail
-			let mut threaded = <BidiagParams as Auto<f64>>::auto();
-			threaded.par_threshold = ParThreshold::Fixed(0);
-			alloc::vec![seq, (Par::rayon(4), threaded)]
-		}
-		#[cfg(not(feature = "rayon"))]
-		{
-			alloc::vec![seq]
-		}
+	/// The sequential budget, then the threaded one on a team of four.
+	fn for_each_budget(mut f: impl FnMut(Par<'_>, BidiagParams)) {
+		f(Par::Seq, <BidiagParams as Auto<f64>>::auto());
+		// the default floor (`ParThreshold::Derived`) leaves a small trailing area sequential, so
+		// the threaded case pins it to zero to exercise the threaded panel update and tail
+		let mut threaded = <BidiagParams as Auto<f64>>::auto();
+		threaded.par_threshold = ParThreshold::Fixed(0);
+		crate::team::with_team(4, |par| f(par, threaded));
 	}
 
 	#[test]
@@ -891,11 +886,115 @@ mod tests {
 				dist: StandardNormal,
 			}
 			.rand::<Mat<f64>>(rng);
-			for (par, params) in budgets() {
+			for_each_budget(|par, params| {
 				let (UV, B) = reconstruct(&A, par, params);
 				let approx_eq =
 					CwiseMat(ApproxEq::<f64>::eps() * ((m * n) as f64).sqrt());
 				assert!(UV ~ B);
+			});
+		}
+	}
+	/// The parallel route must produce the same factorization as the sequential one, for the
+	/// complex scalars too: `A = Hl B Hr^H` up to the tolerance of the reflectors. The floor is
+	/// forced (`Fixed(1)`) so every step takes the team path, at sizes that split into fewer
+	/// columns than the team has members.
+	#[test]
+	fn bidiag_on_a_team_reconstructs() {
+		fn check<T: crate::ComplexField<Real = f64>>(a: Mat<T>, bl: usize, br: usize) {
+			let (m, n) = a.shape();
+			let size = Ord::min(m, n);
+			let mut params: BidiagParams = crate::Auto::<T>::auto();
+			params.par_threshold = crate::utils::cost::ParThreshold::Fixed(1);
+			if size < 2 {
+				return;
+			}
+			let mut hl = Mat::<T>::zeros(bl, size);
+			let mut hr = Mat::<T>::zeros(br, size - 1);
+			let mut uv = a.clone();
+			crate::team::with_team(4, |par| {
+				bidiag_in_place(
+					uv.rb_mut(),
+					hl.rb_mut(),
+					hr.rb_mut(),
+					par,
+					MemStack::new(&mut MemBuffer::new(bidiag_in_place_scratch::<T>(
+						m,
+						n,
+						ParShape::team(4),
+						params.into(),
+					))),
+					params.into(),
+				);
+			});
+			let mut rebuilt = a.clone();
+			let mut rebuilt = rebuilt.as_mut();
+			apply_block_householder_sequence_transpose_on_the_left_in_place_with_conj(
+				uv.rb().get(.., ..size),
+				hl.rb(),
+				Conj::Yes,
+				rebuilt.rb_mut(),
+				Par::Seq,
+				MemStack::new(&mut MemBuffer::new(
+					apply_block_householder_sequence_transpose_on_the_left_in_place_scratch::<T>(n - 1, bl, m),
+				)),
+			);
+			let v = uv.rb().get(..size - 1, 1..size);
+			let a1 = rebuilt.rb_mut().get_mut(.., 1..size);
+			apply_block_householder_sequence_on_the_right_in_place_with_conj(
+				v.transpose(),
+				hr.as_ref(),
+				Conj::Yes,
+				a1,
+				Par::Seq,
+				MemStack::new(&mut MemBuffer::new(
+					apply_block_householder_sequence_on_the_right_in_place_scratch::<T>(n - 1, br, m),
+				)),
+			);
+			for j in 0..n {
+				for i in 0..m {
+					if i > j || j > i + 1 {
+						uv[(i, j)] = T::zero();
+					}
+				}
+			}
+			let mut err = 0.0f64;
+			let mut nonfinite = false;
+			for j in 0..n {
+				for i in 0..m {
+					let d = (uv[(i, j)].clone() - rebuilt[(i, j)].clone()).abs();
+					nonfinite |= !d.is_finite() || !uv[(i, j)].abs().is_finite();
+					if d.is_finite() {
+						err = err.max(d);
+					}
+				}
+			}
+			core::assert!(!nonfinite, "{m}x{n}: a non-finite factor or difference");
+			let scale = (0..n)
+				.flat_map(|j| (0..m).map(move |i| (i, j)))
+				.fold(0.0f64, |m, (i, j)| m.max(a[(i, j)].abs()));
+			core::assert!(err <= 1e-10 * scale.max(1.0), "{m}x{n}: {err} {scale}");
+		}
+		let rng = &mut StdRng::seed_from_u64(11);
+		// the fixture of the cost tests: a real-valued matrix in the complex dtype, where the
+		// parallel route takes a different but valid factorization from the sequential one
+		let real_as_c64 = Mat::<c64>::from_fn(96, 96, |i, j| {
+			let h = (i * 2654435761usize).wrapping_add(j * 40503).wrapping_add(977) % 1009;
+			c64::new(h as f64 / 504.0 - 1.0, 0.0)
+		});
+		check::<c64>(real_as_c64, 8, 8);
+		for (bl, br) in [(4usize, 3usize), (8, 8)] {
+			for (m, n) in [(8usize, 4usize), (8, 8), (40, 40), (96, 96), (37, 13)] {
+				check::<f64>(Mat::from_fn(m, n, |_, _| rand::Rng::random::<f64>(rng)), bl, br);
+				check::<c64>(
+					Mat::from_fn(m, n, |_, _| {
+						c64::new(
+							rand::Rng::random::<f64>(rng),
+							rand::Rng::random::<f64>(rng),
+						)
+					}),
+					bl,
+					br,
+				);
 			}
 		}
 	}
@@ -909,12 +1008,12 @@ mod tests {
 				dist: ComplexDistribution::new(StandardNormal, StandardNormal),
 			}
 			.rand::<Mat<c64>>(rng);
-			for (par, params) in budgets() {
+			for_each_budget(|par, params| {
 				let (UV, B) = reconstruct(&A, par, params);
 				let approx_eq =
 					CwiseMat(ApproxEq::<f64>::eps() * ((m * n) as f64).sqrt());
 				assert!(UV ~ B);
-			}
+			});
 		}
 	}
 }

@@ -105,6 +105,7 @@ fn eigenvector_ratios(
 // so the mode-vs-mode comparison uses the composed budget (#78). The residual
 // and unit-norm checks keep their own threshold of 20.
 const MODE_AGREEMENT_BUDGET: Real = 2.0 * 20.0;
+#[cfg(feature = "rayon")]
 #[test]
 fn lapack_nonsymmetric_evd_mode_agreement_budget_composes() {
 	let eps = Real::EPSILON;
@@ -438,7 +439,6 @@ fn lapack_nonsymmetric_evd_cases() {
 	}
 	run.finish(10 * 9 * 2 * 8 + 2 * 2 * 3 * 8 + 10 * 6 * 2 * 2);
 }
-#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_nonsymmetric_evd_parallel() {
@@ -446,20 +446,16 @@ fn lapack_nonsymmetric_evd_parallel() {
 	let a = general_case(129, 4);
 	full_evd_case(&mut run, a.as_ref(), 0, Par::Seq, 64, 4);
 	for threads in [2, 4] {
-		rayon::ThreadPoolBuilder::new()
-			.num_threads(threads)
-			.build()
-			.unwrap()
-			.install(|| {
-				full_evd_case(
-					&mut run,
-					a.as_ref(),
-					0,
-					Par::rayon(threads),
-					64,
-					4,
-				)
-			});
+		crate::team::with_team(threads, |par| {
+			full_evd_case(
+				&mut run,
+				a.as_ref(),
+				0,
+				par,
+				64,
+				4,
+			)
+		});
 	}
 	run.finish(24);
 }

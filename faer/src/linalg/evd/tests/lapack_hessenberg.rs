@@ -96,6 +96,7 @@ fn hessenberg_case(
 		);
 	}
 }
+#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_hessenberg_cases() {
@@ -110,7 +111,6 @@ fn lapack_hessenberg_cases() {
 	}
 	run.finish(10 * 9 * 4 * 2);
 }
-#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_hessenberg_parallel() {
@@ -118,13 +118,9 @@ fn lapack_hessenberg_parallel() {
 	let a = general_case(257, 4);
 	hessenberg_case(&mut run, a.as_ref(), 0, Par::Seq);
 	for threads in [2, 4] {
-		rayon::ThreadPoolBuilder::new()
-			.num_threads(threads)
-			.build()
-			.unwrap()
-			.install(|| {
-				hessenberg_case(&mut run, a.as_ref(), 0, Par::rayon(threads))
-			});
+		crate::team::with_team(threads, |par| {
+			hessenberg_case(&mut run, a.as_ref(), 0, par)
+		});
 	}
 	run.finish(6);
 }

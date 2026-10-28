@@ -237,8 +237,7 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 		// shape conditions (`2 * n`, `4 * threads`) as above, then the cost rule
 		#[cfg(feature = "par-trace")]
 		crate::utils::cost::trace::shape("upgrade_deep", rows, n, n);
-		let deep = cfg!(feature = "rayon")
-			&& threads > 1
+		let deep = threads > 1
 			&& rows >= 2 * n
 			&& rows >= 4 * threads
 			&& crate::utils::cost::par_pays::<T>(
@@ -268,12 +267,12 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 				}
 			}
 		} else if deep {
-			#[cfg(feature = "rayon")]
+	#[cfg(feature = "rayon")]
 			{
 				use rayon::prelude::*;
 				let chunk = rows.div_ceil(threads);
 				let n_chunks = rows.div_ceil(chunk);
-				let mut partials = vec![T::zero(); n_chunks * n * n];
+				let mut partials = alloc::vec![T::zero(); n_chunks * n * n];
 				let source = basis_bot;
 				crate::utils::thread::for_each(
 					par,
@@ -695,6 +694,7 @@ fn apply_block_householder_on_the_left_in_place_generic<
 				K.unbound(),
 			);
 			#[cfg(feature = "par-trace")]
+	#[cfg(feature = "rayon")]
 			{
 				crate::utils::cost::trace::shape("n_tasks", M.unbound(), N.unbound(), K.unbound());
 				crate::utils::cost::trace_pub(
@@ -803,6 +803,11 @@ fn apply_block_householder_on_the_left_in_place_generic<
 						.zip_eq(matrix.rb_mut().par_col_partition_mut(n_tasks)),
 					func,
 				);
+			}
+			#[cfg(not(feature = "rayon"))]
+			{
+				let _ = (n_tasks, func);
+				unreachable!("no parallel route in this build")
 			}
 		}
 	}
@@ -1042,7 +1047,7 @@ pub fn apply_block_householder_sequence_transpose_on_the_right_in_place_with_con
 	)
 }
 
-#[cfg(all(test, feature = "rayon"))]
+#[cfg(test)]
 mod tests {
 	use super::{
 		apply_block_householder_on_the_left_in_place_scratch,
@@ -1062,10 +1067,6 @@ mod tests {
 	/// temporaries. The two must compute the same map, at the sizes that take that branch and at the
 	/// sizes that do not.
 	fn check_f64(m: usize, k: usize) {
-		let pool = rayon::ThreadPoolBuilder::new()
-			.num_threads(4)
-			.build()
-			.unwrap();
 		// A unit-lower basis and its 1x1 compact-WY factor, as a QR panel leaves them.
 		let mut a: Mat<f64> =
 			Mat::from_fn(m, 1, |i, _| ((i % 7) as f64) * 0.25 - 0.75);
@@ -1095,13 +1096,13 @@ mod tests {
 			MemStack::new(&mut mem),
 		);
 		let mut threaded = target.clone();
-		pool.install(|| {
+		crate::team::with_team(4, |par| {
 			apply_block_householder_transpose_on_the_left_in_place_with_conj(
 				a.as_ref(),
 				factor.as_ref(),
 				Conj::Yes,
 				threaded.as_mut(),
-				Par::rayon(4),
+				par,
 				MemStack::new(&mut mem),
 			)
 		});
@@ -1116,10 +1117,6 @@ mod tests {
 	/// The complex scalars take the same branch, through the conjugated kernel.
 	fn check_c64(m: usize, k: usize) {
 		use num_complex::Complex64 as C64;
-		let pool = rayon::ThreadPoolBuilder::new()
-			.num_threads(4)
-			.build()
-			.unwrap();
 		let mut a: Mat<C64> = Mat::from_fn(m, 1, |i, _| {
 			C64::new(((i % 7) as f64) * 0.25 - 0.75, 0.125)
 		});
@@ -1149,13 +1146,13 @@ mod tests {
 			MemStack::new(&mut mem),
 		);
 		let mut threaded = target.clone();
-		pool.install(|| {
+		crate::team::with_team(4, |par| {
 			apply_block_householder_transpose_on_the_left_in_place_with_conj(
 				a.as_ref(),
 				factor.as_ref(),
 				Conj::Yes,
 				threaded.as_mut(),
-				Par::rayon(4),
+				par,
 				MemStack::new(&mut mem),
 			)
 		});
@@ -1175,10 +1172,6 @@ mod tests {
 	}
 
 	fn check_panel_with(m: usize, b: usize, k: usize, threads: usize) {
-		let pool = rayon::ThreadPoolBuilder::new()
-			.num_threads(threads)
-			.build()
-			.unwrap();
 		let mut a: Mat<f64> = Mat::from_fn(m, b, |i, j| {
 			if i == j {
 				4.0 + i as f64
@@ -1217,13 +1210,13 @@ mod tests {
 			MemStack::new(&mut mem),
 		);
 		let mut threaded = target.clone();
-		pool.install(|| {
+		crate::team::with_team(threads, |par| {
 			apply_block_householder_transpose_on_the_left_in_place_with_conj(
 				a.as_ref(),
 				factor.as_ref(),
 				Conj::Yes,
 				threaded.as_mut(),
-				Par::rayon(threads),
+				par,
 				MemStack::new(&mut mem),
 			)
 		});
@@ -1239,10 +1232,6 @@ mod tests {
 	/// and its deep half runs on one thread per task unless the reduction's rows are split across
 	/// the caller's threads. Both must produce the same `T`, diagonal `tau`s included.
 	fn check_upgrade(m: usize, n: usize) {
-		let pool = rayon::ThreadPoolBuilder::new()
-			.num_threads(4)
-			.build()
-			.unwrap();
 		let basis: Mat<f64> = Mat::from_fn(m, n, |i, j| {
 			((i * 3 + j * 7) % 11) as f64 * 0.25 - 1.0
 		});
@@ -1262,13 +1251,13 @@ mod tests {
 		);
 		let mut threaded = Mat::<f64>::zeros(n, n);
 		taus(&mut threaded);
-		pool.install(|| {
+		crate::team::with_team(4, |par| {
 			upgrade_householder_factor(
 				threaded.as_mut(),
 				basis.as_ref(),
 				n,
 				1,
-				Par::rayon(4),
+				par,
 			)
 		});
 		for col in 0..n {
@@ -1314,13 +1303,7 @@ mod tests {
 	/// makes `H v = -v` -- which is the one exact property the kernel's convention fixes.
 	#[test]
 	fn rank_one_negates_its_own_reflector_column() {
-		let (m, pool) = (
-			2048usize,
-			rayon::ThreadPoolBuilder::new()
-				.num_threads(4)
-				.build()
-				.unwrap(),
-		);
+		let m = 2048usize;
 		let mut a: Mat<f64> =
 			Mat::from_fn(m, 1, |i, _| if i % 13 == 0 { 3.0 } else { 0.25 });
 		let tau = {
@@ -1336,31 +1319,31 @@ mod tests {
 				m, 1, 1,
 			),
 		);
-		for par in [Par::Seq, Par::rayon(4)] {
+		let mut run = |par: Par<'_>| {
 			let mut out = a.clone();
-			pool.install(|| {
-				apply_block_householder_transpose_on_the_left_in_place_with_conj(
-					a.as_ref(),
-					factor.as_ref(),
-					Conj::Yes,
-					out.as_mut(),
-					par,
-					MemStack::new(&mut mem),
-				)
-			});
+			apply_block_householder_transpose_on_the_left_in_place_with_conj(
+				a.as_ref(),
+				factor.as_ref(),
+				Conj::Yes,
+				out.as_mut(),
+				par,
+				MemStack::new(&mut mem),
+			);
 			let err = (0..m)
 				.map(|i| (out[(i, 0)] + a[(i, 0)]).abs())
 				.fold(0.0, f64::max);
 			assert!(err < 1e-12, "{err}");
-		}
+		};
+		run(Par::Seq);
+		crate::team::with_team(4, |par| run(par));
 	}
 }
-#[cfg(all(test, feature = "rayon"))]
+#[cfg(test)]
 mod gate_tests {
 	//! The parallel routes behind the cost gates (`utils::cost`) agree with the serial ones, at
-	//! sizes where the derived floors of a plain token from outside the pool (`Par::rayon(4)`,
-	//! 18 us of dispatch, 54 us of serial work per section) are exceeded, and the decision itself
-	//! is what `utils::cost` tests.
+	//! sizes where the derived floors of a team token (`crate::team::with_team(4, ..)`, 0.7 us of
+	//! dispatch per section on the Zen 5 row, so 2 us of serial work per section) are exceeded, and
+	//! the decision itself is what `utils::cost` tests.
 	use super::*;
 	use crate::c64;
 	use crate::linalg::matmul::triangular::{BlockStructure, matmul as tmatmul};
@@ -1407,22 +1390,24 @@ mod gate_tests {
 		target
 	}
 
-	fn check_apply<T: ComplexField<Real = f64>>() {
+	fn check_apply<T: ComplexField<Real = f64>>(mut par: Par<'_>) {
 		// rank one: `N == 1`, 0.5 million target elements
 		// column split: tall target and wide target
 		for (m, n, k) in
 			[(2048, 16, 96), (2048, 1, 256), (512, 16, 1024), (4096, 32, 64)]
 		{
 			let seq = apply::<T>(m, n, k, Par::Seq);
-			let par = apply::<T>(m, n, k, Par::rayon(4));
+			let par = apply::<T>(m, n, k, par.reborrow());
 			close(seq.as_ref(), par.as_ref());
 		}
 	}
 
 	#[test]
 	fn block_apply_gates_agree_with_serial() {
-		check_apply::<f64>();
-		check_apply::<c64>();
+		crate::team::with_team(4, |mut par| {
+			check_apply::<f64>(par.reborrow());
+			check_apply::<c64>(par);
+		});
 	}
 
 	fn upgrade<T: ComplexField<Real = f64>>(m: usize, n: usize, par: Par) -> Mat<T> {
@@ -1437,16 +1422,18 @@ mod gate_tests {
 
 	#[test]
 	fn upgrade_factor_gate_agrees_with_serial() {
-		for (m, n) in [(4096, 8), (4096, 32), (1024, 64)] {
-			close(
-				upgrade::<f64>(m, n, Par::Seq).as_ref(),
-				upgrade::<f64>(m, n, Par::rayon(4)).as_ref(),
-			);
-			close(
-				upgrade::<c64>(m, n, Par::Seq).as_ref(),
-				upgrade::<c64>(m, n, Par::rayon(4)).as_ref(),
-			);
-		}
+		crate::team::with_team(4, |mut par| {
+			for (m, n) in [(4096, 8), (4096, 32), (1024, 64)] {
+				close(
+					upgrade::<f64>(m, n, Par::Seq).as_ref(),
+					upgrade::<f64>(m, n, par.reborrow()).as_ref(),
+				);
+				close(
+					upgrade::<c64>(m, n, Par::Seq).as_ref(),
+					upgrade::<c64>(m, n, par.reborrow()).as_ref(),
+				);
+			}
+		});
 	}
 
 	fn matvec<T: ComplexField<Real = f64>>(n: usize, row_major: bool, par: Par) -> Mat<T> {
@@ -1467,18 +1454,20 @@ mod gate_tests {
 
 	#[test]
 	fn matvec_gate_agrees_with_serial() {
-		for n in [128, 512, 1024] {
-			for row_major in [false, true] {
-				close(
-					matvec::<f64>(n, row_major, Par::Seq).as_ref(),
-					matvec::<f64>(n, row_major, Par::rayon(4)).as_ref(),
-				);
-				close(
-					matvec::<c64>(n, row_major, Par::Seq).as_ref(),
-					matvec::<c64>(n, row_major, Par::rayon(4)).as_ref(),
-				);
+		crate::team::with_team(4, |mut par| {
+			for n in [128, 512, 1024] {
+				for row_major in [false, true] {
+					close(
+						matvec::<f64>(n, row_major, Par::Seq).as_ref(),
+						matvec::<f64>(n, row_major, par.reborrow()).as_ref(),
+					);
+					close(
+						matvec::<c64>(n, row_major, Par::Seq).as_ref(),
+						matvec::<c64>(n, row_major, par.reborrow()).as_ref(),
+					);
+				}
 			}
-		}
+		});
 	}
 
 	fn tri_products(n: usize, mut par: Par) -> (Mat<f64>, Mat<f64>) {
@@ -1516,33 +1505,35 @@ mod gate_tests {
 	#[test]
 	fn triangular_gates_agree_with_serial() {
 		let (a0, b0) = tri_products(384, Par::Seq);
-		let (a, b) = tri_products(384, Par::rayon(4));
+		let (a, b) = crate::team::with_team(4, |par| tri_products(384, par));
 		close(a0.as_ref(), a.as_ref());
 		close(b0.as_ref(), b.as_ref());
 	}
 
 	#[test]
 	fn triangular_solve_split_gate_agrees_with_serial() {
-		// short triangle, many right hand sides: the split of `triangular_solve.rs`
-		for (n, k) in [(64, 4096), (128, 2048), (16, 200)] {
-			let mut tri = fill::<f64>(n, n, 9);
-			for i in 0..n {
-				tri[(i, i)] = n as f64;
+		crate::team::with_team(4, |mut team| {
+			// short triangle, many right hand sides: the split of `triangular_solve.rs`
+			for (n, k) in [(64, 4096), (128, 2048), (16, 200)] {
+				let mut tri = fill::<f64>(n, n, 9);
+				for i in 0..n {
+					tri[(i, i)] = n as f64;
+				}
+				let rhs0 = fill::<f64>(n, k, 10);
+				let mut seq = rhs0.clone();
+				let mut par = rhs0.clone();
+				crate::linalg::triangular_solve::solve_lower_triangular_in_place(
+					tri.as_ref(),
+					seq.as_mut(),
+					Par::Seq,
+				);
+				crate::linalg::triangular_solve::solve_lower_triangular_in_place(
+					tri.as_ref(),
+					par.as_mut(),
+					team.reborrow(),
+				);
+				close(seq.as_ref(), par.as_ref());
 			}
-			let rhs0 = fill::<f64>(n, k, 10);
-			let mut seq = rhs0.clone();
-			let mut par = rhs0.clone();
-			crate::linalg::triangular_solve::solve_lower_triangular_in_place(
-				tri.as_ref(),
-				seq.as_mut(),
-				Par::Seq,
-			);
-			crate::linalg::triangular_solve::solve_lower_triangular_in_place(
-				tri.as_ref(),
-				par.as_mut(),
-				Par::rayon(4),
-			);
-			close(seq.as_ref(), par.as_ref());
-		}
+		});
 	}
 }

@@ -151,6 +151,7 @@ fn run_view_case(
 	}
 }
 
+#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn layouts_and_reused_buffers() {
@@ -214,7 +215,6 @@ fn layouts_and_reused_buffers() {
 	assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn parallel_paths() {
@@ -239,12 +239,7 @@ fn parallel_paths() {
 			);
 		}
 		for threads in [2, 4] {
-			let pool = rayon::ThreadPoolBuilder::new()
-				.num_threads(threads)
-				.build()
-				.unwrap();
-			pool.install(|| {
-				assert_eq!(rayon::current_num_threads(), threads);
+			crate::team::with_team(threads, |mut par| {
 				for mode in modes {
 					run_view_case(
 						&mut failures,
@@ -253,7 +248,7 @@ fn parallel_paths() {
 						a.as_ref(),
 						&expected,
 						128,
-						Par::rayon(threads),
+						par.reborrow(),
 						mode,
 						false,
 					);
