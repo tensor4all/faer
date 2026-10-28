@@ -52,8 +52,8 @@ gate has changed and two kinds of adoption are now in the ledger.
 | Crate names | `faer` → `t4a-faer`, `faer-traits` → `t4a-faer-traits`. `[lib] name` stays `faer` / `faer_traits`, so downstream `use faer::...` is unchanged. |
 | Workspace | `faer-ffi` is excluded (the C API and its cbindgen build are unused by tensor4all). |
 | Upstream base | Synced with Codeberg `0ecd846` (2026-10-17) by a merge commit, so `upstream/main` is an ancestor of this branch. Those nine upstream commits since the previous base `ddbd2ae` (the sparse CSC example doc, `MatMut::from_row_major_slice_with_stride_mut`'s strides, the CG/BiCGSTAB uninitialized read) were written upstream by Paul and Connor Smith and had already been cherry-picked here on 2026-10-22 in `9f3dc58`, `ae9b979` and `064016e` (their messages name Codeberg #305, #326 and `1b2d9a9`; the tests `codeberg_305`/`codeberg_326` came with them). The direction is upstream to fork, not the reverse: nothing was fed back upstream. The cherry-picked content is byte-identical to upstream's, so the sync changes no file -- the merged tree hash equals the pre-merge tree hash. Later syncs record the new base here. |
-| Publication | crates.io, in the order `t4a-faer-traits` then `t4a-faer`. The tag is `v<faer version>`. A version that is already on crates.io is skipped, so a release that bumps only one crate still succeeds. |
-| Released | `t4a-faer-traits 0.24.0` and `t4a-faer 0.24.4`, published from commit `3a6a9d6`. The published `src/**` is byte-identical to that commit, so `3a6a9d6` is the revision a consumer pins. A later commit needs a new version. |
+| Publication | crates.io, in the order `t4a-faer-traits` then `t4a-faer`. Releases are tagged `faer-v<faer version>` and published by hand from a clean checkout of the tag; a `v<faer version>` tag would also start `publish.yml`. A version that is already on crates.io is skipped, so a release that bumps only one crate still succeeds. |
+| Released | Latest: `t4a-faer 0.25.2` with `t4a-faer-traits 0.24.1`, published from the commit tagged `faer-v0.25.2` (see the release section at the end). The published `src/**` is byte-identical to the tagged commit, so that commit is the revision a consumer pins. A later commit needs a new version. Earlier releases carry their own `faer-v<version>` tags. |
 | LICENSE | A `LICENSE` copy lives in each crate directory so the published archive ships the MIT text (`license-file` next to `license` makes Cargo warn). |
 
 ## Experiments
@@ -229,3 +229,17 @@ identical to the measured one: `faer/src` `2f6bf40c4569`, `faer-traits/src` `d5e
 - **Not measured**: the large tier (1024 and above), `full_piv_lu`, `qr`, `triangular_solve` collateral cells, 4096x256 and
   256x4096. A publication run is the place for them.
 - **Record**: `docs/worklogs/2026-10-27-t4a-faer-0.25.0-merge.md`.
+
+## Released: `t4a-faer` 0.25.2 (2026-10-29)
+
+Version bump only; `t4a-faer-traits` stays 0.24.1 (`faer-traits/` unchanged since `faer-v0.25.1`). Published from the
+merge commit of the version-bump PR, tagged `faer-v0.25.2`. The release carries the PRs merged since `faer-v0.25.1`:
+
+- #80 svd: size the divide-and-conquer scratch by phase (#73).
+- #84 svd: solve two-by-two blocks directly in the bidiagonal QR (#81).
+- #88 thread: regions run on the caller's worker group; the block apply's row split is dropped (#79).
+- #87 svd/evd: singular values in order with a subnormal at a split (#82), orthogonal merge boundary rotation (#75),
+  tridiagonal QR accuracy (#76), Schur eigenvectors at the range limit (#77), EVD mode-agreement budget (#78).
+- #83 triangular_solve: exact solves with subnormal pivots (#74).
+
+Evidence lives in each PR and its ledger row above; this release adds no code.
