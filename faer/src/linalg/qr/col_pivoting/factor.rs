@@ -271,7 +271,6 @@ fn qr_in_place_unblocked<'out, I: Index, T: ComplexField>(
 								simd_align(k + 1),
 							);
 						},
-						#[cfg(feature = "rayon")]
 						_ => {
 						let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 							let nthreads = nthreads.get();
@@ -442,7 +441,7 @@ mod tests {
 	#[test]
 	fn test_unblocked_qr() {
 		let rng = &mut StdRng::seed_from_u64(0);
-		for mut par in [Par::Seq, Par::rayon(8)] {
+		let mut run = |mut par: Par<'_>| {
 			let par_shape = par.shape();
 			for n in [2, 3, 4, 8, 16, 24, 32, 128, 255] {
 				let bs = 15;
@@ -568,7 +567,9 @@ mod tests {
 				}
 				assert!(Q * R * q ~ A);
 			}
-		}
+		};
+		run(Par::Seq);
+		crate::team::with_team(8, |par| run(par));
 	}
 	/// A nonempty zero matrix has a valid factorization -- zero `R` and a unitary `Q` --
 	/// so scaling by the largest column norm must not divide by a zero pivot scale.
@@ -576,12 +577,14 @@ mod tests {
 	fn zero_matrix_reconstructs() {
 		// 64x64 crosses the blocking threshold, the rest keep the panel path short
 		for (m, n) in [(1, 1), (3, 2), (8, 8), (64, 64)] {
-			for mut par in [Par::Seq, Par::rayon(8)] {
+			let run = |mut par: Par<'_>| {
 				check_zero_matrix::<f32>(m, n, par.reborrow());
 				check_zero_matrix::<c32>(m, n, par.reborrow());
 				check_zero_matrix::<f64>(m, n, par.reborrow());
 				check_zero_matrix::<c64>(m, n, par);
-			}
+			};
+			run(Par::Seq);
+			crate::team::with_team(8, |par| run(par));
 		}
 	}
 	fn check_zero_matrix<T: ComplexField>(m: usize, n: usize, mut par: Par) {

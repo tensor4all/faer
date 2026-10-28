@@ -382,7 +382,6 @@ pub fn tridiag_in_place<T: ComplexField>(
 								|uz!(y, z): Zip!(&mut T, &T)| *y += z,
 							);
 						},
-						#[cfg(feature = "rayon")]
 						_ => {
 						let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 							use rayon::prelude::*;

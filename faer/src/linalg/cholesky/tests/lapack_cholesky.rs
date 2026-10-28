@@ -350,7 +350,6 @@ fn lapack_cholesky_cases() {
 	}
 	run.finish(planned);
 }
-#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_cholesky_parallel() {
@@ -358,20 +357,16 @@ fn lapack_cholesky_parallel() {
 	for pivot in [false, true] {
 		cholesky_case(&mut run, 257, 2, 0, pivot, Par::Seq);
 		for threads in [2, 4] {
-			rayon::ThreadPoolBuilder::new()
-				.num_threads(threads)
-				.build()
-				.unwrap()
-				.install(|| {
-					cholesky_case(
-						&mut run,
-						257,
-						2,
-						threads / 2,
-						pivot,
-						Par::rayon(threads),
-					)
-				});
+			crate::team::with_team(threads, |par| {
+				cholesky_case(
+					&mut run,
+					257,
+					2,
+					threads / 2,
+					pivot,
+					par,
+				)
+			});
 		}
 	}
 	run.finish(12);

@@ -285,27 +285,22 @@ fn lapack_self_adjoint_evd_cases() {
 	}
 	run.finish(13 * 8 * 2 * 6);
 }
-#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_self_adjoint_evd_parallel() {
 	let mut run = Run::new("self_adjoint_evd_parallel");
 	dense_self_adjoint_case(&mut run, 257, 4, 0, 128, Par::Seq);
 	for threads in [2, 4] {
-		rayon::ThreadPoolBuilder::new()
-			.num_threads(threads)
-			.build()
-			.unwrap()
-			.install(|| {
-				dense_self_adjoint_case(
-					&mut run,
-					257,
-					4,
-					threads / 2,
-					128,
-					Par::rayon(threads),
-				)
-			});
+		crate::team::with_team(threads, |par| {
+			dense_self_adjoint_case(
+				&mut run,
+				257,
+				4,
+				threads / 2,
+				128,
+				par,
+			)
+		});
 	}
 	run.finish(18);
 }

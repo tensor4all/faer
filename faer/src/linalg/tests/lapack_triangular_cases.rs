@@ -174,7 +174,6 @@ fn lapack_triangular_cases() {
 	}
 	run.finish(planned);
 }
-#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_triangular_parallel() {
@@ -182,22 +181,18 @@ fn lapack_triangular_parallel() {
 	for upper in [false, true] {
 		triangular_case(&mut run, 257, 65, upper, false, 1.0, 0, Par::Seq);
 		for threads in [2, 4] {
-			rayon::ThreadPoolBuilder::new()
-				.num_threads(threads)
-				.build()
-				.unwrap()
-				.install(|| {
-					triangular_case(
-						&mut run,
-						257,
-						65,
-						upper,
-						false,
-						1.0,
-						threads / 2,
-						Par::rayon(threads),
-					)
-				});
+			crate::team::with_team(threads, |par| {
+				triangular_case(
+					&mut run,
+					257,
+					65,
+					upper,
+					false,
+					1.0,
+					threads / 2,
+					par,
+				)
+			});
 		}
 	}
 	run.finish(36);

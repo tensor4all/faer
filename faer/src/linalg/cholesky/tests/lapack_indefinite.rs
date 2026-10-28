@@ -450,7 +450,6 @@ fn lapack_indefinite_cases() {
 	}
 	run.finish(planned);
 }
-#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_indefinite_parallel() {
@@ -458,21 +457,17 @@ fn lapack_indefinite_parallel() {
 	for pivot in [false, true] {
 		indefinite_case(&mut run, 257, 6, 0, pivot, Par::Seq, false);
 		for threads in [2, 4] {
-			rayon::ThreadPoolBuilder::new()
-				.num_threads(threads)
-				.build()
-				.unwrap()
-				.install(|| {
-					indefinite_case(
-						&mut run,
-						257,
-						6,
-						threads / 2,
-						pivot,
-						Par::rayon(threads),
-						false,
-					)
-				});
+			crate::team::with_team(threads, |par| {
+				indefinite_case(
+					&mut run,
+					257,
+					6,
+					threads / 2,
+					pivot,
+					par,
+					false,
+				)
+			});
 		}
 	}
 	run.finish(12);

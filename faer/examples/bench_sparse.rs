@@ -125,7 +125,7 @@ fn faer_llt(bencher: Bencher, name: String) {
 	});
 }
 fn main() -> eyre::Result<()> {
-	spindle::with_lock(rayon::current_num_threads(), || {
+	{
 		let bench = Bench::from_args()?;
 		bench.register_many(
 			"llt",
@@ -147,5 +147,5 @@ fn main() -> eyre::Result<()> {
 		);
 		bench.run()?;
 		Ok(())
-	})
+	}
 }

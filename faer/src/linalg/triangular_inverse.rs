@@ -235,6 +235,7 @@ mod tests {
 	use rand_distr::{Distribution, StandardNormal};
 	#[test]
 	fn test_invert_lower() {
+		crate::team::with_team(4, |mut par| {
 		let rng = &mut StdRng::seed_from_u64(0);
 		(0..32).for_each(|n| {
 			let mut a: Mat<f64> = crate::stats::CwiseMatDistribution {
@@ -245,7 +246,7 @@ mod tests {
 			.sample(rng);
 			a += MatRef::from_repeated_ref(&2.0, n, n);
 			let mut inv = Mat::zeros(n, n);
-			invert_lower_triangular(inv.as_mut(), a.as_ref(), Par::rayon(0));
+			invert_lower_triangular(inv.as_mut(), a.as_ref(), par.reborrow());
 			let mut prod = Mat::zeros(n, n);
 			triangular::matmul(
 				prod.as_mut(),
@@ -256,7 +257,7 @@ mod tests {
 				inv.as_ref(),
 				BlockStructure::TriangularLower,
 				1.0,
-				Par::rayon(0),
+				par.reborrow(),
 			);
 			for i in 0..n {
 				for j in 0..n {
@@ -265,9 +266,11 @@ mod tests {
 				}
 			}
 		});
+		});
 	}
 	#[test]
 	fn test_invert_unit_lower() {
+		crate::team::with_team(4, |mut par| {
 		let rng = &mut StdRng::seed_from_u64(0);
 		(0..32).for_each(|n| {
 			let mut a: Mat<f64> = crate::stats::CwiseMatDistribution {
@@ -281,7 +284,7 @@ mod tests {
 			invert_unit_lower_triangular(
 				inv.as_mut(),
 				a.as_ref(),
-				Par::rayon(0),
+				par.reborrow(),
 			);
 			let mut prod = Mat::zeros(n, n);
 			triangular::matmul(
@@ -293,7 +296,7 @@ mod tests {
 				inv.as_ref(),
 				BlockStructure::UnitTriangularLower,
 				1.0,
-				Par::rayon(0),
+				par.reborrow(),
 			);
 			for i in 0..n {
 				for j in 0..n {
@@ -302,9 +305,11 @@ mod tests {
 				}
 			}
 		});
+		});
 	}
 	#[test]
 	fn test_invert_upper() {
+		crate::team::with_team(4, |mut par| {
 		let rng = &mut StdRng::seed_from_u64(0);
 		(0..32).for_each(|n| {
 			let mut a: Mat<f64> = crate::stats::CwiseMatDistribution {
@@ -315,7 +320,7 @@ mod tests {
 			.sample(rng);
 			a += MatRef::from_repeated_ref(&2.0, n, n);
 			let mut inv = Mat::zeros(n, n);
-			invert_upper_triangular(inv.as_mut(), a.as_ref(), Par::rayon(0));
+			invert_upper_triangular(inv.as_mut(), a.as_ref(), par.reborrow());
 			let mut prod = Mat::zeros(n, n);
 			triangular::matmul(
 				prod.as_mut(),
@@ -326,7 +331,7 @@ mod tests {
 				inv.as_ref(),
 				BlockStructure::TriangularUpper,
 				1.0,
-				Par::rayon(0),
+				par.reborrow(),
 			);
 			for i in 0..n {
 				for j in 0..n {
@@ -335,9 +340,11 @@ mod tests {
 				}
 			}
 		});
+		});
 	}
 	#[test]
 	fn test_invert_unit_upper() {
+		crate::team::with_team(4, |mut par| {
 		let rng = &mut StdRng::seed_from_u64(0);
 		(0..32).for_each(|n| {
 			let mut a: Mat<f64> = crate::stats::CwiseMatDistribution {
@@ -351,7 +358,7 @@ mod tests {
 			invert_unit_upper_triangular(
 				inv.as_mut(),
 				a.as_ref(),
-				Par::rayon(0),
+				par.reborrow(),
 			);
 			let mut prod = Mat::zeros(n, n);
 			triangular::matmul(
@@ -363,7 +370,7 @@ mod tests {
 				inv.as_ref(),
 				BlockStructure::UnitTriangularUpper,
 				1.0,
-				Par::rayon(0),
+				par.reborrow(),
 			);
 			for i in 0..n {
 				for j in 0..n {
@@ -371,6 +378,7 @@ mod tests {
 					assert_approx_eq!(prod[(i, j)], target, 1e-4);
 				}
 			}
+		});
 		});
 	}
 }

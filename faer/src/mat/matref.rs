@@ -1128,7 +1128,6 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 
 	/// returns a parallel iterator over the columns of the matrix
 	#[inline]
-	#[cfg(feature = "rayon")]
 	pub fn par_col_iter(
 		self,
 	) -> impl 'a
@@ -1152,7 +1151,6 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 
 	/// returns a parallel iterator over the rows of the matrix
 	#[inline]
-	#[cfg(feature = "rayon")]
 	pub fn par_row_iter(
 		self,
 	) -> impl 'a
@@ -1174,10 +1172,9 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	/// if the number of columns is a multiple of `chunk_size`, then all chunks
 	/// have `chunk_size` columns
 	///
-	/// only available with the `rayon` feature
+	/// available in every build
 	#[inline]
 	#[track_caller]
-	#[cfg(feature = "rayon")]
 	pub fn par_col_chunks(
 		self,
 		chunk_size: usize,
@@ -1203,10 +1200,9 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	/// returns a parallel iterator that provides exactly `count` successive
 	/// chunks of the columns of this matrix
 	///
-	/// only available with the `rayon` feature
+	/// available in every build
 	#[inline]
 	#[track_caller]
-	#[cfg(feature = "rayon")]
 	pub fn par_col_partition(
 		self,
 		count: usize,
@@ -1238,10 +1234,9 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	/// if the number of rows is a multiple of `chunk_size`, then all chunks
 	/// have `chunk_size` rows
 	///
-	/// only available with the `rayon` feature
+	/// available in every build
 	#[inline]
 	#[track_caller]
-	#[cfg(feature = "rayon")]
 	pub fn par_row_chunks(
 		self,
 		chunk_size: usize,
@@ -1263,10 +1258,9 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	/// returns a parallel iterator that provides exactly `count` successive
 	/// chunks of the rows of this matrix
 	///
-	/// only available with the `rayon` feature
+	/// available in every build
 	#[inline]
 	#[track_caller]
-	#[cfg(feature = "rayon")]
 	pub fn par_row_partition(
 		self,
 		count: usize,

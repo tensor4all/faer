@@ -351,7 +351,7 @@ mod tests {
 	fn test_qr() {
 		let rng = &mut StdRng::seed_from_u64(0);
 		for rank in [1, 2, 3, 4, 5, 100, usize::MAX] {
-			for mut par in [Par::Seq, Par::rayon(8)] {
+			let mut run = |mut par: Par<'_>| {
 			let par_shape = par.shape();
 				for n in [2, 4, 8, 16, 24, 32, 127, 128, 257] {
 					let rank = Ord::min(n, rank);
@@ -558,7 +558,9 @@ mod tests {
 					}
 					assert!(Q * R ~ A);
 				}
-			}
+			};
+			run(Par::Seq);
+			crate::team::with_team(8, |par| run(par));
 		}
 	}
 	/// A matrix whose columns are not the contiguous direction is factored through
@@ -725,12 +727,14 @@ mod tests {
 		// than one column, and at least `64 * 64` elements so the copy floor
 		// lets it through. These must match the column-major factor exactly.
 		for (m, n) in [(64, 64), (128, 128), (256, 64), (300, 64), (512, 64)] {
-			for mut par in [Par::Seq, Par::rayon(8)] {
+			let run = |mut par: Par<'_>| {
 				check::<f64>(m, n, false, false, true, par.reborrow());
 				check::<c64>(m, n, false, false, true, par);
-			}
+			};
+			run(Par::Seq);
+			crate::team::with_team(8, |par| run(par));
 			check::<f64>(m, n, false, true, true, Par::Seq);
-			check::<c64>(m, n, false, true, true, Par::rayon(4));
+			crate::team::with_team(4, |par| check::<c64>(m, n, false, true, true, par));
 		}
 		// An exactly zero leading column is the one place the unblocked core
 		// stores a reflector's essential part in a different column than the one
@@ -765,7 +769,7 @@ mod tests {
 			(64, 256),
 		] {
 			check::<f64>(m, n, false, false, false, Par::Seq);
-			check::<c64>(m, n, false, false, false, Par::rayon(4));
+			crate::team::with_team(4, |par| check::<c64>(m, n, false, false, false, par));
 			check::<f64>(m, n, false, true, false, Par::Seq);
 		}
 	}
@@ -5116,10 +5120,6 @@ mod tests {
 	/// factorization must produce the sequential one.
 	#[test]
 	fn zero_column_block_does_not_panic_with_threads() {
-		let pool = rayon::ThreadPoolBuilder::new()
-			.num_threads(2)
-			.build()
-			.unwrap();
 		let (m, n, zero, block_size) = (256usize, 96usize, 32usize, 32usize);
 		let mut s = 12345u64;
 		let a = Mat::<f64>::from_fn(m, n, |_, j| {
@@ -5152,7 +5152,7 @@ mod tests {
 			rel_tol: 1e-10,
 		});
 		let (info_seq, qr_seq) = factor(Par::Seq);
-		let (info_par, qr_par) = pool.install(|| factor(Par::rayon(2)));
+		let (info_par, qr_par) = crate::team::with_team(2, |par| factor(par));
 		assert!(info_seq.rank == n - zero);
 		assert!(info_par.rank == info_seq.rank);
 		assert!(qr_par.as_ref() ~ qr_seq.as_ref());

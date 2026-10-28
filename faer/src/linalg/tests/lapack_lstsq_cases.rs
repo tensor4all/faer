@@ -416,7 +416,6 @@ fn lapack_lstsq_cases() {
 	}
 	run.finish(10 * 4 * 2 * 2 + 3 * 2 * 4);
 }
-#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_lstsq_parallel() {
@@ -424,21 +423,17 @@ fn lapack_lstsq_parallel() {
 	for pivot in [false, true] {
 		qr_lstsq_case(&mut run, 257, 193, 0, 0, pivot, Par::Seq);
 		for threads in [2, 4] {
-			rayon::ThreadPoolBuilder::new()
-				.num_threads(threads)
-				.build()
-				.unwrap()
-				.install(|| {
-					qr_lstsq_case(
-						&mut run,
-						257,
-						193,
-						0,
-						threads / 2,
-						pivot,
-						Par::rayon(threads),
-					)
-				});
+			crate::team::with_team(threads, |par| {
+				qr_lstsq_case(
+					&mut run,
+					257,
+					193,
+					0,
+					threads / 2,
+					pivot,
+					par,
+				)
+			});
 		}
 	}
 	run.finish(12);

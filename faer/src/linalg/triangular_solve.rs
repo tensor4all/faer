@@ -465,7 +465,6 @@ fn solve_unit_lower_triangular_in_place_imp<'N, 'K, T: ComplexField>(
 		// One flat split of the right hand sides over the budget when the whole solve pays for one
 		// section; the halving below (a join per level, each nested in the one above) is the shape
 		// rule for a sequential run.
-		#[cfg(feature = "rayon")]
 		{
 			let jobs = Ord::min(par.degree(), k.div_ceil(64));
 			if jobs >= 2
@@ -587,7 +586,6 @@ fn solve_lower_triangular_in_place_imp<'N, 'K, T: ComplexField>(
 	let n = N.unbound();
 	let k = K.unbound();
 	if k > 64 && n <= 128 {
-		#[cfg(feature = "rayon")]
 		{
 			let jobs = Ord::min(par.degree(), k.div_ceil(64));
 			if jobs >= 2

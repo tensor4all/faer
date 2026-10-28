@@ -806,7 +806,7 @@ mod tests {
 	fn test_hessenberg_cplx() {
 		let rng = &mut StdRng::seed_from_u64(0);
 		for n in [1, 2, 3, 4, 8, 16] {
-			for par in [Par::Seq, Par::rayon(4)] {
+			let mut run = |par: Par<'_>| {
 				let A = CwiseMatDistribution {
 					nrows: n,
 					ncols: n,
@@ -863,14 +863,109 @@ mod tests {
 					}
 				}
 				assert!(V ~ A);
-			}
+			};
+			run(Par::Seq);
+			crate::team::with_team(4, |par| run(par));
 		}
+	}
+	/// The blocked team route reassembles `A` from its own reflectors at a size where it takes
+	/// the blocked path, for the complex scalars too (`ParThreshold::Fixed(1)` so every step pays).
+	/// The team and the sequential route give different factorizations there — measured
+	/// `1.38`/`9.26` on the factored matrices of the bidiagonalization and this reduction at
+	/// `origin/main` as well — so the oracle is the reconstruction, not an elementwise comparison.
+	#[test]
+	fn test_hessenberg_cplx_team_reconstructs_blocked() {
+		fn check<T: crate::ComplexField<Real = f64>>(a: Mat<T>) {
+			let n = a.nrows();
+			let b = 8;
+			let mut h = Mat::<T>::zeros(b, n - 1);
+			let mut v = a.clone();
+			let params: HessenbergParams = HessenbergParams {
+				par_threshold: ParThreshold::Fixed(1),
+				blocking_threshold: usize::MAX,
+				..auto!(T)
+			};
+			let mut mem = MemBuffer::new(hessenberg_in_place_scratch::<T>(
+				n,
+				b,
+				ParShape::team(4),
+				params.into(),
+			));
+			crate::team::with_team(4, |par| {
+				let mut v_v = v.as_mut();
+				hessenberg_in_place(
+					v_v.rb_mut(),
+					h.as_mut(),
+					par,
+					MemStack::new(&mut mem),
+					params.into(),
+				);
+			});
+			let mut rebuilt = a.clone();
+			let mut rebuilt = rebuilt.as_mut();
+			for iter in 0..2 {
+				let mut dst = if iter == 0 {
+					rebuilt.rb_mut()
+				} else {
+					rebuilt.rb_mut().transpose_mut()
+				};
+				let m = n - 1;
+				let vv = v.rb().submatrix(1, 0, m, m);
+				let mut dst = dst.rb_mut().subrows_mut(1, m);
+				householder::apply_block_householder_sequence_transpose_on_the_left_in_place_with_conj(
+					vv,
+					h.as_ref(),
+					if iter == 0 { Conj::Yes } else { Conj::No },
+					dst.rb_mut(),
+					Par::Seq,
+					MemStack::new(&mut MemBuffer::new(
+						householder::apply_block_householder_sequence_transpose_on_the_left_in_place_scratch::<T>(m, b, n + 1),
+					)),
+				);
+			}
+			for j in 0..n {
+				for i in 0..n {
+					if i > j + 1 {
+						v[(i, j)] = T::zero();
+					}
+				}
+			}
+			let mut err = 0.0f64;
+			let mut nonfinite = false;
+			let mut scale = 0.0f64;
+			for j in 0..n {
+				for i in 0..n {
+					let d = (v[(i, j)].clone() - rebuilt[(i, j)].clone()).abs();
+					nonfinite |= !d.is_finite() || !v[(i, j)].abs().is_finite();
+					if d.is_finite() {
+						err = err.max(d);
+					}
+					scale = scale.max(a[(i, j)].abs());
+				}
+			}
+			core::assert!(!nonfinite, "non-finite factor or difference at {n}x{n}");
+			core::assert!(err <= 1e-10 * scale.max(1.0), "{n}x{n}: {err} {scale}");
+		}
+		let rng = &mut StdRng::seed_from_u64(21);
+		for n in [16usize, 96] {
+			check::<c64>(Mat::from_fn(n, n, |_, _| {
+				c64::new(
+					rand::Rng::random::<f64>(rng),
+					rand::Rng::random::<f64>(rng),
+				)
+			}));
+		}
+		// the fixture of the cost tests: real values in the complex dtype
+		check::<c64>(Mat::from_fn(96, 96, |i, j| {
+			let k = (i * 2654435761usize).wrapping_add(j * 40503).wrapping_add(977) % 1009;
+			c64::new(k as f64 / 504.0 - 1.0, 0.0)
+		}));
 	}
 	#[test]
 	fn test_hessenberg_cplx_gqvdg() {
 		let rng = &mut StdRng::seed_from_u64(0);
 		for n in [2, 3, 4, 8, 16, 21] {
-			for par in [Par::Seq, Par::rayon(4)] {
+			let mut run = |par: Par<'_>| {
 				let b = 4;
 				let A = CwiseMatDistribution {
 					nrows: n,
@@ -927,7 +1022,9 @@ mod tests {
 					}
 				}
 				assert!(V ~ A);
-			}
+			};
+			run(Par::Seq);
+			crate::team::with_team(4, |par| run(par));
 		}
 	}
 }

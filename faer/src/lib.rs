@@ -155,48 +155,79 @@
 //! [`Mat::eigenvalues`] with the same conditions described above.
 //!
 //! # parallelism
-//! there is no process wide parallelism setting. Every function that can run in parallel takes a
-//! [`Par`] argument, the high level ones included ([`Mat::svd`], [`Mat::llt`],
-//! [`Mat::singular_values`], the `solve` family of [`linalg::solvers::Solve`], ...). Pass
-//! [`Par::Seq`] for sequential execution, or [`Par::rayon`] for the global rayon threadpool. The
-//! operator overloads (`&a * &b`, `&a + &b`, ...) have no room for the argument and always run
-//! sequentially; use [`linalg::matmul::matmul`] for a parallel product.
+//! there is no process wide parallelism setting and no global threadpool. Every function that can
+//! run in parallel takes a [`Par`] argument, the high level ones included ([`Mat::svd`],
+//! [`Mat::llt`], [`Mat::singular_values`], the `solve` family of
+//! [`linalg::solvers::Solve`], ...). Pass [`Par::Seq`] for sequential execution, or own a team for
+//! the calls that should use one:
 //!
-//! how a region is scheduled depends on whether the **caller holds the worker group**: the regions
-//! are issued through [`spindle`], the thread-pool helper the parallel paths are built on.
-//!
-//! - outside [`spindle::with_lock`], every region is a plain rayon fork/join: the workers are woken
-//!   for it and put back to sleep after it, and which worker gets which part is arbitrary
-//! - inside [`spindle::with_lock`]`(n, || { ... })`, `n` workers are held for the whole closure:
-//!   they spin between regions instead of being woken for each one, and worker `k` keeps part `k`
-//!   of every partition, so the data a region leaves in a core's cache is the data the next region
-//!   on that core reads
-//!
-//! the difference is small for one large product and large for an algorithm made of many short
-//! regions: the bidiagonalization behind the SVD issues two vector products per step, and at
-//! `n = 512` on eight threads it costs 25.5 ms with plain regions and 19.2 ms with the group held
-//! (`docs/worklogs/2026-10-23-blocked-bidiag.md`), which is where the values-only SVD reaches the
-//! vendor's time. the library does not take the lock itself: its scope is the caller's session or
-//! region, taking it once around a sequence of calls is what pays, and nesting is allowed (a lock
-//! taken inside another borrows the outer group's workers, which is what the native gemm kernel
-//! does on every threaded product). so a caller with a thread budget should wrap its work:
-//!
-//! ```ignore
-//! let par = Par::rayon(8);
-//! faer::spindle::with_lock(8, || {
-//!     // every faer call in here with `par` runs its regions over the held group
-//!     svd_in_place(a.as_mut(), s.as_mut(), None, None, par, stack, params)
+//! ```
+//! use faer::{Accum, Mat};
+//! let a = Mat::<f64>::from_fn(16, 16, |i, j| (i == j) as u8 as f64 + 0.5);
+//! let mut dst = Mat::<f64>::zeros(16, 16);
+//! faer::team::with_team(4, |par| {
+//!     faer::linalg::matmul::matmul(
+//!         dst.as_mut(),
+//!         Accum::Replace,
+//!         a.as_ref(),
+//!         a.as_ref(),
+//!         1.0,
+//!         par,
+//!     );
 //! });
 //! ```
 //!
-//! the held workers busy-wait for a bounded time between regions, then sleep; the budget they
-//! occupy is the one the caller handed to `Par::Rayon`
+//! The operator overloads (`&a * &b`, `&a + &b`, ...) have no room for the argument and always run
+//! sequentially; use [`linalg::matmul::matmul`] for a parallel product.
+//!
+//! a team is a reservation the caller owns: its members spin while the reservation is held,
+//! instead of being woken for every region, and the token hands each region the authority to
+//! place work on them. That is what makes a sequence of short regions cheap: the
+//! bidiagonalization behind the SVD issues two vector products per step, and at `n = 512` on
+//! eight threads it costs 25.5 ms with the members woken per region and 19.2 ms with the team
+//! held (`docs/worklogs/2026-10-23-blocked-bidiag.md`), which is where the values-only SVD
+//! reaches the vendor's time. `with_team` takes the reservation once, so a caller with a thread
+//! budget wraps its work rather than handing a number to every call:
+//!
+//! ```
+//! use faer::dyn_stack::{MemBuffer, MemStack};
+//! use faer::{Mat, Par};
+//! let a = Mat::<f64>::from_fn(64, 64, |i, j| ((i * 7 + j * 13) % 11) as f64 + 0.5);
+//! let mut s = Mat::<f64>::zeros(64, 1);
+//! let mut mem = MemBuffer::new(faer::linalg::svd::svd_scratch::<f64>(
+//!     64,
+//!     64,
+//!     faer::linalg::svd::ComputeSvdVectors::No,
+//!     faer::linalg::svd::ComputeSvdVectors::No,
+//!     faer::ParShape::team(4),
+//!     Default::default(),
+//! ));
+//! faer::team::with_team(4, |par| {
+//!     // every faer call in here with `par` runs its regions on the four reserved members
+//!     faer::linalg::svd::svd(
+//!         a.as_ref(),
+//!         s.as_mut().col_mut(0).as_diagonal_mut(),
+//!         None,
+//!         None,
+//!         par,
+//!         MemStack::new(&mut mem),
+//!         Default::default(),
+//!     )
+//!     .unwrap();
+//! });
+//! ```
+//!
+//! the members busy-wait for a bounded time between regions, then sleep; the width is the one the
+//! caller asked `with_team` for, and there is no process-wide setting to override it.
 //!
 //! # crate features
 //!
 //! - `std`: enabled by default. links with the standard library to enable
 //!   additional features such as cpu feature detection at runtime
-//! - `rayon`: enabled by default. enables the `rayon` parallel backend
+//! - `rayon`: enabled by default. selects the `rayon` backend of the `gemm` dependency; the
+//!   parallel route itself (`Par::Team`, `team::with_team`) always uses `rayon`'s iterator
+//!   plumbing, so the dependency is not optional
+//! - `threadteam`: enabled by default. the name the consumers pass; it pulls in `rayon`
 //! - `npy`: enables conversions to/from numpy's matrix file format
 //! - `perf-warn`: produces performance warnings when matrix operations are
 //!   called with suboptimal
@@ -655,6 +686,8 @@ pub mod row;
 pub mod sparse;
 /// helper utilities
 pub mod utils;
+/// the parallel route: owns a threadteam team and hands out `Par::Team` for a closure
+pub use utils::team;
 /// native unsigned integer type
 pub trait Index: traits::IndexCore + traits::Index + seal::Seal {}
 impl<T: faer_traits::Index<Signed: seal::Seal> + seal::Seal> Index for T {}
@@ -1015,20 +1048,11 @@ impl Conj {
 pub enum Par<'team> {
 	/// sequential, non portable across different platforms
 	Seq,
-	/// parallelized using the global rayon threadpool, non portable across
-	/// different platforms. the regions this budget splits run fastest when the caller holds the
-	/// worker group around its calls with [`spindle::with_lock`] (see the crate documentation's
-	/// *parallelism* section)
-	#[cfg(feature = "rayon")]
-	Rayon(NonZeroUsize),
-	/// experimental: parallelized on the reserved members of a threadteam team. The value is
-	/// the exclusive authority over them for as long as it lives; the number of participants is
-	/// the size of the team.
-	#[cfg(feature = "threadteam")]
+	/// parallelized on the reserved members of a threadteam team. The value is the exclusive
+	/// authority over them for as long as it lives; the number of participants is the size of the
+	/// team. This is the only parallel route: see [`Par::Team`], [`team::with_team`] and
+	/// `utils::team`.
 	Team(threadteam::TeamExec<'team>),
-	#[cfg(not(feature = "threadteam"))]
-	#[doc(hidden)]
-	__Lifetime(core::convert::Infallible, core::marker::PhantomData<&'team ()>),
 }
 /// the shape of a [`Par`]: which kind of parallelism and how many threads, without the
 /// right to run anything. `Copy`, so workspace queries and thresholds can use it freely; it
@@ -1037,12 +1061,8 @@ pub enum Par<'team> {
 pub enum ParShape {
 	/// sequential
 	Seq,
-	/// the global rayon threadpool with this many threads
-	#[cfg(feature = "rayon")]
-	Rayon(NonZeroUsize),
 	/// a threadteam team of this many participants, with the dispatch costs of the pool it
 	/// belongs to (see [`ParShape::dispatch_cost`])
-	#[cfg(feature = "threadteam")]
 	Team(NonZeroUsize, threadteam::DispatchCosts),
 }
 impl ParShape {
@@ -1052,19 +1072,8 @@ impl ParShape {
 		Self::Seq
 	}
 
-	/// `Rayon(nthreads)`, or `Rayon(rayon::current_num_threads())` when `nthreads` is zero
-	#[inline]
-	#[cfg(feature = "rayon")]
-	pub fn rayon(nthreads: usize) -> Self {
-		match Par::rayon(nthreads) {
-			Par::Rayon(n) => Self::Rayon(n),
-			_ => unreachable!(),
-		}
-	}
-
 	/// `Team(nthreads)` with the host default dispatch costs, zero treated as one
 	#[inline]
-	#[cfg(feature = "threadteam")]
 	pub fn team(nthreads: usize) -> Self {
 		Self::Team(
 			NonZeroUsize::new(nthreads.max(1)).unwrap(),
@@ -1077,9 +1086,6 @@ impl ParShape {
 	pub fn degree(self) -> usize {
 		match self {
 			Self::Seq => 1,
-			#[cfg(feature = "rayon")]
-			Self::Rayon(n) => n.get(),
-			#[cfg(feature = "threadteam")]
 			Self::Team(n, _) => n.get(),
 		}
 	}
@@ -1091,12 +1097,7 @@ impl Par<'_> {
 	pub fn reborrow(&mut self) -> Par<'_> {
 		match self {
 			Par::Seq => Par::Seq,
-			#[cfg(feature = "rayon")]
-			Par::Rayon(n) => Par::Rayon(*n),
-			#[cfg(feature = "threadteam")]
 			Par::Team(team) => Par::Team(team.reborrow()),
-			#[cfg(not(feature = "threadteam"))]
-			Par::__Lifetime(never, _) => match *never {},
 		}
 	}
 
@@ -1105,26 +1106,7 @@ impl Par<'_> {
 	pub fn shape(&self) -> ParShape {
 		match self {
 			Par::Seq => ParShape::Seq,
-			#[cfg(feature = "rayon")]
-			Par::Rayon(n) => ParShape::Rayon(*n),
-			#[cfg(feature = "threadteam")]
 			Par::Team(team) => ParShape::Team(team.size(), team.dispatch_costs()),
-			#[cfg(not(feature = "threadteam"))]
-			Par::__Lifetime(never, _) => match *never {},
-		}
-	}
-
-	/// returns `Par::Rayon(nthreads)` if `nthreads` is non-zero, or
-	/// `Par::Rayon(rayon::current_num_threads())` otherwise
-	#[inline]
-	#[cfg(feature = "rayon")]
-	pub fn rayon(nthreads: usize) -> Self {
-		if nthreads == 0 {
-			Self::Rayon(
-				NonZeroUsize::new(rayon::current_num_threads()).unwrap(),
-			)
-		} else {
-			Self::Rayon(NonZeroUsize::new(nthreads).unwrap())
 		}
 	}
 
@@ -1132,7 +1114,10 @@ impl Par<'_> {
 	/// given parallelism
 	#[inline]
 	pub fn degree(&self) -> usize {
-		utils::thread::parallelism_degree(self)
+		match self {
+			Par::Seq => 1,
+			Par::Team(team) => team.size().get(),
+		}
 	}
 }
 #[allow(non_camel_case_types)]
@@ -1147,11 +1132,6 @@ pub type cx128 = traits::cx128;
 #[allow(non_camel_case_types)]
 /// `Complex<f64>`
 pub type fx128 = traits::fx128;
-/// the thread-pool helper the parallel paths are built on, re-exported so that a caller with a
-/// thread budget can hold the worker group across its calls with [`spindle::with_lock`]: see the
-/// crate documentation's *parallelism* section
-#[cfg(feature = "rayon")]
-pub use spindle;
 pub use col::{Col, ColMut, ColRef};
 pub use mat::{Mat, MatMut, MatRef};
 pub use row::{Row, RowMut, RowRef};

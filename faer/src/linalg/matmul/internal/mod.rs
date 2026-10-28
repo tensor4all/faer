@@ -74,8 +74,7 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 	// width `width_for` chooses; the one-section gate at the full degree is applied to it only
 	// where there is no kernel (`team_gate_pending`).
 	let units = (nrows * ncols).saturating_mul(depth);
-	let team_gate_pending =
-		crate::utils::thread::is_team(&par) && par.degree() >= 2;
+	let team_gate_pending = matches!(&par, Par::Team(_)) && par.degree() >= 2;
 	let mut par = if team_gate_pending
 		|| crate::utils::cost::par_pays::<T>(
 			&par,
@@ -250,8 +249,7 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 			}
 			// a `Team` token runs the kernel on its own members (`Fork` of the team), gated by the
 			// kernel's two sections at the width `width_for` chooses; below the gate the kernel
-			// runs on the calling thread. It never hands its size to spindle.
-			#[cfg(feature = "threadteam")]
+			// runs on the calling thread. It never hands its size to a team.
 			if let Par::Team(team) = par {
 				let macs = nrows.saturating_mul(ncols).saturating_mul(depth);
 				let macs = if matches!(C_block, BlockStructure::Rectangular) {

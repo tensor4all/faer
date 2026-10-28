@@ -631,7 +631,7 @@ fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 	);
 	// On x86_64 the `private_gemm_x86` kernel does the product into the triangle. A `Team` token
 	// runs it on its own members (`Fork` of the team), gated by the kernel's two sections at the
-	// width `width_for` chooses; Rayon and Seq hand it the degree. Without the kernel (other
+	// width `width_for` chooses; Seq hands it the degree. Without the kernel (other
 	// targets, other dtypes) a team that pays runs the recursion below on the team.
 	#[cfg(all(target_arch = "x86_64", feature = "std"))]
 	if const {
@@ -705,7 +705,6 @@ fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 							)
 						};
 					}
-					#[cfg(feature = "threadteam")]
 					if let Par::Team(team) = par {
 						let estimate = crate::utils::cost::serial_time(
 							dst.nrows()

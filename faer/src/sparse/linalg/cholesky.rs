@@ -5334,7 +5334,7 @@ pub(super) mod tests {
 				SupernodalThreshold::FORCE_SIMPLICIAL,
 				SupernodalThreshold::FORCE_SUPERNODAL,
 			] {
-				for mut par in [Par::Seq, Par::rayon(4)] {
+				let mut run = |mut par: Par<'_>| -> Result {
 			let par_shape = par.shape();
 					let symbolic = &factorize_symbolic_cholesky(
 						A.symbolic(),
@@ -5391,7 +5391,10 @@ pub(super) mod tests {
 							assert!(rhs ~ target);
 						}
 					}
-				}
+				Ok(())
+				};
+				run(Par::Seq)?;
+				crate::team::with_team(4, |par| run(par))?;
 			}
 		}
 		Ok(())
@@ -5416,7 +5419,7 @@ pub(super) mod tests {
 				SupernodalThreshold::FORCE_SIMPLICIAL,
 				SupernodalThreshold::FORCE_SUPERNODAL,
 			] {
-				for mut par in [Par::Seq, Par::rayon(4)] {
+				let mut run = |mut par: Par<'_>| -> Result {
 			let par_shape = par.shape();
 					let symbolic = &factorize_symbolic_cholesky(
 						A.symbolic(),
@@ -5473,7 +5476,10 @@ pub(super) mod tests {
 							assert!(rhs ~ target);
 						}
 					}
-				}
+				Ok(())
+				};
+				run(Par::Seq)?;
+				crate::team::with_team(4, |par| run(par))?;
 			}
 		}
 		Ok(())
@@ -5498,7 +5504,7 @@ pub(super) mod tests {
 				SupernodalThreshold::FORCE_SIMPLICIAL,
 				SupernodalThreshold::FORCE_SUPERNODAL,
 			] {
-				for mut par in [Par::Seq, Par::rayon(4)] {
+				let mut run = |mut par: Par<'_>| -> Result {
 			let par_shape = par.shape();
 					let symbolic = &factorize_symbolic_cholesky(
 						A.symbolic(),
@@ -5561,7 +5567,10 @@ pub(super) mod tests {
 							assert!(rhs ~ target);
 						}
 					}
-				}
+				Ok(())
+				};
+				run(Par::Seq)?;
+				crate::team::with_team(4, |par| run(par))?;
 			}
 		}
 		Ok(())

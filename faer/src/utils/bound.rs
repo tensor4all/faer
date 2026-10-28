@@ -233,7 +233,6 @@ impl<'n> Dim<'n> {
 
 	/// returns an iterator over the indices between `0` and `self`.
 	#[inline]
-	#[cfg(feature = "rayon")]
 	pub fn par_indices(
 		self,
 	) -> impl rayon::iter::IndexedParallelIterator<Item = Idx<'n>> {

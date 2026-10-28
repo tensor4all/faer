@@ -438,7 +438,6 @@ fn lapack_nonsymmetric_evd_cases() {
 	}
 	run.finish(10 * 9 * 2 * 8 + 2 * 2 * 3 * 8 + 10 * 6 * 2 * 2);
 }
-#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_nonsymmetric_evd_parallel() {
@@ -446,20 +445,16 @@ fn lapack_nonsymmetric_evd_parallel() {
 	let a = general_case(129, 4);
 	full_evd_case(&mut run, a.as_ref(), 0, Par::Seq, 64, 4);
 	for threads in [2, 4] {
-		rayon::ThreadPoolBuilder::new()
-			.num_threads(threads)
-			.build()
-			.unwrap()
-			.install(|| {
-				full_evd_case(
-					&mut run,
-					a.as_ref(),
-					0,
-					Par::rayon(threads),
-					64,
-					4,
-				)
-			});
+		crate::team::with_team(threads, |par| {
+			full_evd_case(
+				&mut run,
+				a.as_ref(),
+				0,
+				par,
+				64,
+				4,
+			)
+		});
 	}
 	run.finish(24);
 }

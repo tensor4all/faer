@@ -1338,34 +1338,35 @@ unsafe extern "C" {
 		info: *mut c_int,
 	) -> c_void;
 }
-fn lapack_set_num_threads(parallel: Par) {
-	let _ = parallel;
+/// The width of the parallel arm. The benchmark used to hand the parallelism constructor the size
+/// of the pool it was installed in; the parallel route is now a team the caller owns, so the width
+/// comes from `RAYON_NUM_THREADS` (the knob that used to size that pool) or from the machine.
+fn bench_threads() -> usize {
+	std::env::var("RAYON_NUM_THREADS")
+		.ok()
+		.and_then(|v| v.parse().ok())
+		.filter(|&n| n > 0)
+		.unwrap_or_else(|| {
+			std::thread::available_parallelism()
+				.map(|n| n.get())
+				.unwrap_or(1)
+		})
+}
+fn lapack_set_num_threads(threads: usize) {
 	#[cfg(any(openblas, mkl, blis))]
-	match parallel {
-		Par::Seq => unsafe {
-			#[cfg(openblas)]
-			openblas_set_num_threads(1);
-			#[cfg(openblas)]
-			goto_set_num_threads(1);
-			#[cfg(mkl)]
-			MKL_Set_Num_Threads(1);
-			#[cfg(blis)]
-			bli_thread_set_num_threads(1);
-			omp_set_num_threads(1);
-		},
-		Par::Rayon(nthreads) => unsafe {
-			let nthreads = nthreads.get();
-			#[cfg(openblas)]
-			openblas_set_num_threads(nthreads as _);
-			#[cfg(openblas)]
-			goto_set_num_threads(nthreads as _);
-			#[cfg(mkl)]
-			MKL_Set_Num_Threads(nthreads as _);
-			#[cfg(blis)]
-			bli_thread_set_num_threads(nthreads as _);
-			omp_set_num_threads(nthreads as _);
-		},
-	};
+	unsafe {
+		#[cfg(openblas)]
+		openblas_set_num_threads(threads as _);
+		#[cfg(openblas)]
+		goto_set_num_threads(threads as _);
+		#[cfg(mkl)]
+		MKL_Set_Num_Threads(threads as _);
+		#[cfg(blis)]
+		bli_thread_set_num_threads(threads as _);
+		omp_set_num_threads(threads as _);
+	}
+	#[cfg(not(any(openblas, mkl, blis)))]
+	let _ = threads;
 }
 trait Scalar: Copy + faer_traits::ComplexField + na::ComplexField {
 	const IS_NATIVE: bool = Self::IS_NATIVE_F32
@@ -1506,8 +1507,9 @@ fn llt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	assert!(m == n);
 	let rng = &mut StdRng::seed_from_u64(0);
 	let A = T::random(rng, m, n);
@@ -1591,8 +1593,13 @@ fn llt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			}
 		})
 	}
-}
-fn ldlt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}fn ldlt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	bencher: Bencher,
 	PlotArg(n): PlotArg,
 ) {
@@ -1604,8 +1611,9 @@ fn ldlt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	assert!(m == n);
 	let rng = &mut StdRng::seed_from_u64(0);
 	let A = T::random(rng, m, n);
@@ -1636,8 +1644,13 @@ fn ldlt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			.unwrap();
 		})
 	}
-}
-fn lblt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}fn lblt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	bencher: Bencher,
 	PlotArg(n): PlotArg,
 ) {
@@ -1653,8 +1666,9 @@ fn lblt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	assert!(m == n);
 	let rng = &mut StdRng::seed_from_u64(0);
 	let A = T::random(rng, m, n);
@@ -1800,8 +1814,13 @@ fn lblt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			}
 		})
 	}
-}
-fn lblt_diag<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}fn lblt_diag<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	bencher: Bencher,
 	PlotArg(n): PlotArg,
 ) {
@@ -1817,8 +1836,9 @@ fn lblt_diag<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	assert!(m == n);
 	let rng = &mut StdRng::seed_from_u64(0);
 	let A = T::random(rng, m, n);
@@ -1852,8 +1872,13 @@ fn lblt_diag<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			);
 		})
 	}
-}
-fn lblt_rook<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}fn lblt_rook<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	bencher: Bencher,
 	PlotArg(n): PlotArg,
 ) {
@@ -1869,8 +1894,9 @@ fn lblt_rook<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	assert!(m == n);
 	let rng = &mut StdRng::seed_from_u64(0);
 	let A = T::random(rng, m, n);
@@ -2016,8 +2042,13 @@ fn lblt_rook<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			}
 		})
 	}
-}
-fn lblt_rook_diag<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}fn lblt_rook_diag<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	bencher: Bencher,
 	PlotArg(n): PlotArg,
 ) {
@@ -2033,8 +2064,9 @@ fn lblt_rook_diag<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	assert!(m == n);
 	let rng = &mut StdRng::seed_from_u64(0);
 	let A = T::random(rng, m, n);
@@ -2068,8 +2100,13 @@ fn lblt_rook_diag<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			);
 		})
 	}
-}
-fn lblt_full<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}fn lblt_full<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	bencher: Bencher,
 	PlotArg(n): PlotArg,
 ) {
@@ -2085,8 +2122,9 @@ fn lblt_full<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	assert!(m == n);
 	let rng = &mut StdRng::seed_from_u64(0);
 	let A = T::random(rng, m, n);
@@ -2120,8 +2158,13 @@ fn lblt_full<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			);
 		})
 	}
-}
-fn qr<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}fn qr<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	bencher: Bencher,
 	PlotArg(n): PlotArg,
 ) {
@@ -2133,8 +2176,9 @@ fn qr<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	let block_size =
 		linalg::qr::no_pivoting::factor::recommended_block_size::<T>(m, n);
 	let rng = &mut StdRng::seed_from_u64(0);
@@ -2288,8 +2332,13 @@ fn qr<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			}
 		});
 	}
-}
-fn col_piv_qr<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}fn col_piv_qr<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	bencher: Bencher,
 	PlotArg(n): PlotArg,
 ) {
@@ -2301,8 +2350,9 @@ fn col_piv_qr<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	let block_size =
 		linalg::qr::col_pivoting::factor::recommended_block_size::<T>(m, n);
 	let rng = &mut StdRng::seed_from_u64(0);
@@ -2475,8 +2525,13 @@ fn col_piv_qr<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			}
 		});
 	}
-}
-fn partial_piv_lu<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}fn partial_piv_lu<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	bencher: Bencher,
 	PlotArg(n): PlotArg,
 ) {
@@ -2488,8 +2543,9 @@ fn partial_piv_lu<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	assert!(m == n);
 	let rng = &mut StdRng::seed_from_u64(0);
 	let A = T::random(rng, m, n);
@@ -2577,8 +2633,13 @@ fn partial_piv_lu<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			}
 		})
 	}
-}
-fn full_piv_lu<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}fn full_piv_lu<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	bencher: Bencher,
 	PlotArg(n): PlotArg,
 ) {
@@ -2590,8 +2651,9 @@ fn full_piv_lu<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	let rng = &mut StdRng::seed_from_u64(0);
 	let A = T::random(rng, m, n);
 	#[cfg(eigen)]
@@ -2683,8 +2745,13 @@ fn full_piv_lu<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			}
 		})
 	}
-}
-fn svd<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}fn svd<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	bencher: Bencher,
 	PlotArg(n): PlotArg,
 ) {
@@ -2696,8 +2763,9 @@ fn svd<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	let rng = &mut StdRng::seed_from_u64(0);
 	let A = T::random(rng, m, n);
 	#[cfg(eigen)]
@@ -2913,8 +2981,13 @@ fn svd<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			}
 		});
 	}
-}
-fn self_adjoint_evd<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}fn self_adjoint_evd<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	bencher: Bencher,
 	PlotArg(n): PlotArg,
 ) {
@@ -2926,8 +2999,9 @@ fn self_adjoint_evd<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	assert!(m == n);
 	let rng = &mut StdRng::seed_from_u64(0);
 	let A = T::random(rng, m, n);
@@ -3129,8 +3203,13 @@ fn self_adjoint_evd<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			}
 		});
 	}
-}
-fn evd<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}fn evd<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	bencher: Bencher,
 	PlotArg(n): PlotArg,
 ) {
@@ -3142,8 +3221,9 @@ fn evd<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 		bencher.skip();
 		return;
 	}
-	let mut parallel = if Thd::PAR { Par::rayon(0) } else { Par::Seq };
-	lapack_set_num_threads(parallel.reborrow());
+	let threads = if Thd::PAR { bench_threads() } else { 1 };
+	lapack_set_num_threads(threads);
+	let body = |mut parallel: Par<'_>| {
 	assert!(m == n);
 	let rng = &mut StdRng::seed_from_u64(0);
 	let A = T::random(rng, m, n);
@@ -3359,8 +3439,13 @@ fn evd<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 			}
 		});
 	}
-}
-#[derive(Clone)]
+	};
+	if Thd::PAR && Lib::FAER {
+		::faer::team::with_team(threads, body)
+	} else {
+		body(Par::Seq)
+	}
+}#[derive(Clone)]
 pub struct FlopsMetric;
 impl diol::traits::PlotMetric for FlopsMetric {
 	fn name(&self) -> &'static str {
@@ -3375,6 +3460,12 @@ impl diol::traits::PlotMetric for FlopsMetric {
 		diol::traits::Monotonicity::HigherIsBetter
 	}
 }
+/// Which arm a row belongs to: the sequential one, or the one that runs the parallel route.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arm {
+	Seq,
+	Par,
+}
 fn main() -> eyre::Result<()> {
 	let config = std::fs::read_to_string(concat!(
 		env!("CARGO_MANIFEST_DIR"),
@@ -3382,12 +3473,14 @@ fn main() -> eyre::Result<()> {
 	))?
 	.parse::<Table>()
 	.unwrap();
-	let mut parallel: Vec<fn() -> Par<'static>> = vec![];
+	let mut parallel: Vec<Arm> = vec![];
 	if config["par"]["seq"].as_bool().unwrap() {
-		parallel.push(|| Par::Seq);
+		parallel.push(Arm::Seq);
 	}
+	// `par.rayon` selects the parallel arm; the name of the key is the one `bench.toml` has used
+	// since the route was Rayon's
 	if config["par"]["rayon"].as_bool().unwrap() {
-		parallel.push(|| Par::rayon(0));
+		parallel.push(Arm::Par);
 	}
 	let shapes = |name: &str| {
 		config[name]["shapes"]
@@ -3402,14 +3495,13 @@ fn main() -> eyre::Result<()> {
 	macro_rules! register {
 		($T: ident) => {{
 			type T = $T;
-			for &make_par in &parallel {
-				let parallel = make_par();
+			for &arm in &parallel {
 				macro_rules! register_one {
 					($title: expr, $name: ident, $config: expr) => {
 						let par_name = &format!(
 							"{} parallel ({} threads) {}",
 							stringify!($T),
-							rayon::current_num_threads(),
+							bench_threads(),
 							$title
 						);
 						let seq_name = &format!(
@@ -3418,9 +3510,9 @@ fn main() -> eyre::Result<()> {
 							" sequential ",
 							$title
 						);
-						let name = match parallel {
-							Par::Seq => seq_name,
-							_ => par_name,
+						let name = match arm {
+							Arm::Seq => seq_name,
+							Arm::Par => par_name,
 						};
 						if bench_config
 							.group_filter
@@ -3441,8 +3533,8 @@ fn main() -> eyre::Result<()> {
 									groups: HashMap::new(),
 								});
 							let bench = Bench::new(&bench_config);
-							match parallel {
-								Par::Seq => bench.register_many(
+							match arm {
+								Arm::Seq => bench.register_many(
 									seq_name,
 									{
 										let list = diol::variadics::Nil;
@@ -3603,42 +3695,11 @@ fn main() -> eyre::Result<()> {
 			}
 		}};
 	}
-	let shl = |a: u32, b: i32| {
-		if b >= 0 { a << b } else { a >> -b }
-	};
-	spindle::SPIN_LIMIT.store(
-		shl(
-			spindle::DEFAULT_SPIN_LIMIT,
-			std::env::var("SPIN")
-				.as_deref()
-				.unwrap_or("0")
-				.parse::<i32>()
-				.unwrap(),
-		),
-		std::sync::atomic::Ordering::Relaxed,
-	);
-	spindle::PAUSE_LIMIT.store(
-		shl(
-			spindle::DEFAULT_PAUSE_LIMIT,
-			std::env::var("PAUSE")
-				.as_deref()
-				.unwrap_or("0")
-				.parse::<i32>()
-				.unwrap(),
-		),
-		std::sync::atomic::Ordering::Relaxed,
-	);
-	spindle::with_lock(
-		rayon::current_num_threads(),
-		|| -> eyre::Result<()> {
-			register!(f32);
-			register!(f64);
-			register!(fx128);
-			register!(c32);
-			register!(c64);
-			register!(cx128);
-			Ok(())
-		},
-	)?;
+	register!(f32);
+	register!(f64);
+	register!(fx128);
+	register!(c32);
+	register!(c64);
+	register!(cx128);
 	Ok(())
 }

@@ -174,11 +174,9 @@ pub fn sparse_sparse_matmul_numeric<
 		Par::Seq => {
 			job(0);
 		},
-		#[cfg(feature = "rayon")]
 		_ if !parallel => {
 			job(0);
 		},
-		#[cfg(feature = "rayon")]
 		_ => {
 		let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 			use rayon::prelude::*;
@@ -504,7 +502,7 @@ mod tests {
 		)
 		.unwrap();
 		let c =
-			sparse_sparse_matmul(a.rb(), b.rb(), 2.0, Par::rayon(12)).unwrap();
+			crate::team::with_team(12, |par| sparse_sparse_matmul(a.rb(), b.rb(), 2.0, par)).unwrap();
 		assert!(c.to_dense() == Scale(2.0) * a.to_dense() * b.to_dense());
 	}
 }

@@ -1648,8 +1648,7 @@ pub(super) fn divide_and_conquer<T: RealField>(
 			u.copy_from(combined_u.rb());
 		},
 		MatU::Full(u) => match par {
-			#[cfg(feature = "rayon")]
-			Par::Rayon(_) if !_v_is_none => {
+			Par::Team(_) if !_v_is_none => {
 				let req_v = crate::linalg::temp_mat_scratch::<T>(n, n);
 				let (mem_v, stack_u) = stack.make_aligned_uninit::<u8>(
 					req_v.size_bytes(),
@@ -1975,13 +1974,8 @@ mod tests {
 		}
 	}
 	#[test]
-	#[cfg(feature = "rayon")]
 	fn test_divide_and_conquer_exact_scratch_rayon() {
-		let pool = rayon::ThreadPoolBuilder::new()
-			.num_threads(2)
-			.build()
-			.unwrap();
-		pool.install(|| {
+		crate::team::with_team(2, |mut par| {
 			for n in [4, 5, 7, 8, 9, 15, 16, 17, 63, 64, 65] {
 				for threshold in [4, 5, 8] {
 					check_divide_and_conquer_scratch::<f32>(
@@ -1989,14 +1983,14 @@ mod tests {
 						threshold,
 						0,
 						true,
-						Par::rayon(2),
+						par.reborrow(),
 					);
 					check_divide_and_conquer_scratch::<f64>(
 						n,
 						threshold,
 						0,
 						true,
-						Par::rayon(2),
+						par.reborrow(),
 					);
 				}
 			}

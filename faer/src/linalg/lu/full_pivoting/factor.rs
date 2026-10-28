@@ -393,7 +393,6 @@ fn lu_in_place_unblocked<T: ComplexField>(
 						simd_align(k + 1),
 					);
 			},
-			#[cfg(feature = "rayon")]
 			_ => {
 			let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 				use rayon::prelude::*;
@@ -579,7 +578,7 @@ mod tests {
 	#[test]
 	fn test_flu() {
 		let rng = &mut StdRng::seed_from_u64(0);
-		for mut par in [Par::Seq, Par::rayon(8)] {
+		let mut run = |mut par: Par<'_>| {
 			let par_shape = par.shape();
 			for m in [8, 16, 24, 32, 128, 255, 256, 257] {
 				let n = 8;
@@ -684,7 +683,9 @@ mod tests {
 				let U = U.as_ref();
 				assert!(p.inverse() * L * U * q ~ A);
 			}
-		}
+		};
+		run(Par::Seq);
+		crate::team::with_team(8, |par| run(par));
 	}
 	#[test]
 	fn test_gh238() {

@@ -324,27 +324,22 @@ fn lapack_tridiagonal_evd_cases() {
 	}
 	run.finish(12 * 9 * 2 * 4);
 }
-#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_tridiagonal_evd_parallel() {
 	let mut run = Run::new("tridiagonal_evd_parallel");
 	tridiagonal_evd_case(&mut run, 257, 3, 0, 128, Par::Seq);
 	for threads in [2, 4] {
-		rayon::ThreadPoolBuilder::new()
-			.num_threads(threads)
-			.build()
-			.unwrap()
-			.install(|| {
-				tridiagonal_evd_case(
-					&mut run,
-					257,
-					3,
-					threads / 2,
-					128,
-					Par::rayon(threads),
-				)
-			});
+		crate::team::with_team(threads, |par| {
+			tridiagonal_evd_case(
+				&mut run,
+				257,
+				3,
+				threads / 2,
+				128,
+				par,
+			)
+		});
 	}
 	run.finish(12);
 }
