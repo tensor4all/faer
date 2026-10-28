@@ -46,6 +46,22 @@ reached through `skills/faer-optimization/SKILL.md` and the per-harness links be
    with the number that rejected them, verification, campaign), the `PATCHSET.md` row, and a
    lesson that will outlive the change into `PERFORMANCE_TIPS.md`.
 
+## Parallel splits must scale
+
+Before measuring any new or changed parallel region, check it against the *Parallel Scaling* list
+in `rules/common/performance.md` (tensor4all-agent-rules) at the largest thread count faer is run
+with, 64 and more, not only at evo's 8. In this fork the recurring traps are:
+
+- a column split where every task reads the whole Householder basis or panel (`p × size` traffic,
+  tensor4all/faer#90); pack or stage the shared operand once, or split in two dimensions;
+- a row split into one partial per thread with a serial combine (`O(p)` memory and combine);
+- a constant task cap ("at most four tasks") or a threshold tuned at one thread count.
+
+Name the cost of the split as a function of `p` in the worklog. Scaling evidence goes beyond evo:
+run 1, 8 and the largest count on a many-core host (broccoli, 64 cores) and compare with the
+OpenBLAS arm. A split that only wins at 8 threads, or only against a starved baseline, is not
+adopted.
+
 ## The yardstick is not a source
 
 The vendor is timed through its public API only. No disassembly, no profiler into its internals,
