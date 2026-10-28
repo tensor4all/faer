@@ -75,6 +75,34 @@ the row name, hands the vendor its thread count, and runs the body of each bench
 reserved faer team. The spindle spin/pause tuning and `bench_sparse.rs`'s wrapper around a
 sequential benchmark are deleted.
 
+## Dispatch cost beyond the measured widths (review of #97)
+
+The gates read one cost, and that cost is now the team table's. `threadteam::DispatchCosts` holds
+anchors measured at widths 2, 4 and 6 and is flat above them (conservative up to width 8: the Linux
+data at 8 is below the width-6 value), and nothing was measured beyond 8. With a flat table a team
+of 32 or 64 members pays a region of a few microseconds, and `Exec::width_for` answers the full width
+every time, so a high-`p` caller would open a region for trivial work.
+
+faer therefore extrapolates at its one read-out, `utils::cost::team_section_cost`, used by
+`ParShape::dispatch_cost`, `par_pays_time`, the x86 kernel's width gate (`team::kernel::kernel_width`,
+which now searches the widths with the extrapolated cost instead of `Exec::width_for`) and the tiled
+team product's floor: above `MEASURED_MAX_WIDTH = 8` members,
+
+    cost(w) = cost(8) * w / 8        (w > 8)
+
+i.e. at least linear in the width, never shallower than the table grew over its anchors.
+`min_dispatch_cost` is unchanged: the cheapest width is one of the measured ones.
+`threadteam` itself is not changed.
+
+**Provisional**: tensor4all/faer#91's measurements (broccoli, widths 2 to 64) should replace the
+extrapolation with measured rows. Until then this is a lower bound, not a model.
+
+Widths 8 and below are bit-identical, so the acceptance measurement was repeated to show it: the
+candidate's own numbers moved by at most 1.8% between the two runs (run-to-run noise), and the paired
+result is unchanged - median candidate/baseline 1.0004 (1T), 1.0011 (4T), 1.0001 (8T); the cells
+outside +-5% are the same ones as before (the two `svd_values c64` cells, where the candidate is
+faster, and `cholesky f64` at 128/256, +6.4% and +5.2%).
+
 ## Verification
 
 - `cargo test -p t4a-faer --lib` (all of it).

@@ -385,12 +385,26 @@ pub(crate) mod kernel {
 			stats::bump(&stats::GEMM_BELOW_FLOOR);
 			return None;
 		}
-		let width = team.width_for(estimate, 2);
-		if width.get() >= 2 && team.pays(estimate, 2, width) {
-			Some(width.get())
-		} else {
-			stats::bump(&stats::GEMM_BELOW_FLOOR);
-			None
+		// the widest width that pays, on the cost the shapes read (`Exec::width_for` searches the
+		// raw table, which is flat beyond the measured widths and would always answer the full
+		// width); the cost never falls with the width, so the first width that does not pay ends
+		// the search
+		let size = team.size().get();
+		let mut best = None;
+		for w in 2..=size {
+			let width = core::num::NonZeroUsize::new(w).unwrap();
+			if crate::utils::cost::pays_at(estimate, 2, crate::utils::cost::team_section_cost(team.dispatch_costs(), width)) {
+				best = Some(w);
+			} else {
+				break;
+			}
+		}
+		match best {
+			Some(width) => Some(width),
+			None => {
+				stats::bump(&stats::GEMM_BELOW_FLOOR);
+				None
+			},
 		}
 	}
 
@@ -579,7 +593,16 @@ pub(crate) unsafe fn gemm_tiled<E: 'static + Copy + Send + Sync>(
 	// rate) against `PAYS` times the cost of one section of this team. A complex MAC is 4.5
 	// real ones, so the floor of a complex product is that much lower in MACs.
 	let estimate = crate::utils::cost::serial_time(m.saturating_mul(n).saturating_mul(k), ns_per_mac);
-	if nt <= 1 || !team.pays(estimate, 1, team.size()) {
+	if nt <= 1
+		|| !crate::utils::cost::pays_at(
+			estimate,
+			1,
+			crate::utils::cost::team_section_cost(
+				team.dispatch_costs(),
+				core::num::NonZeroUsize::new(nt).unwrap(),
+			),
+		)
+	{
 		stats::bump(&stats::GEMM_BELOW_FLOOR);
 		return seq(dst, lhs, rhs, m, n);
 	}
