@@ -355,6 +355,7 @@ impl<'a, T, Cols: Shape, CStride: Stride> RowRef<'a, T, Cols, CStride> {
 
 	/// returns a parallel iterator over the elements of the row
 	#[inline]
+	#[cfg(feature = "rayon")]
 	pub fn par_iter(
 		self,
 	) -> impl 'a + rayon::iter::IndexedParallelIterator<Item = &'a T>
@@ -371,6 +372,7 @@ impl<'a, T, Cols: Shape, CStride: Stride> RowRef<'a, T, Cols, CStride> {
 	/// available in every build
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	pub fn par_partition(
 		self,
 		count: usize,

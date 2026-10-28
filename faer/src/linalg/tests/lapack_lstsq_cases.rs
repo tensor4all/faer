@@ -57,6 +57,7 @@ fn normal_ratio(
 		/ lin_eps()
 		/ a.nrows().max(a.ncols()).max(b.ncols()).max(1) as Real
 }
+#[cfg(feature = "rayon")]
 #[test]
 fn lapack_lstsq_checkers() {
 	let a = Mat::from_fn(3, 2, |i, j| if i == j { phase(j) } else { z(0.0) });

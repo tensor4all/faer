@@ -52,6 +52,7 @@ fn valid_real_spectrum(s: MatRef<'_, Scalar>) -> bool {
 			&& (i == 0 || real(&s[(i - 1, 0)]) <= real(&s[(i, 0)]))
 	})
 }
+#[cfg(feature = "rayon")]
 #[test]
 fn lapack_tridiagonal_evd_checkers() {
 	crate::assert!(ordered_spectrum_ratio(&[1.0, 2.0], &[1.0, 3.0]) > 60.0);

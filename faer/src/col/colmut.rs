@@ -293,6 +293,7 @@ impl<'a, T, Rows: Shape, RStride: Stride> ColMut<'a, T, Rows, RStride> {
 	}
 
 	#[inline]
+	#[cfg(feature = "rayon")]
 	/// see [`ColRef::par_iter`]
 	pub fn par_iter(
 		self,
@@ -306,6 +307,7 @@ impl<'a, T, Rows: Shape, RStride: Stride> ColMut<'a, T, Rows, RStride> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`ColRef::par_partition`]
 	pub fn par_partition(
 		self,
@@ -606,6 +608,7 @@ impl<'a, T, Rows: Shape, RStride: Stride> ColMut<'a, T, Rows, RStride> {
 	}
 
 	#[inline]
+	#[cfg(feature = "rayon")]
 	/// see [`ColRef::par_iter`]
 	pub fn par_iter_mut(
 		self,
@@ -628,6 +631,7 @@ impl<'a, T, Rows: Shape, RStride: Stride> ColMut<'a, T, Rows, RStride> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`ColRef::par_partition`]
 	pub fn par_partition_mut(
 		self,

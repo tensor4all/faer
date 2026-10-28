@@ -237,6 +237,7 @@ fn dense_self_adjoint_case(
 		);
 	}
 }
+#[cfg(feature = "rayon")]
 #[test]
 fn lapack_self_adjoint_evd_checkers() {
 	let (a, s) = hermitian(2, 5);

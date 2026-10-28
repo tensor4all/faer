@@ -380,6 +380,7 @@ impl<T, Rows: Shape> Col<T, Rows> {
 	}
 
 	#[inline]
+	#[cfg(feature = "rayon")]
 	/// see [`ColRef::par_iter`]
 	pub fn par_iter(
 		&self,
@@ -392,6 +393,7 @@ impl<T, Rows: Shape> Col<T, Rows> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`ColRef::par_partition`]
 	pub fn par_partition(
 		&self,
@@ -576,6 +578,7 @@ impl<T, Rows: Shape> Col<T, Rows> {
 	}
 
 	#[inline]
+	#[cfg(feature = "rayon")]
 	/// see [`ColMut::par_iter_mut`]
 	pub fn par_iter_mut(
 		&mut self,
@@ -588,6 +591,7 @@ impl<T, Rows: Shape> Col<T, Rows> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`ColMut::par_partition_mut`]
 	pub fn par_partition_mut(
 		&mut self,

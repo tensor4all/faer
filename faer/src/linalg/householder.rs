@@ -267,6 +267,7 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 				}
 			}
 		} else if deep {
+	#[cfg(feature = "rayon")]
 			{
 				use rayon::prelude::*;
 				let chunk = rows.div_ceil(threads);
@@ -693,6 +694,7 @@ fn apply_block_householder_on_the_left_in_place_generic<
 				K.unbound(),
 			);
 			#[cfg(feature = "par-trace")]
+	#[cfg(feature = "rayon")]
 			{
 				crate::utils::cost::trace::shape("n_tasks", M.unbound(), N.unbound(), K.unbound());
 				crate::utils::cost::trace_pub(
@@ -791,6 +793,7 @@ fn apply_block_householder_on_the_left_in_place_generic<
 			func((tmp.as_dyn_cols_mut(), matrix.as_dyn_cols_mut()), par);
 			return;
 		} else {
+			#[cfg(feature = "rayon")]
 			{
 				use rayon::prelude::*;
 				crate::utils::thread::for_each_with_par(par,
@@ -800,6 +803,11 @@ fn apply_block_householder_on_the_left_in_place_generic<
 						.zip_eq(matrix.rb_mut().par_col_partition_mut(n_tasks)),
 					func,
 				);
+			}
+			#[cfg(not(feature = "rayon"))]
+			{
+				let _ = (n_tasks, func);
+				unreachable!("no parallel route in this build")
 			}
 		}
 	}

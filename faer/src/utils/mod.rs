@@ -4,6 +4,7 @@ pub mod bound;
 /// the parallel rule: dispatch cost of a shape against the serial time of a region
 pub mod cost;
 /// the parallel route onto a threadteam team, with [`team::with_team`] for the caller
+#[cfg(feature = "threadteam")]
 pub mod team;
 #[doc(hidden)]
 pub mod thread {
@@ -40,6 +41,7 @@ pub mod thread {
 				Par::Seq => {
 					(op_a(parallelism.reborrow()), op_b(parallelism));
 				},
+				#[cfg(feature = "threadteam")]
 				Par::Team(team) => {
 					let n_threads = team.size().get();
 					if n_threads == 1 {
@@ -86,6 +88,7 @@ pub mod thread {
 
 	/// A flat item loop on the team of `par`: the team's members process contiguous blocks,
 	/// the caller alone for `Seq`
+	#[cfg(feature = "rayon")]
 	pub fn for_each<
 		T: Send,
 		I: rayon::iter::IntoParallelIterator<Item = T>,
@@ -112,11 +115,13 @@ pub mod thread {
 					Each(f),
 				);
 			},
+			#[cfg(feature = "threadteam")]
 			Par::Team(team) => super::team::for_each(team, n_jobs, iter, f),
 		}
 	}
 	/// `for_each` whose closure also receives the parallelism of its job: the share of `par`
 	/// that one of `n_jobs` concurrent jobs may use (sequential below two threads)
+	#[cfg(feature = "rayon")]
 	pub fn for_each_with_par<
 		T: Send,
 		I: rayon::iter::IntoParallelIterator<Item = T>,
@@ -130,6 +135,7 @@ pub mod thread {
 	{
 		match par {
 			Par::Seq => for_each(Par::Seq, n_jobs, iter, |item| f(item, Par::Seq)),
+			#[cfg(feature = "threadteam")]
 			Par::Team(team) => {
 				// the item runs on the leader of its own sub-team and receives it
 				super::team::for_each_child(team, n_jobs, iter, |item, child| {
@@ -141,6 +147,7 @@ pub mod thread {
 
 	/// runs the two operations concurrently on a split of `par` in which the first receives
 	/// `size_a` threads (clamped so that both get at least one) and the second the rest
+	#[cfg(feature = "rayon")]
 	pub fn join_sized(
 		par: Par,
 		size_a: usize,
@@ -168,6 +175,7 @@ pub mod thread {
 	/// runs `f(c, child)` for every `c < sizes.len()` concurrently, where `child` is the part of
 	/// `par` of width `sizes[c]` (sequential for a width of one). The widths must be non-zero and
 	/// add up to at most the degree of `par`; the children never use more than they are handed.
+	#[cfg(feature = "rayon")]
 	pub fn split(par: Par, sizes: &[usize], f: &(dyn Sync + Fn(usize, Par))) {
 		core::assert!(sizes.iter().all(|&s| s > 0));
 		match par {
@@ -176,6 +184,7 @@ pub mod thread {
 					f(c, Par::Seq);
 				}
 			},
+			#[cfg(feature = "threadteam")]
 			Par::Team(team) => {
 				if sizes.iter().sum::<usize>() <= team.size().get() {
 					super::team::note_split(sizes.len());

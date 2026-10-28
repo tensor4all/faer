@@ -209,6 +209,7 @@ fn schur_case(
 		}
 	}
 }
+#[cfg(feature = "rayon")]
 #[test]
 fn lapack_schur_checkers() {
 	let t = Mat::from_fn(2, 2, |i, j| {

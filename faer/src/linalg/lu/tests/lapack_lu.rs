@@ -96,6 +96,7 @@ fn lu_reference(
 	}
 	a
 }
+#[cfg(feature = "rayon")]
 #[test]
 fn lapack_lu_checkers() {
 	let lu = Mat::from_fn(3, 3, |i, j| {

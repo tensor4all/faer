@@ -206,6 +206,7 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 		} else {
 			Par::Seq
 		};
+	#[cfg(feature = "rayon")]
 		{
 			linalg::triangular_solve::solve_unit_lower_triangular_in_place(
 				A00.rb(),
@@ -264,6 +265,7 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 			swap(A_left);
 			swap(A_right);
 		},
+	#[cfg(feature = "rayon")]
 		_ => {
 		let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 			let nthreads = nthreads.get();
@@ -462,6 +464,7 @@ mod tests {
 	use crate::{Mat, assert, c32, c64};
 	use crate::utils::cost::{pays_at, rate, serial_time};
 	use dyn_stack::MemBuffer;
+	#[cfg(feature = "rayon")]
 	#[test]
 	fn region_rules_follow_the_serial_time() {
 		use core::num::NonZeroUsize;
@@ -501,6 +504,7 @@ mod tests {
 	/// The wide shape of the merge gate (`64 x 1024`): every column of the swap stage is on one
 	/// side (one section), and the right block goes through the flat split of the triangular
 	/// solve, at the widths the caller reserves.
+	#[cfg(feature = "rayon")]
 	#[test]
 	fn wide_matrix_parallel_agrees_with_serial() {
 		fn check<T: ComplexField<Real = f64>>(m: usize, n: usize) {

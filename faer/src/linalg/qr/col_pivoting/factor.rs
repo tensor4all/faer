@@ -271,6 +271,7 @@ fn qr_in_place_unblocked<'out, I: Index, T: ComplexField>(
 								simd_align(k + 1),
 							);
 						},
+	#[cfg(feature = "rayon")]
 						_ => {
 						let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 							let nthreads = nthreads.get();

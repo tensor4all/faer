@@ -705,6 +705,7 @@ fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 							)
 						};
 					}
+					#[cfg(feature = "threadteam")]
 					if let Par::Team(team) = par {
 						let estimate = crate::utils::cost::serial_time(
 							dst.nrows()

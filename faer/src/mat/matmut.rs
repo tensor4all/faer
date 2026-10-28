@@ -509,6 +509,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	}
 
 	#[inline]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_col_iter`]
 	pub fn par_col_iter(
 		self,
@@ -525,6 +526,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	}
 
 	#[inline]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_row_iter`]
 	pub fn par_row_iter(
 		self,
@@ -542,6 +544,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_col_chunks`]
 	pub fn par_col_chunks(
 		self,
@@ -560,6 +563,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_col_partition`]
 	pub fn par_col_partition(
 		self,
@@ -578,6 +582,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_row_chunks`]
 	pub fn par_row_chunks(
 		self,
@@ -596,6 +601,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_row_partition`]
 	pub fn par_row_partition(
 		self,
@@ -1305,6 +1311,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	}
 
 	#[inline]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_col_iter`]
 	pub fn par_col_iter_mut(
 		self,
@@ -1328,6 +1335,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	}
 
 	#[inline]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_row_iter`]
 	pub fn par_row_iter_mut(
 		self,
@@ -1352,6 +1360,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_col_chunks`]
 	pub fn par_col_chunks_mut(
 		self,
@@ -1377,6 +1386,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_col_partition`]
 	pub fn par_col_partition_mut(
 		self,
@@ -1402,6 +1412,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_row_chunks`]
 	pub fn par_row_chunks_mut(
 		self,
@@ -1427,6 +1438,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_row_partition`]
 	pub fn par_row_partition_mut(
 		self,

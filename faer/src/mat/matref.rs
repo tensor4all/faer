@@ -1128,6 +1128,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 
 	/// returns a parallel iterator over the columns of the matrix
 	#[inline]
+	#[cfg(feature = "rayon")]
 	pub fn par_col_iter(
 		self,
 	) -> impl 'a
@@ -1151,6 +1152,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 
 	/// returns a parallel iterator over the rows of the matrix
 	#[inline]
+	#[cfg(feature = "rayon")]
 	pub fn par_row_iter(
 		self,
 	) -> impl 'a
@@ -1175,6 +1177,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	/// available in every build
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	pub fn par_col_chunks(
 		self,
 		chunk_size: usize,
@@ -1203,6 +1206,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	/// available in every build
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	pub fn par_col_partition(
 		self,
 		count: usize,
@@ -1237,6 +1241,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	/// available in every build
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	pub fn par_row_chunks(
 		self,
 		chunk_size: usize,
@@ -1261,6 +1266,7 @@ impl<'a, T, Rows: Shape, Cols: Shape, RStride: Stride, CStride: Stride>
 	/// available in every build
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	pub fn par_row_partition(
 		self,
 		count: usize,

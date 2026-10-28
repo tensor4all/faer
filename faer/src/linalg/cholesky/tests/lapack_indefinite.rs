@@ -116,6 +116,7 @@ fn indefinite_reference(
 	}
 	a
 }
+#[cfg(feature = "rayon")]
 #[test]
 fn lapack_indefinite_checkers_and_separate_d() {
 	let mut l = Mat::from_fn(3, 3, |i, j| {

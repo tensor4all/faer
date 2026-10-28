@@ -80,6 +80,7 @@ fn cholesky_reference(l: MatRef<'_, Scalar>, p: &[usize]) -> Mat<Scalar> {
 	}
 	a
 }
+#[cfg(feature = "rayon")]
 #[test]
 fn lapack_cholesky_checkers() {
 	let l = Mat::from_fn(3, 3, |i, j| {

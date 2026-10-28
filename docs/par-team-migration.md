@@ -233,10 +233,11 @@ pub enum ParShape { Seq, Team(NonZeroUsize, DispatchCosts) }
 - A caller that owns no team but has a thread budget uses `team::with_team(width, |par| ..)`, which
   owns a pool for the closure (a width of one hands out `Par::Seq`). This is also the answer #59
   was waiting for: the caller of `with_team` holds the group.
-- `rayon` is a required dependency (the team's item plumbing iterates through it), and the feature
-  of that name now only selects the `gemm` dependency's Rayon arm: the public `par_*` iterators and
-  every dispatch site are compiled in every build. `threadteam` stays as a feature name for the
-  consumers' feature lists.
+- The route is the `threadteam` feature, on by default: it compiles `Par::Team`, `team::with_team`
+  and the team module, and pulls `rayon` (the substrate the team iterates through). With it off
+  there is no `Par::Team` and no team module, while `rayon` alone keeps the `gemm` dependency's
+  Rayon arm and the public `par_*` iterators. A build with neither - what a no_std build is - has
+  `Par::Seq` only.
 - `faer-ffi` is excluded from this workspace and still returns `Par` by value from the C API; a C
   caller cannot own a scoped team, so that crate needs its own execution-ownership redesign and
   is not built here.

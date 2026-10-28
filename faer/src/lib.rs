@@ -180,7 +180,7 @@
 //! The operator overloads (`&a * &b`, `&a + &b`, ...) have no room for the argument and always run
 //! sequentially; use [`linalg::matmul::matmul`] for a parallel product.
 //!
-//! a team is a reservation the caller owns: its members spin while the reservation is held,
+//! with the `threadteam` feature (on by default) a team is a reservation the caller owns: its members spin while the reservation is held,
 //! instead of being woken for every region, and the token hands each region the authority to
 //! place work on them. That is what makes a sequence of short regions cheap: the
 //! bidiagonalization behind the SVD issues two vector products per step, and at `n = 512` on
@@ -687,6 +687,7 @@ pub mod sparse;
 /// helper utilities
 pub mod utils;
 /// the parallel route: owns a threadteam team and hands out `Par::Team` for a closure
+#[cfg(feature = "threadteam")]
 pub use utils::team;
 /// native unsigned integer type
 pub trait Index: traits::IndexCore + traits::Index + seal::Seal {}
@@ -1052,7 +1053,13 @@ pub enum Par<'team> {
 	/// authority over them for as long as it lives; the number of participants is the size of the
 	/// team. This is the only parallel route: see [`Par::Team`], [`team::with_team`] and
 	/// `utils::team`.
+	#[cfg(feature = "threadteam")]
 	Team(threadteam::TeamExec<'team>),
+	/// owns the lifetime when the parallel route is not compiled (no `threadteam` feature): a
+	/// build without it has no way to make a team, so this variant is never constructed
+	#[cfg(not(feature = "threadteam"))]
+	#[doc(hidden)]
+	__Lifetime(core::convert::Infallible, core::marker::PhantomData<&'team ()>),
 }
 /// the shape of a [`Par`]: which kind of parallelism and how many threads, without the
 /// right to run anything. `Copy`, so workspace queries and thresholds can use it freely; it
@@ -1063,6 +1070,7 @@ pub enum ParShape {
 	Seq,
 	/// a threadteam team of this many participants, with the dispatch costs of the pool it
 	/// belongs to (see [`ParShape::dispatch_cost`])
+	#[cfg(feature = "threadteam")]
 	Team(NonZeroUsize, threadteam::DispatchCosts),
 }
 impl ParShape {
@@ -1073,8 +1081,10 @@ impl ParShape {
 	}
 
 	/// `Team(nthreads)` with the host default dispatch costs, zero treated as one
+	#[cfg(feature = "threadteam")]
 	#[inline]
 	pub fn team(nthreads: usize) -> Self {
+		#[cfg(feature = "threadteam")]
 		Self::Team(
 			NonZeroUsize::new(nthreads.max(1)).unwrap(),
 			threadteam::DispatchCosts::host_default(),
@@ -1086,6 +1096,7 @@ impl ParShape {
 	pub fn degree(self) -> usize {
 		match self {
 			Self::Seq => 1,
+			#[cfg(feature = "threadteam")]
 			Self::Team(n, _) => n.get(),
 		}
 	}
@@ -1097,7 +1108,10 @@ impl Par<'_> {
 	pub fn reborrow(&mut self) -> Par<'_> {
 		match self {
 			Par::Seq => Par::Seq,
+			#[cfg(feature = "threadteam")]
 			Par::Team(team) => Par::Team(team.reborrow()),
+			#[cfg(not(feature = "threadteam"))]
+			Par::__Lifetime(x, _) => match *x {},
 		}
 	}
 
@@ -1106,7 +1120,10 @@ impl Par<'_> {
 	pub fn shape(&self) -> ParShape {
 		match self {
 			Par::Seq => ParShape::Seq,
+			#[cfg(feature = "threadteam")]
 			Par::Team(team) => ParShape::Team(team.size(), team.dispatch_costs()),
+			#[cfg(not(feature = "threadteam"))]
+			Par::__Lifetime(x, _) => match *x {},
 		}
 	}
 
@@ -1116,7 +1133,10 @@ impl Par<'_> {
 	pub fn degree(&self) -> usize {
 		match self {
 			Par::Seq => 1,
+			#[cfg(feature = "threadteam")]
 			Par::Team(team) => team.size().get(),
+			#[cfg(not(feature = "threadteam"))]
+			Par::__Lifetime(x, _) => match *x {},
 		}
 	}
 }

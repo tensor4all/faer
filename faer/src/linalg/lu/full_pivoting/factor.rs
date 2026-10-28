@@ -393,6 +393,7 @@ fn lu_in_place_unblocked<T: ComplexField>(
 						simd_align(k + 1),
 					);
 			},
+	#[cfg(feature = "rayon")]
 			_ => {
 			let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 				use rayon::prelude::*;

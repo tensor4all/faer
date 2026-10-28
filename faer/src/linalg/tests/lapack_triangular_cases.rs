@@ -110,6 +110,7 @@ fn triangular_case(
 		}
 	}
 }
+#[cfg(feature = "rayon")]
 #[test]
 fn lapack_triangular_checkers() {
 	let a = Mat::from_fn(2, 2, |i, j| {

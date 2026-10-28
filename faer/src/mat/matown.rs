@@ -915,6 +915,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_col_iter`]
 	pub fn par_col_iter(
 		&self,
@@ -927,6 +928,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_row_iter`]
 	pub fn par_row_iter(
 		&self,
@@ -939,6 +941,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_col_chunks`]
 	pub fn par_col_chunks(
 		&self,
@@ -955,6 +958,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_col_partition`]
 	pub fn par_col_partition(
 		&self,
@@ -971,6 +975,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_row_chunks`]
 	pub fn par_row_chunks(
 		&self,
@@ -987,6 +992,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatRef::par_row_partition`]
 	pub fn par_row_partition(
 		&self,
@@ -1327,6 +1333,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatMut::par_col_iter_mut`]
 	pub fn par_col_iter_mut(
 		&mut self,
@@ -1339,6 +1346,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatMut::par_row_iter_mut`]
 	pub fn par_row_iter_mut(
 		&mut self,
@@ -1351,6 +1359,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatMut::par_col_chunks_mut`]
 	pub fn par_col_chunks_mut(
 		&mut self,
@@ -1367,6 +1376,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatMut::par_col_partition_mut`]
 	pub fn par_col_partition_mut(
 		&mut self,
@@ -1383,6 +1393,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatMut::par_row_chunks_mut`]
 	pub fn par_row_chunks_mut(
 		&mut self,
@@ -1399,6 +1410,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 
 	#[inline]
 	#[track_caller]
+	#[cfg(feature = "rayon")]
 	/// see [`MatMut::par_row_partition_mut`]
 	pub fn par_row_partition_mut(
 		&mut self,

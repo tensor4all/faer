@@ -311,6 +311,7 @@ impl<T, Cols: Shape> Row<T, Cols> {
 	}
 
 	#[inline]
+	#[cfg(feature = "rayon")]
 	/// see [`RowRef::par_iter`]
 	pub fn par_iter(
 		&self,
@@ -490,6 +491,7 @@ impl<T, Cols: Shape> Row<T, Cols> {
 	}
 
 	#[inline]
+	#[cfg(feature = "rayon")]
 	/// see [`RowMut::par_iter_mut`]
 	pub fn par_iter_mut(
 		&mut self,

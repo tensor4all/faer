@@ -151,6 +151,7 @@ fn run_view_case(
 	}
 }
 
+#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn layouts_and_reused_buffers() {

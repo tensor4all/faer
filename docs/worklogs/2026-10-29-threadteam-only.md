@@ -34,23 +34,18 @@ keep `threadteam`, and the caller-side answer to #59 is `faer::team::with_team`.
   what `faer-benchmark`'s `fbench` and `tensor4all-meta`'s threshold probe use instead of
   `Par::rayon(n)`, so #59 (who holds the worker group) is answered by the caller owning a team.
 
-## The feature graph, and why `rayon` is now a required dependency
+## The feature graph
 
-Stages 1-2 made `threadteam` an unconditional dependency and `Par::Team` unconditional. That broke
-a gate: `cargo build -p t4a-faer --no-default-features --features std` (the fork's `ci.yml`) and the
-inherited `nostd-nightly` job, which builds `faer-no-std-test` with `default-features = false`.
-`Par::Team` holds `TeamExec<'team>`; gating the variant on a feature leaves the enum's lifetime
-parameter unused (E0392), and gating the whole route leaves non-exhaustive matches in every kernel.
-The route cannot be feature-gated without a phantom variant, so:
-
-- `rayon` is an unconditional dependency (the team's item plumbing iterates through Rayon's
-  plumbing — `team::for_each` takes `IntoParallelIterator`), and the `rayon` *feature* keeps its
-  name and now selects only the `gemm` dependency's Rayon arm plus the public `par_*` iterators;
-  `threadteam` stays as the feature name the consumers pass. With that, all 109 `feature = "rayon"`
-  gates disappear from `faer/src`, and the no-default-features and no_std builds compile again
-  (verified below).
-- `threadteam`'s own `parallel` feature pulls Rayon in either way, so this adds no dependency the
-  branch did not already have.
+The route is a feature, on by default: `threadteam` compiles the team (and pulls `rayon`, the
+substrate the team iterates through); `rayon` alone keeps the `gemm` dependency's Rayon arm and the
+public `par_*` iterators. Both names stay because the consumers pass `features = ["std", "rayon",
+"threadteam"]`. With `threadteam` off there is no `Par::Team` and no team module: `Par<'team>`
+carries `Seq` and the uninhabited `__Lifetime` variant that owns the lifetime (the shape the crate
+used while the route was experimental), and nothing pulls Rayon, i.e. std, into the build. That is
+what keeps `faer-no-std-test` linkable and the inherited `nostd-nightly` job green: a build without
+the route has `Par::Seq` as its only token. The matches that would otherwise be non-exhaustive get
+`#[cfg(not(feature = "threadteam"))]` arms, and the code that names Rayon types keeps its
+`#[cfg(feature = "rayon")]` gate.
 
 ## Tests and examples
 
@@ -139,16 +134,10 @@ these numbers are indicative and are not a page. The vendor row is a cross-harne
 
 ## What remains unverified
 
-1. **The inherited `nostd-nightly` job.** `threadteam` is unconditional and its `parallel` feature
-   pulls Rayon, i.e. std, into every build, so `faer-no-std-test` (`default-features = false`)
-   no longer links: `error[E0152]: duplicate lang item in crate std: panic_impl`. Both library
-   builds still compile (`--no-default-features` and `--no-default-features --features std`), and
-   so does the fork's own `ci.yml` gate. Options: drop that job (the fork no longer supports a
-   no_std *binary*), or gate the team route on a feature again with the uninhabited
-   `__Lifetime` phantom variant `origin/main` uses — rejected here because the approved design
-   says `Par::Team` is unconditional and the alternative costs a cfg arm in every match plus the
-   109 `feature = "rayon"` attributes. This is the maintainer's decision; the workflow is
-   untouched.
+1. **`threadteam` needs std** (`Pool` spawns OS threads and its `parallel` feature pulls Rayon). A
+   build that wants the route therefore has std, and a build without std has no route:
+   `faer-no-std-test` links and runs with `Par::Seq`, but a no_std application cannot have parallel
+   faer. That is the limit of the graph, not something missing.
 2. **Complex factorizations on the team route.** At a forced floor (`ParThreshold::Fixed(1)`,
    block 8, 96x96) the team route produces a different bidiagonalization (1.38 max element
    difference) and Hessenberg reduction (9.26) than the sequential one, for `c64` only; `f64`

@@ -1648,6 +1648,7 @@ pub(super) fn divide_and_conquer<T: RealField>(
 			u.copy_from(combined_u.rb());
 		},
 		MatU::Full(u) => match par {
+			#[cfg(feature = "threadteam")]
 			Par::Team(_) if !_v_is_none => {
 				let req_v = crate::linalg::temp_mat_scratch::<T>(n, n);
 				let (mem_v, stack_u) = stack.make_aligned_uninit::<u8>(
@@ -1974,6 +1975,7 @@ mod tests {
 		}
 	}
 	#[test]
+	#[cfg(feature = "rayon")]
 	fn test_divide_and_conquer_exact_scratch_rayon() {
 		crate::team::with_team(2, |mut par| {
 			for n in [4, 5, 7, 8, 9, 15, 16, 17, 63, 64, 65] {

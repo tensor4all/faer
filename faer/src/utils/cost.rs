@@ -11,7 +11,24 @@ use crate::ParShape;
 use core::num::NonZeroUsize;
 use core::time::Duration;
 
+#[cfg(feature = "threadteam")]
 pub use threadteam::{PAYS, pays_at};
+
+/// The multiple of the stack (mirrors `threadteam::PAYS`, for a build without the route).
+#[cfg(not(feature = "threadteam"))]
+pub const PAYS: f64 = 3.0;
+
+/// `estimate >= PAYS * sections * dispatch_cost` (mirrors `threadteam::pays_at`).
+#[cfg(not(feature = "threadteam"))]
+pub fn pays_at(estimate: Duration, sections: u32, dispatch_cost: Duration) -> bool {
+	if dispatch_cost == Duration::MAX {
+		return false;
+	}
+	if sections == 0 {
+		return true;
+	}
+	estimate.as_secs_f64() >= PAYS * f64::from(sections) * dispatch_cost.as_secs_f64()
+}
 
 /// The class of the machine, keyed by the kernel dispatch it will take, not by the CPU model.
 /// The serial rate table has one row per class. The enum and the detection are kept in sync by
@@ -563,7 +580,11 @@ pub(crate) fn par_pays_time(par: &crate::Par, estimate: Duration, sections: u32,
 	};
 	match par {
 		crate::Par::Seq => false,
+		#[cfg(feature = "threadteam")]
 		crate::Par::Team(team) => team.pays(estimate, sections, width),
+		// a build without the route has no team token to ask
+		#[cfg(not(feature = "threadteam"))]
+		_ => false,
 	}
 }
 
@@ -577,11 +598,15 @@ pub(crate) fn par_can_pay_time(par: &crate::Par, estimate: Duration, sections: u
 	}
 	match par {
 		crate::Par::Seq => false,
+		#[cfg(feature = "threadteam")]
 		crate::Par::Team(team) => par_can_pay_time_team(team, estimate, sections),
+		#[cfg(not(feature = "threadteam"))]
+		_ => false,
 	}
 }
 
 /// [`par_can_pay_time`] for a team token.
+#[cfg(feature = "threadteam")]
 pub(crate) fn par_can_pay_time_team(team: &threadteam::TeamExec<'_>, estimate: Duration, sections: u32) -> bool {
 	team.size().get() >= 2
 		&& pays_at(estimate, sections, team.dispatch_costs().min_cost(threadteam::DispatchKind::Team))
@@ -706,6 +731,7 @@ impl ParShape {
 		}
 		match self {
 			Self::Seq => Duration::MAX,
+			#[cfg(feature = "threadteam")]
 			Self::Team(_, costs) => costs.cost(threadteam::DispatchKind::Team, width),
 		}
 	}
@@ -719,6 +745,7 @@ impl ParShape {
 		}
 		match self {
 			Self::Seq => Duration::MAX,
+			#[cfg(feature = "threadteam")]
 			Self::Team(_, costs) => costs.min_cost(threadteam::DispatchKind::Team),
 		}
 	}
@@ -748,6 +775,7 @@ mod tests {
 		NonZeroUsize::new(n).unwrap()
 	}
 
+	#[cfg(feature = "rayon")]
 	#[test]
 	fn seq_never_pays() {
 		assert_eq!(ParShape::Seq.dispatch_cost(nz(4)), Duration::MAX);
@@ -755,6 +783,7 @@ mod tests {
 		assert!(!ParShape::Seq.pays_full(Duration::from_secs(10), 1));
 	}
 
+	#[cfg(feature = "rayon")]
 	#[test]
 	fn min_dispatch_cost_is_the_cheapest_width() {
 		use threadteam::{DispatchCosts, DispatchKind, WidthCosts};
@@ -770,6 +799,7 @@ mod tests {
 		assert_eq!(ParShape::Team(nz(1), DispatchCosts::for_class(threadteam::HostClass::Generic)).min_dispatch_cost(), Duration::MAX);
 	}
 
+	#[cfg(feature = "rayon")]
 	#[test]
 	fn pays_is_the_multiple_of_the_cost() {
 		let d = Duration::from_micros(2);
@@ -1043,6 +1073,7 @@ mod tests {
 	/// `Fixed(1)` makes every step of every reduction parallel, and the factors must equal the
 	/// serial ones: the `Derived` default keeps the sizes of the other tests below the floors, so
 	/// the parallel branches of the gated steps are exercised here.
+	#[cfg(feature = "rayon")]
 	mod forced_parallel {
 		use super::*;
 		use crate::dyn_stack::{MemBuffer, MemStack};

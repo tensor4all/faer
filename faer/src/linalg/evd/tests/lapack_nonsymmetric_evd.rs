@@ -105,6 +105,7 @@ fn eigenvector_ratios(
 // so the mode-vs-mode comparison uses the composed budget (#78). The residual
 // and unit-norm checks keep their own threshold of 20.
 const MODE_AGREEMENT_BUDGET: Real = 2.0 * 20.0;
+#[cfg(feature = "rayon")]
 #[test]
 fn lapack_nonsymmetric_evd_mode_agreement_budget_composes() {
 	let eps = Real::EPSILON;

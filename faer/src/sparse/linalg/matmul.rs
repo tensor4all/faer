@@ -174,9 +174,11 @@ pub fn sparse_sparse_matmul_numeric<
 		Par::Seq => {
 			job(0);
 		},
+	#[cfg(feature = "rayon")]
 		_ if !parallel => {
 			job(0);
 		},
+	#[cfg(feature = "rayon")]
 		_ => {
 		let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 			use rayon::prelude::*;

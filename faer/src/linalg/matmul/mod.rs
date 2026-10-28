@@ -293,6 +293,7 @@ mod matmul_vertical {
 							job(row, col_inner);
 						}
 					},
+	#[cfg(feature = "rayon")]
 					_ => {
 					let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 						let nthreads = nthreads.get();
@@ -565,6 +566,7 @@ mod matmul_horizontal {
 							job(row, col_inner);
 						}
 					},
+	#[cfg(feature = "rayon")]
 					_ => {
 					let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 						let nthreads = nthreads.get();
@@ -852,6 +854,7 @@ mod matvec_rowmajor {
 					T
 				);
 			},
+	#[cfg(feature = "rayon")]
 			_ => {
 			let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 				let nthreads = nthreads.get();
@@ -994,6 +997,7 @@ mod matvec_colmajor {
 					T
 				)
 			},
+	#[cfg(feature = "rayon")]
 			_ => {
 			let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 				use rayon::prelude::*;
@@ -1169,6 +1173,7 @@ mod rank_update {
 			Par::Seq => {
 				rank_update_imp(dst, beta, lhs, conj_lhs, rhs, conj_rhs, alpha);
 			},
+	#[cfg(feature = "rayon")]
 			_ => {
 			let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 				let nthreads = nthreads.get();
@@ -1375,6 +1380,7 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 						return;
 					} else {
 						let par = match par {
+							#[cfg(feature = "threadteam")]
 							Par::Team(team) => {
 							// the team path runs both kernels below on the team. On
 							// x86_64 the `private_gemm_x86` kernel runs on the team's own members
@@ -1585,6 +1591,7 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 				}
 			}
 		},
+	#[cfg(feature = "rayon")]
 		_ => {
 		let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 			use rayon::prelude::*;

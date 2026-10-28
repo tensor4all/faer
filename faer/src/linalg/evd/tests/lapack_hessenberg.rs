@@ -96,6 +96,7 @@ fn hessenberg_case(
 		);
 	}
 }
+#[cfg(feature = "rayon")]
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
 fn lapack_hessenberg_cases() {

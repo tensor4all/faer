@@ -310,6 +310,7 @@ fn bidiag_blocked_panel<T: ComplexField>(
 		// 3. Y[i+1.., i] = A_i[i.., i+1..]^H u_i / tl_i, with A_i expressed through the stored
 		//    A and the corrections:
 		//    A[i.., i+1..]^H u - Y[i+1.., ..i] (V[i.., ..i]^H u) - R[..i, i+1..]^H (X[i.., ..i]^H u)
+	#[cfg(feature = "rayon")]
 		{
 			let u = A.rb().col(i).get(i..);
 			let (y_prev, y_i) = Y.rb_mut().split_at_col_mut(i);
@@ -568,6 +569,7 @@ fn bidiag_unblocked<T: ComplexField>(
 					vp,
 					simd_align(row_offset + k + 1),
 				),
+	#[cfg(feature = "rayon")]
 				_ => {
 					use rayon::prelude::*;
 					let nthreads =

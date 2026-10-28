@@ -79,6 +79,7 @@ pub(crate) fn copy_across_layouts<T: ComplexField>(
 	src: MatRef<'_, T>,
 	par: Par,
 ) {
+	#[cfg(feature = "rayon")]
 	{
 		use rayon::prelude::*;
 		let n_tasks = Ord::min(
