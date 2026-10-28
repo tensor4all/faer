@@ -20,6 +20,10 @@ The optimisation workflow is the skill [skills/faer-optimization/SKILL.md](skill
 link to it): breakdown first, hypothesis probes, one change per commit, the campaign arm, the
 provenance rule for proprietary yardsticks.
 
+Read [the fork's review rules](docs/review-rules.md) before opening an issue,
+preparing a change, or reviewing a PR. They define the faer-specific naming,
+file-layout and test-placement overrides to the shared rules.
+
 
 ## Repository-specific rules
 

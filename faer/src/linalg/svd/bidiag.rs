@@ -1,6 +1,7 @@
 use crate::assert;
 use crate::internal_prelude::*;
 use linalg::householder::*;
+use crate::utils::cost::{ParThreshold, rate};
 use linalg::matmul::{dot, matmul};
 
 /// width of one blocked panel: `BLOCK_SIZE` columns and rows are reduced with level-2 work
@@ -24,7 +25,7 @@ const BLOCK_FLOOR: usize = 128;
 pub fn bidiag_in_place_scratch<T: ComplexField>(
 	nrows: usize,
 	ncols: usize,
-	par: Par,
+	par: ParShape,
 	params: Spec<BidiagParams, T>,
 ) -> StackReq {
 	_ = par;
@@ -52,15 +53,17 @@ pub fn bidiag_in_place_scratch<T: ComplexField>(
 /// bidiagonalization tuning parameters.
 #[derive(Debug, Copy, Clone)]
 pub struct BidiagParams {
-	/// threshold at which parallelism should be disabled
-	pub par_threshold: usize,
+	/// floor of the parallel regions: [`ParThreshold::Derived`] (the default) runs a step in
+	/// parallel when its serial time pays for its two sections; [`ParThreshold::Fixed`] counts
+	/// elements of the trailing block `(m-k-1)*(n-k-1)`
+	pub par_threshold: ParThreshold,
 	#[doc(hidden)]
 	pub non_exhaustive: NonExhaustive,
 }
 impl<T: ComplexField> Auto<T> for BidiagParams {
 	fn auto() -> Self {
 		Self {
-			par_threshold: 192 * 256,
+			par_threshold: ParThreshold::Derived,
 			non_exhaustive: NonExhaustive(()),
 		}
 	}
@@ -95,7 +98,7 @@ pub fn bidiag_in_place<T: ComplexField>(
 	let mut A = A;
 	let mut Hl = H_left;
 	let mut Hr = H_right;
-
+	let mut par = par;
 	// blocked phase: whole panels while the remaining dimension clears the floor. its regions are
 	// two vector products per step and one update per panel, and they run fastest when the caller
 	// holds the worker group around the call (`faer::spindle::with_lock`, see the crate docs):
@@ -107,7 +110,7 @@ pub fn bidiag_in_place<T: ComplexField>(
 			A.rb_mut(),
 			Hl.rb_mut().row_mut(0),
 			Hr.rb_mut().row_mut(0),
-			par,
+			par.reborrow(),
 			params.par_threshold,
 			stack,
 		);
@@ -119,7 +122,7 @@ pub fn bidiag_in_place<T: ComplexField>(
 		A.rb_mut().get_mut(p.., p..),
 		Hl.rb_mut().row_mut(0).get_mut(p..),
 		Hr.rb_mut().row_mut(0).get_mut(p..),
-		par,
+		par.reborrow(),
 		stack,
 		params.par_threshold,
 		p,
@@ -137,7 +140,7 @@ pub fn bidiag_in_place<T: ComplexField>(
 			A.rb().get(j.., j..j + bl),
 			bl,
 			1,
-			par,
+			par.reborrow(),
 		);
 		j += bl;
 	}
@@ -157,7 +160,7 @@ pub fn bidiag_in_place<T: ComplexField>(
 				A.transpose().get(j.., j..j + br),
 				br,
 				1,
-				par,
+				par.reborrow(),
 			);
 			j += br;
 		}
@@ -170,8 +173,8 @@ fn bidiag_blocked_phase<T: ComplexField>(
 	A: MatMut<'_, T>,
 	Hl: RowMut<'_, T>,
 	Hr: RowMut<'_, T>,
-	par: Par,
-	par_threshold: usize,
+	mut par: Par,
+	par_threshold: ParThreshold,
 	stack: &mut MemStack,
 ) -> usize {
 	let mut A = A;
@@ -194,10 +197,15 @@ fn bidiag_blocked_phase<T: ComplexField>(
 	let mut p = 0;
 	while size - p > BLOCK_FLOOR {
 		// the decision is made on the full remaining area, never latched by a panel
-		let par = if (m - p) * (n - p) < par_threshold {
-			Par::Seq
+		let par = if par_threshold.region_pays::<T>(
+			par.shape(),
+			(m - p) * (n - p),
+			rate::bidiag(),
+			2,
+		) {
+			par.reborrow()
 		} else {
-			par
+			Par::Seq
 		};
 		bidiag_blocked_panel(
 			A.rb_mut().get_mut(p.., p..),
@@ -242,7 +250,7 @@ fn bidiag_blocked_panel<T: ComplexField>(
 	Y: MatMut<'_, T>,
 	de: MatMut<'_, T>,
 	w: ColMut<'_, T>,
-	par: Par,
+	mut par: Par,
 ) {
 	let mut A = A;
 	let mut w = w;
@@ -312,7 +320,7 @@ fn bidiag_blocked_panel<T: ComplexField>(
 				A.rb().get(i.., i + 1..).adjoint(),
 				u,
 				one(),
-				par,
+				par.reborrow(),
 			);
 			if i > 0 {
 				let mut t = t.rb_mut().get_mut(..i);
@@ -403,7 +411,7 @@ fn bidiag_blocked_panel<T: ComplexField>(
 				A.rb().get(i + 1.., i + 1..),
 				r,
 				one(),
-				par,
+				par.reborrow(),
 			);
 			matmul(
 				t.rb_mut(),
@@ -454,7 +462,7 @@ fn bidiag_blocked_panel<T: ComplexField>(
 			v.rb(),
 			Y.rb().get(ib.., ..).adjoint(),
 			-one::<T>(),
-			par,
+			par.reborrow(),
 		);
 		matmul(
 			a22.rb_mut(),
@@ -462,7 +470,7 @@ fn bidiag_blocked_panel<T: ComplexField>(
 			X.rb().get(ib.., ..),
 			top.rb().get(.., ib..),
 			-one::<T>(),
-			par,
+			par.reborrow(),
 		);
 	}
 	// the heads were 1 for the products; put the bidiagonal back
@@ -487,7 +495,7 @@ fn bidiag_unblocked<T: ComplexField>(
 	Hr: RowMut<'_, T>,
 	par: Par,
 	stack: &mut MemStack,
-	par_threshold: usize,
+	par_threshold: ParThreshold,
 	row_offset: usize,
 ) {
 	let m = A.nrows();
@@ -539,13 +547,18 @@ fn bidiag_unblocked<T: ComplexField>(
 			make_householder_in_place(a11, A21.rb_mut());
 		let ref tl_inv = tl.recip();
 		Hl[k] = tl.to_cplx();
-		if (m - k - 1) * (n - k - 1) < par_threshold {
+		if !par_threshold.region_pays::<T>(
+			par.shape(),
+			(m - k - 1) * (n - k - 1),
+			rate::bidiag(),
+			2,
+		) {
 			par = Par::Seq;
 		}
 		if k > 0 {
 			let k1 = k - 1;
 			let up = A20.rb().col(k1);
-			match par {
+			match par.reborrow() {
 				Par::Seq => bidiag_fused_op(
 					A22.rb_mut(),
 					A21.rb(),
@@ -556,10 +569,12 @@ fn bidiag_unblocked<T: ComplexField>(
 					simd_align(row_offset + k + 1),
 				),
 				#[cfg(feature = "rayon")]
-				Par::Rayon(nthreads) => {
+				_ => {
 					use rayon::prelude::*;
-					let nthreads = nthreads.get();
-					spindle::for_each(
+					let nthreads =
+						core::num::NonZeroUsize::new(par.degree()).unwrap().get();
+					crate::utils::thread::for_each(
+						par.reborrow(),
 						nthreads,
 						A22.rb_mut()
 							.par_col_partition_mut(nthreads)
@@ -586,7 +601,7 @@ fn bidiag_unblocked<T: ComplexField>(
 				A21.rb().adjoint(),
 				A22.rb(),
 				one(),
-				par,
+				par.reborrow(),
 			);
 		}
 		z!(y2.rb_mut(), wk.rb_mut()).for_each(|uz!(y, a)| {
@@ -613,7 +628,7 @@ fn bidiag_unblocked<T: ComplexField>(
 			A22.rb(),
 			wk.rb().adjoint(),
 			one(),
-			par,
+			par.reborrow(),
 		);
 		if k + 1 == size {
 			A12.copy_from(wk.rb());
@@ -786,7 +801,7 @@ mod tests {
 	/// bidiagonalizes `A` and rebuilds it from the factors
 	fn reconstruct<T: ComplexField>(
 		A: &Mat<T>,
-		par: Par,
+		mut par: Par,
 		params: BidiagParams,
 	) -> (Mat<T>, Mat<T>) {
 		let m = A.nrows();
@@ -797,17 +812,14 @@ mod tests {
 		let mut Hl = Mat::zeros(bl, size);
 		let mut Hr = Mat::zeros(br, size - 1);
 		let mut UV = A.clone();
+		let mut mem =
+			MemBuffer::new(bidiag_in_place_scratch::<T>(m, n, par.shape(), params.into()));
 		bidiag_in_place(
 			UV.rb_mut(),
 			Hl.rb_mut(),
 			Hr.rb_mut(),
-			par,
-			MemStack::new(&mut MemBuffer::new(bidiag_in_place_scratch::<T>(
-				m,
-				n,
-				par,
-				params.into(),
-			))),
+			par.reborrow(),
+			MemStack::new(&mut mem),
 			params.into(),
 		);
 		let mut B = A.clone();
@@ -817,7 +829,7 @@ mod tests {
 			Hl.rb(),
 			Conj::Yes,
 			B.rb_mut(),
-			par,
+			par.reborrow(),
 			MemStack::new(&mut MemBuffer::new(
 				apply_block_householder_sequence_transpose_on_the_left_in_place_scratch::<T>(
 					n - 1, 1, m,
@@ -831,7 +843,7 @@ mod tests {
 			Hr.rb(),
 			Conj::Yes,
 			B1,
-			par,
+			par.reborrow(),
 			MemStack::new(&mut MemBuffer::new(
 				apply_block_householder_sequence_on_the_right_in_place_scratch::<
 					T,
@@ -853,14 +865,14 @@ mod tests {
 	const SHAPES: [(usize, usize); 5] =
 		[(8, 4), (8, 8), (300, 300), (400, 300), (200, 200)];
 
-	fn budgets() -> alloc::vec::Vec<(Par, BidiagParams)> {
+	fn budgets() -> alloc::vec::Vec<(Par<'static>, BidiagParams)> {
 		let seq = (Par::Seq, <BidiagParams as Auto<f64>>::auto());
 		#[cfg(feature = "rayon")]
 		{
-			// the default threshold (192 * 256) leaves a 199^2 trailing area sequential, so the
-			// threaded case lowers it to exercise the threaded panel update and tail
+			// the default floor (`ParThreshold::Derived`) leaves a small trailing area sequential,
+			// so the threaded case pins it to zero to exercise the threaded panel update and tail
 			let mut threaded = <BidiagParams as Auto<f64>>::auto();
-			threaded.par_threshold = 0;
+			threaded.par_threshold = ParThreshold::Fixed(0);
 			alloc::vec![seq, (Par::rayon(4), threaded)]
 		}
 		#[cfg(not(feature = "rayon"))]

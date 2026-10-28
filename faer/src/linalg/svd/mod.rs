@@ -82,11 +82,11 @@ fn svd_imp_scratch<T: ComplexField>(
 		n: usize,
 		compute_u: bool,
 		compute_v: bool,
-		par: Par,
+		par: ParShape,
 		params: SvdParams,
 	) -> StackReq,
 	params: SvdParams,
-	par: Par,
+	par: ParShape,
 ) -> StackReq {
 	assert!(m >= n);
 	let householder_block_size =
@@ -147,7 +147,7 @@ fn bidiag_cplx_svd_scratch<T: ComplexField>(
 	n: usize,
 	compute_u: bool,
 	compute_v: bool,
-	par: Par,
+	par: ParShape,
 	params: SvdParams,
 ) -> StackReq {
 	StackReq::all_of(&[
@@ -163,7 +163,7 @@ fn bidiag_real_svd_scratch<T: RealField>(
 	n: usize,
 	compute_u: bool,
 	compute_v: bool,
-	par: Par,
+	par: ParShape,
 	params: SvdParams,
 ) -> StackReq {
 	if n < params.recursion_threshold {
@@ -385,13 +385,13 @@ fn compute_bidiag_real_svd<T: RealField>(
 /// use faer::linalg::svd::bidiagonal_svd_scratch;
 /// let _buffer = dyn_stack::MemBuffer::new(bidiagonal_svd_scratch::<f64>(
 /// 	3,
-/// 	Par::Seq,
+/// 	faer::ParShape::Seq,
 /// 	Default::default(),
 /// ));
 /// ```
 pub fn bidiagonal_svd_scratch<T: ComplexField>(
 	dim: usize,
-	par: Par,
+	par: ParShape,
 	params: Spec<SvdParams, T>,
 ) -> StackReq {
 	let n = dim;
@@ -430,7 +430,7 @@ pub fn bidiagonal_svd_scratch<T: ComplexField>(
 /// let (mut u, mut v) = (Mat::zeros(2, 2), Mat::zeros(2, 2));
 /// let mut mem = MemBuffer::new(bidiagonal_svd_scratch::<f64>(
 /// 	2,
-/// 	Par::Seq,
+/// 	faer::ParShape::Seq,
 /// 	Default::default(),
 /// ));
 /// bidiagonal_svd(
@@ -536,7 +536,7 @@ fn svd_imp<T: ComplexField>(
 		par: Par,
 		stack: &mut MemStack,
 	) -> Result<(), SvdError>,
-	par: Par,
+	mut par: Par,
 	stack: &mut MemStack,
 	params: SvdParams,
 ) -> Result<(), SvdError> {
@@ -557,7 +557,7 @@ fn svd_imp<T: ComplexField>(
 		bid.rb_mut(),
 		Hl.rb_mut(),
 		Hr.rb_mut(),
-		par,
+		par.reborrow(),
 		stack,
 		params.bidiag.into(),
 	);
@@ -596,7 +596,7 @@ fn svd_imp<T: ComplexField>(
 		v.rb().map(|_| ub.rb_mut()),
 		u.rb().map(|_| vb.rb_mut()),
 		params,
-		par,
+		par.reborrow(),
 		stack,
 	)?;
 	{ s }.copy_from(diag);
@@ -609,7 +609,7 @@ fn svd_imp<T: ComplexField>(
 			.submatrix_mut(n, n, ncols - n, ncols - n)
 			.diagonal_mut()
 			.fill(one());
-		linalg::householder::apply_block_householder_sequence_on_the_left_in_place_with_conj(bid.rb(), Hl.rb(), Conj::No, u, par, stack);
+		linalg::householder::apply_block_householder_sequence_on_the_left_in_place_with_conj(bid.rb(), Hl.rb(), Conj::No, u, par.reborrow(), stack);
 	}
 	if let Some(mut v) = v {
 		v.copy_from(ub.rb().submatrix(0, 0, n, n));
@@ -668,7 +668,7 @@ pub fn svd_scratch<T: ComplexField>(
 	ncols: usize,
 	compute_u: ComputeSvdVectors,
 	compute_v: ComputeSvdVectors,
-	par: Par,
+	par: ParShape,
 	params: Spec<SvdParams, T>,
 ) -> StackReq {
 	let params = params.config;
@@ -732,7 +732,7 @@ pub fn svd<T: ComplexField>(
 	s: DiagMut<'_, T>,
 	u: Option<MatMut<'_, T>>,
 	v: Option<MatMut<'_, T>>,
-	par: Par,
+	mut par: Par,
 	stack: &mut MemStack,
 	params: Spec<SvdParams, T>,
 ) -> Result<(), SvdError> {
@@ -814,7 +814,7 @@ pub fn svd<T: ComplexField>(
 			linalg::qr::no_pivoting::factor::qr_in_place(
 				qr.rb_mut(),
 				householder.rb_mut(),
-				par,
+				par.reborrow(),
 				stack,
 				params.qr.into(),
 			);
@@ -837,7 +837,7 @@ pub fn svd<T: ComplexField>(
 				s,
 				u.rb_mut().map(|u| u.submatrix_mut(0, 0, n, n)),
 				v.rb_mut(),
-				par,
+				par.reborrow(),
 				stack,
 				params,
 			)?;
@@ -878,7 +878,7 @@ pub fn svd<T: ComplexField>(
 pub fn pseudoinverse_from_svd_scratch<T: ComplexField>(
 	nrows: usize,
 	ncols: usize,
-	par: Par,
+	par: ParShape,
 ) -> StackReq {
 	_ = par;
 	let size = Ord::min(nrows, ncols);
@@ -967,6 +967,122 @@ pub fn pseudoinverse_from_svd_with_tolerance<T: ComplexField>(
 }
 #[cfg(test)]
 mod tests {
+	mod qr_stall;
+	// Instantiate the same cases and checks at each native precision.
+	mod lapack_svd_f64 {
+		type Real = f64;
+		type Scalar = Real;
+		const GUARD: Scalar = -12345.0;
+		const ROTATION_PHASE: Scalar = 1.0;
+		fn diagonal_phase(i: usize) -> Scalar {
+			if i % 2 == 0 { 1.0 } else { -1.0 }
+		}
+		use super::super::{
+			bidiag_real_svd_scratch as bidiagonal_scratch,
+			compute_bidiag_real_svd as compute_bidiagonal,
+		};
+		mod lapack {
+			include!("tests/lapack.rs");
+		}
+		mod svd_views {
+			include!("tests/svd_views.rs");
+		}
+	}
+	mod lapack_svd_f32 {
+		type Real = f32;
+		type Scalar = Real;
+		const GUARD: Scalar = -12345.0;
+		const ROTATION_PHASE: Scalar = 1.0;
+		fn diagonal_phase(i: usize) -> Scalar {
+			if i % 2 == 0 { 1.0 } else { -1.0 }
+		}
+		use super::super::{
+			bidiag_real_svd_scratch as bidiagonal_scratch,
+			compute_bidiag_real_svd as compute_bidiagonal,
+		};
+		mod lapack {
+			include!("tests/lapack.rs");
+		}
+		mod svd_views {
+			include!("tests/svd_views.rs");
+		}
+		#[test]
+		fn f32_fixtures_use_single_precision_limits() {
+			let (_, large) = lapack::diagonal_case(2, 2, 6);
+			assert_eq!(large[0] as f64, f32::MAX.sqrt() as f64);
+			let (_, small) = lapack::diagonal_case(2, 2, 7);
+			assert_eq!(small[0] as f64, f32::MIN_POSITIVE.sqrt() as f64);
+			let (_, geometric) = lapack::diagonal_case(3, 3, 4);
+			assert_eq!(geometric[2] as f64, f32::EPSILON as f64);
+			let (_, cluster) = lapack::diagonal_case(4, 4, 9);
+			assert_eq!(cluster[3] as f64, (1.0 - 24.0 * f32::EPSILON) as f64);
+		}
+	}
+	mod lapack_svd_c64 {
+		type Real = f64;
+		type Scalar = crate::c64;
+		const GUARD: Scalar = Scalar::new(-12345.0, 6789.0);
+		const ROTATION_PHASE: Scalar = Scalar::new(0.0, 1.0);
+		fn diagonal_phase(i: usize) -> Scalar {
+			match i % 4 {
+				0 => Scalar::new(0.0, 1.0),
+				1 => Scalar::new(0.6, 0.8),
+				2 => Scalar::new(-0.8, 0.6),
+				_ => Scalar::new(-1.0, 0.0),
+			}
+		}
+		use super::super::{
+			bidiag_cplx_svd_scratch as bidiagonal_scratch,
+			compute_bidiag_cplx_svd as compute_bidiagonal,
+		};
+		mod lapack {
+			include!("tests/lapack.rs");
+		}
+		mod svd_views {
+			include!("tests/svd_views.rs");
+		}
+		mod complex_tests {
+			include!("tests/complex.rs");
+		}
+	}
+	mod lapack_svd_c32 {
+		type Real = f32;
+		type Scalar = crate::c32;
+		const GUARD: Scalar = Scalar::new(-12345.0, 6789.0);
+		const ROTATION_PHASE: Scalar = Scalar::new(0.0, 1.0);
+		fn diagonal_phase(i: usize) -> Scalar {
+			match i % 4 {
+				0 => Scalar::new(0.0, 1.0),
+				1 => Scalar::new(0.6, 0.8),
+				2 => Scalar::new(-0.8, 0.6),
+				_ => Scalar::new(-1.0, 0.0),
+			}
+		}
+		use super::super::{
+			bidiag_cplx_svd_scratch as bidiagonal_scratch,
+			compute_bidiag_cplx_svd as compute_bidiagonal,
+		};
+		mod lapack {
+			include!("tests/lapack.rs");
+		}
+		mod svd_views {
+			include!("tests/svd_views.rs");
+		}
+		mod complex_tests {
+			include!("tests/complex.rs");
+		}
+		#[test]
+		fn c32_fixtures_use_single_precision_limits() {
+			let (_, large) = lapack::diagonal_case(2, 2, 6);
+			assert_eq!(large[0] as f64, f32::MAX.sqrt() as f64);
+			let (_, small) = lapack::diagonal_case(2, 2, 7);
+			assert_eq!(small[0] as f64, f32::MIN_POSITIVE.sqrt() as f64);
+			let (_, geometric) = lapack::diagonal_case(3, 3, 4);
+			assert_eq!(geometric[2] as f64, f32::EPSILON as f64);
+			let (_, cluster) = lapack::diagonal_case(4, 4, 9);
+			assert_eq!(cluster[3] as f64, (1.0 - 24.0 * f32::EPSILON) as f64);
+		}
+	}
 	use super::*;
 	use crate::assert;
 	use crate::stats::prelude::*;
@@ -999,7 +1115,7 @@ mod tests {
 					n,
 					ComputeSvdVectors::Full,
 					ComputeSvdVectors::Full,
-					Par::Seq,
+					ParShape::Seq,
 					params,
 				))),
 				params,
@@ -1024,7 +1140,7 @@ mod tests {
 					n,
 					ComputeSvdVectors::Thin,
 					ComputeSvdVectors::Thin,
-					Par::Seq,
+					ParShape::Seq,
 					params,
 				))),
 				params,
@@ -1047,7 +1163,7 @@ mod tests {
 					n,
 					ComputeSvdVectors::Thin,
 					ComputeSvdVectors::No,
-					Par::Seq,
+					ParShape::Seq,
 					params,
 				))),
 				params,
@@ -1070,7 +1186,7 @@ mod tests {
 					n,
 					ComputeSvdVectors::No,
 					ComputeSvdVectors::Thin,
-					Par::Seq,
+					ParShape::Seq,
 					params,
 				))),
 				params,
@@ -1092,7 +1208,7 @@ mod tests {
 					n,
 					ComputeSvdVectors::No,
 					ComputeSvdVectors::No,
-					Par::Seq,
+					ParShape::Seq,
 					params,
 				))),
 				params,
@@ -1130,7 +1246,7 @@ mod tests {
 					n,
 					vectors(want_u),
 					vectors(want_v),
-					Par::Seq,
+					ParShape::Seq,
 					params,
 				))),
 				params,
@@ -1164,6 +1280,53 @@ mod tests {
 				);
 			}
 		}
+	}
+	#[test]
+	fn test_v_only_rank_one_exact_scratch() {
+		fn check<T: ComplexField>(entry: T, tol: f64) {
+			let n = 8;
+			let a = Mat::<T>::from_fn(n, n, |i, j| {
+				if i == 0 && j == 0 {
+					entry.copy()
+				} else {
+					zero()
+				}
+			});
+			let mut params = Spec::<SvdParams, T>::default();
+			params.recursion_threshold = 4;
+			let mut s = Col::<T>::zeros(n);
+			let mut v = Mat::<T>::zeros(n, n);
+			let mut mem = MemBuffer::new(svd_scratch::<T>(
+				n,
+				n,
+				ComputeSvdVectors::No,
+				ComputeSvdVectors::Thin,
+				ParShape::Seq,
+				params,
+			));
+			svd(
+				a.as_ref(),
+				s.as_mut().as_diagonal_mut(),
+				None,
+				Some(v.as_mut()),
+				Par::Seq,
+				MemStack::new(&mut mem),
+				params,
+			)
+			.unwrap();
+			assert!(s.is_all_finite() && v.is_all_finite());
+			let expected =
+				Col::<T>::from_fn(n, |i| if i == 0 { one() } else { zero() });
+			let tol = from_f64::<T::Real>(tol);
+			assert!((&s - &expected).norm_max() <= tol.copy());
+			assert!(
+				(v.adjoint() * &v - Mat::<T>::identity(n, n)).norm_max() <= tol
+			);
+		}
+		check::<f32>(1.0, 1e-5);
+		check::<c32>(c32::new(0.0, 1.0), 1e-5);
+		check::<f64>(1.0, 1e-13);
+		check::<c64>(c64::new(0.0, 1.0), 1e-13);
 	}
 	#[test]
 	fn test_tiny_diagonal_at_split() {
@@ -1229,7 +1392,7 @@ mod tests {
 					n,
 					vectors(want_u),
 					vectors(want_v),
-					Par::Seq,
+					ParShape::Seq,
 					params,
 				))),
 				params,
@@ -1310,7 +1473,7 @@ mod tests {
 					2,
 					ComputeSvdVectors::Thin,
 					ComputeSvdVectors::Thin,
-					Par::Seq,
+					ParShape::Seq,
 					params,
 				))),
 				params,
@@ -1504,7 +1667,7 @@ mod tests {
 				n,
 				false,
 				false,
-				Par::Seq,
+				ParShape::Seq,
 				params,
 			))),
 		)
@@ -1522,7 +1685,7 @@ mod tests {
 			dist: StandardNormal,
 		}
 		.rand::<Mat<f64>>(rng);
-		let pinv = mat.svd().unwrap().pseudoinverse();
+		let pinv = mat.svd(Par::Seq).unwrap().pseudoinverse(Par::Seq);
 		let err = &mat * &pinv - Mat::<f64>::identity(m, m);
 		assert!(err.norm_max() < 1e-10);
 	}
@@ -1537,7 +1700,7 @@ mod tests {
 			dist: StandardNormal,
 		}
 		.rand::<Mat<f64>>(rng);
-		let pinv = mat.svd().unwrap().pseudoinverse();
+		let pinv = mat.svd(Par::Seq).unwrap().pseudoinverse(Par::Seq);
 		let err = &pinv * &mat - Mat::<f64>::identity(n, n);
 		assert!(err.norm_max() < 1e-10);
 	}
@@ -1575,7 +1738,7 @@ mod tests {
 						n,
 						true,
 						true,
-						Par::Seq,
+						ParShape::Seq,
 						params,
 					),
 				)),
@@ -1607,6 +1770,56 @@ mod tests {
 		cplx_phase_reduction_is_scale_exact::<f64>(|r, _| r);
 		cplx_phase_reduction_is_scale_exact::<f32>(|r, _| r as f32);
 	}
+	/// `svd` promises nonnegative singular values in nonincreasing order, for any
+	/// finite input. This 128 x 128 matrix with three nonzero entries
+	/// bidiagonalises to a cascade whose spectrum reaches the subnormal range; the
+	/// divide-and-conquer merge used to classify a nonzero subnormal value with the
+	/// deflated zeros and return `[0.596..., 1.9e-310, 0, ..., 6.3e-4, ...]` (#82).
+	#[test]
+	fn test_sorted_with_subnormal_at_split() {
+		let n = 128;
+		// (row, column, real part, imaginary part) of each nonzero entry, as
+		// reported in #82.
+		let entries = [
+			(41, 80, -1.3368711811580607e-64, 3.48452997681476e-64),
+			(67, 80, -5.871970588424443e-1, -1.065196368760547e-1),
+			(5, 112, -2.8153454475366503e-4, 5.652970997533713e-4),
+		];
+		let mut a = Mat::<c64>::zeros(n, n);
+		for (row, col, re, im) in entries {
+			a[(row, col)] = c64::new(re, im);
+		}
+		let svd = a.as_ref().svd(Par::Seq).unwrap();
+		let s = svd.S().column_vector();
+		let values: std::vec::Vec<f64> =
+			(0..s.nrows()).map(|i| s[i].re).collect();
+		for i in 0..n {
+			assert!(values[i] >= 0.0);
+			assert!(s[i].im == 0.0);
+			if i + 1 < n {
+				assert!(
+					values[i] >= values[i + 1],
+					"s[{i}] = {:e} < s[{}] = {:e}",
+					values[i],
+					i + 1,
+					values[i + 1],
+				);
+			}
+		}
+		// the two nonzero values of the input, as `zgesdd` reports them
+		assert!((values[0] - 0.596780377486914).abs() <= 1e-14);
+		assert!((values[1] - 6.315239590698253e-4).abs() <= 1e-17);
+		let u = svd.U();
+		let v = svd.V();
+		let rec = &u * svd.S() * v.adjoint();
+		assert!((&rec - &a).norm_max() <= 1e-14);
+		assert!(
+			(u.adjoint() * &u - Mat::<c64>::identity(n, n)).norm_max() <= 1e-14
+		);
+		assert!(
+			(v.adjoint() * &v - Mat::<c64>::identity(n, n)).norm_max() <= 1e-14
+		);
+	}
 	/// full factors must be orthogonal even when the caller's output buffers
 	/// hold old entries; the tall/wide QR path used to leave the top-right block
 	/// of `U` (and, after transposition, of `V`) as it found it
@@ -1629,7 +1842,7 @@ mod tests {
 					n,
 					ComputeSvdVectors::Full,
 					ComputeSvdVectors::Full,
-					Par::Seq,
+					ParShape::Seq,
 					default(),
 				))),
 				default(),

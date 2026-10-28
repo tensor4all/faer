@@ -343,10 +343,10 @@ pub(super) fn qr_algorithm<T: RealField>(
 			while start >= 1 && !(subdiag[start - 1] == zero()) {
 				start -= 1;
 			}
-			let mut found_zero_diag = false;
+			let mut deflated = false;
 			for i in start..end - 1 {
 				if diag[i].abs() <= *eps {
-					found_zero_diag = true;
+					deflated = true;
 					let mut val = subdiag[i].copy();
 					subdiag[i] = zero();
 					for j in i + 1..end {
@@ -367,7 +367,60 @@ pub(super) fn qr_algorithm<T: RealField>(
 					}
 				}
 			}
-			if found_zero_diag {
+			if !deflated && end - start == 2 {
+				let i = start;
+				let j = i + 1;
+				let ref f = diag[i].copy();
+				let ref g = subdiag[i].copy();
+				let ref h = diag[j].copy();
+				// Symmetrize the block, then diagonalize it with a Jacobi rotation.
+				let polar = JacobiRotation::make_givens(f + h, g.copy());
+				let (s00, s01, _, s11) = polar.apply_on_the_left_2x2(
+					f.copy(),
+					zero(),
+					g.copy(),
+					h.copy(),
+				);
+				let ref gap = (&s11 - &s00).mul_pow2(from_f64::<T>(0.5));
+				let ref t = if s01 == zero() {
+					zero()
+				} else {
+					let denom = gap.abs() + gap.hypot(s01.copy());
+					if *gap < zero() {
+						&s01 / denom
+					} else {
+						-&s01 / denom
+					}
+				};
+				let ref c = t.hypot(one::<T>()).recip();
+				let right = JacobiRotation {
+					c: c.copy(),
+					s: t * c,
+				};
+				let left = JacobiRotation {
+					c: &polar.c * &right.c + &polar.s * &right.s,
+					s: &polar.c * &right.s - &polar.s * &right.c,
+				};
+				let mut d0 = &s00 + t * &s01;
+				let mut d1 = &s11 - t * &s01;
+				// Recover the smaller value from det(B), avoiding cancellation.
+				if d0.abs() >= d1.abs() {
+					d1 = (f / &d0) * h;
+				} else {
+					d0 = (f / &d1) * h;
+				}
+				diag[i] = d0;
+				diag[j] = d1;
+				subdiag[i] = zero();
+				if let Some(u) = u.rb_mut() {
+					left.apply_on_the_right_in_place(u.two_cols_mut(i, j));
+				}
+				if let Some(v) = v.rb_mut() {
+					right.apply_on_the_right_in_place(v.two_cols_mut(i, j));
+				}
+				deflated = true;
+			}
+			if deflated {
 				if iter + 1 == max_iters {
 					for x in diag.rb_mut().iter_mut() {
 						*x *= max;
@@ -381,11 +434,7 @@ pub(super) fn qr_algorithm<T: RealField>(
 			}
 			let end2 = end - 2;
 			let end1 = end - 1;
-			let t00 = if end - start == 2 {
-				diag[end2].abs2()
-			} else {
-				diag[end2].abs2() + subdiag[end - 3].abs2()
-			};
+			let t00 = diag[end2].abs2() + subdiag[end - 3].abs2();
 			let t11 = diag[end1].abs2() + subdiag[end2].abs2();
 			let t01 = &diag[end2] * &subdiag[end2];
 			let ref t01_2 = t01.abs2();
@@ -858,10 +907,17 @@ fn deflate<T: RealField>(
 			break;
 		}
 	}
+	// The entries of `diag` that are exactly zero are collected first so that
+	// the reversal below leaves them at the end, where `compute_svd_of_m`
+	// counts them as trailing zeros. The group's own order is by index, so it
+	// is only interchangeable when every member is zero: a nonzero subnormal
+	// value must keep its place in the magnitude-ordered merge, which is why
+	// this is an exact-zero test and not the `sml` tolerance used for the
+	// deflation tests.
 	perm[first] = first;
 	let mut p = 1;
 	for i in first + 1..n {
-		if diag[i].abs() < *sml {
+		if diag[i] == zero() {
 			perm[p] = i;
 			p += 1;
 		}
@@ -887,7 +943,8 @@ fn deflate<T: RealField>(
 		for i in first + 1..n {
 			let i1 = i - 1;
 			let pi = perm[i];
-			if diag[pi].abs() < *sml || diag[pi] > diag[first] {
+			// the same exact-zero classification as the group built above
+			if diag[pi] == zero() || diag[pi] > diag[first] {
 				perm[i1] = perm[i];
 			} else {
 				perm[i1] = first;
@@ -1004,21 +1061,71 @@ pub(super) fn divide_and_conquer_scratch<T: ComplexField>(
 	qr_fallback_threshold: usize,
 	compute_u: bool,
 	compute_v: bool,
-	par: Par,
+	par: ParShape,
 ) -> StackReq {
 	let qr_fallback_threshold = Ord::max(qr_fallback_threshold, 4);
 	if n < qr_fallback_threshold {
-		temp_mat_scratch::<T>(n + 1, n + 1).array(2)
+		temp_mat_scratch::<T>(n + 1, n + 1)
 	} else {
-		let _ = par;
-		let perm = StackReq::new::<usize>(n).array(8);
+		let perm = StackReq::new::<usize>(n);
 		let jacobi_coeffs = StackReq::new::<JacobiRotation<T>>(n);
 		let um = temp_mat_scratch::<T>(n + 1, n + 1);
 		let vm = temp_mat_scratch::<T>(n, if compute_v { n } else { 0 });
 		let combined_u =
 			temp_mat_scratch::<T>(if compute_u { n + 1 } else { 2 }, n + 1);
 		let combined_v = vm;
-		StackReq::all_of(&[perm, jacobi_coeffs, um, vm, combined_u, combined_v])
+		let compute_m = StackReq::all_of(&[
+			perm,
+			temp_mat_scratch::<T>(n, 1).array(6),
+			perm.array(2),
+		]);
+		let merge = StackReq::all_of(&[
+			perm,
+			jacobi_coeffs,
+			perm,
+			StackReq::any_of(&[
+				perm.array(3),
+				StackReq::all_of(&[
+					um,
+					vm,
+					StackReq::any_of(&[
+						compute_m,
+						StackReq::all_of(&[combined_u, combined_v]),
+					]),
+				]),
+			]),
+		]);
+		let k = n / 2;
+		let rem = n - k - 1;
+		let child = divide_and_conquer_scratch::<T>(
+			Ord::max(k, rem),
+			qr_fallback_threshold,
+			compute_u,
+			compute_v,
+			par,
+		);
+		// Recursion halves the bytes without aligning the second child.
+		let recurse =
+			StackReq::new::<u8>(child.unaligned_bytes_required()).array(2);
+		StackReq::any_of(&[merge, recurse])
+	}
+}
+/// `sqrt(x^2 + y^2)` scaled by the larger argument: `w * sqrt(1 + (z / w)^2)`
+/// with `w = max(|x|, |y|)` and `z = min(|x|, |y|)`.
+///
+/// Squaring first is not usable for the merge's boundary rotation below.
+/// `alpha * lambda` and `beta * phi` are products of entries of an already
+/// rescaled subproblem, so a deeply split bidiagonal makes them as small as
+/// `1e-41`, where `x.abs2() + y.abs2()` is subnormal or zero even after the
+/// `sqrt(max_positive)` rescaling that `hypot` applies.
+fn hypot_scaled<T: RealField>(x: &T, y: &T) -> T {
+	let (x, y) = (x.abs(), y.abs());
+	let (w, z) = if x > y { (x, y) } else { (y, x) };
+	if w == zero() || !w.is_finite() {
+		w
+	} else {
+		let ref r = z / &w;
+		&w * (one::<T>() + r * r).sqrt()
 	}
 }
 pub(super) fn divide_and_conquer<T: RealField>(
@@ -1026,7 +1133,7 @@ pub(super) fn divide_and_conquer<T: RealField>(
 	subdiag: ColMut<'_, T, usize, ContiguousFwd>,
 	u: MatU<'_, T>,
 	v: Option<MatMut<'_, T>>,
-	par: Par,
+	mut par: Par,
 	stack: &mut MemStack,
 	qr_fallback_threshold: usize,
 ) -> Result<(), SvdError> {
@@ -1155,6 +1262,13 @@ pub(super) fn divide_and_conquer<T: RealField>(
 		let stack1 = MemStack::new(&mut stack1);
 		let mut r1 = Ok(());
 		let mut r2 = Ok(());
+		// one section for the join of the two halves, each a whole solve of size `n / 2`
+		let join_par =
+			if crate::utils::cost::halves_pays::<T>(&par, n, crate::utils::cost::rate::bidiag_svd_dc(), 2) {
+				par.reborrow()
+			} else {
+				Par::Seq
+			};
 		crate::utils::thread::join_raw(
 			|par| {
 				r1 = divide_and_conquer(
@@ -1178,7 +1292,7 @@ pub(super) fn divide_and_conquer<T: RealField>(
 					qr_fallback_threshold,
 				);
 			},
-			par,
+			join_par,
 		);
 		r1?;
 		r2?;
@@ -1213,9 +1327,28 @@ pub(super) fn divide_and_conquer<T: RealField>(
 	};
 	let ref al = alpha * lambda;
 	let ref bp = beta * phi;
-	let ref r0 = (al.abs2() + bp.abs2()).sqrt();
+	let ref squares = al.abs2() + bp.abs2();
+	// The boundary rotation has to stay orthogonal: it is applied to the first
+	// and last column of the merged left factor. Squaring `al` and `bp` loses
+	// that once the merge sits deep enough in the recursion for them to fall
+	// below `sqrt(min_positive)`, because then `squares` is subnormal, `r0` is
+	// accurate to a few bits only and `c0^2 + s0^2` drifts from one. Inside the
+	// normal range the squares are exact to rounding, so the historical
+	// arithmetic stays bit for bit.
+	let scaled = !(squares.is_finite() && *squares >= min_positive::<T>());
+	let ref r0 = if scaled {
+		hypot_scaled(al, bp)
+	} else {
+		squares.sqrt()
+	};
 	let (ref c0, ref s0) = if *r0 == zero() {
 		(one(), zero())
+	} else if scaled {
+		// A subnormal `r0` cannot produce an orthogonal pair from `al / r0`;
+		// normalizing by a ratio keeps `c0^2 + s0^2` one to rounding.
+		let JacobiRotation { c, s } =
+			JacobiRotation::make_givens(al.copy(), bp.copy());
+		(c, -s)
 	} else {
 		(al / r0, bp / r0)
 	};
@@ -1356,7 +1489,7 @@ pub(super) fn divide_and_conquer<T: RealField>(
 	}
 	let _v_is_none = v.is_none();
 	let update_v =
-		|mut v: Option<MatMut<'_, T>>, par: Par, stack: &mut MemStack| {
+		|mut v: Option<MatMut<'_, T>>, mut par: Par, stack: &mut MemStack| {
 			let (mut combined_v, _) =
 				unsafe { temp_mat_uninit(n, allocate_vm * n, stack) };
 			let mut combined_v = if v.is_some() {
@@ -1381,6 +1514,17 @@ pub(super) fn divide_and_conquer<T: RealField>(
 				let v_lhs1 = v_lhs.submatrix(0, 1, k, k);
 				let v_lhs2 = v_lhs.submatrix(k + 1, k + 1, rem, rem);
 				let (v_rhs1, v_rhs2) = v_rhs.split_at_row(1).1.split_at_row(k);
+				// one section; the two products `k x k` and `rem x rem` against `n` columns
+				let join_par = if crate::utils::cost::join_pays::<T>(
+					&par,
+					(k * k + rem * rem).saturating_mul(n),
+					crate::utils::cost::rate::gemm_mac(),
+					1,
+				) {
+					par.reborrow()
+				} else {
+					Par::Seq
+				};
 				crate::utils::thread::join_raw(
 					|par| {
 						crate::linalg::matmul::matmul(
@@ -1402,7 +1546,7 @@ pub(super) fn divide_and_conquer<T: RealField>(
 							par,
 						)
 					},
-					par,
+					join_par,
 				);
 				crate::linalg::matmul::matmul(
 					combined_v.rb_mut().submatrix_mut(k, 0, 1, n),
@@ -1431,15 +1575,27 @@ pub(super) fn divide_and_conquer<T: RealField>(
 			u_lhs.submatrix(k + 1, k + 1, rem + 1, rem + 1),
 		);
 		let (u_rhs1, u_rhs2) = u_rhs.split_at_row(k + 1);
+		// one section; the two products `(k+1) x (k+1)` and `(rem+1) x (rem+1)` against `n + 1`
+		// columns
+		let join_par = if crate::utils::cost::join_pays::<T>(
+			&par,
+			((k + 1) * (k + 1) + (rem + 1) * (rem + 1)).saturating_mul(n + 1),
+			crate::utils::cost::rate::gemm_mac(),
+			1,
+		) {
+			par
+		} else {
+			Par::Seq
+		};
 		crate::utils::thread::join_raw(
-			|par| {
+			|mut par| {
 				crate::linalg::matmul::matmul(
 					combined_u1.rb_mut(),
 					Accum::Replace,
 					u_lhs1,
 					u_rhs1,
 					one(),
-					par,
+					par.reborrow(),
 				);
 				crate::linalg::matmul::matmul(
 					combined_u1.rb_mut(),
@@ -1450,14 +1606,14 @@ pub(super) fn divide_and_conquer<T: RealField>(
 					par,
 				);
 			},
-			|par| {
+			|mut par| {
 				crate::linalg::matmul::matmul(
 					combined_u2.rb_mut(),
 					Accum::Replace,
 					u_lhs2,
 					u_rhs2,
 					one(),
-					par,
+					par.reborrow(),
 				);
 				crate::linalg::matmul::matmul(
 					combined_u2.rb_mut(),
@@ -1468,7 +1624,7 @@ pub(super) fn divide_and_conquer<T: RealField>(
 					par,
 				);
 			},
-			par,
+			join_par,
 		);
 		u.copy_from(combined_u.rb());
 	};
@@ -1477,7 +1633,7 @@ pub(super) fn divide_and_conquer<T: RealField>(
 			update_v(v.rb_mut(), par, stack);
 		},
 		MatU::TwoRows(mut u) => {
-			update_v(v.rb_mut(), par, stack);
+			update_v(v.rb_mut(), par.reborrow(), stack);
 			let (mut combined_u, _) =
 				unsafe { temp_mat_uninit(2, n + 1, stack) };
 			let mut combined_u = combined_u.as_mat_mut();
@@ -1500,14 +1656,27 @@ pub(super) fn divide_and_conquer<T: RealField>(
 					req_v.align_bytes(),
 				);
 				let stack_v = MemStack::new(mem_v);
+				// one section; the products of both updates
+				let join_par = if crate::utils::cost::join_pays::<T>(
+					&par,
+					(k * k + rem * rem).saturating_mul(n).saturating_add(
+						((k + 1) * (k + 1) + (rem + 1) * (rem + 1)).saturating_mul(n + 1),
+					),
+					crate::utils::cost::rate::gemm_mac(),
+					1,
+				) {
+					par
+				} else {
+					Par::Seq
+				};
 				crate::utils::thread::join_raw(
 					|par| update_v(v.rb_mut(), par, stack_v),
 					|par| update_u(u, par, stack_u),
-					par,
+					join_par,
 				);
 			},
 			_ => {
-				update_v(v.rb_mut(), par, stack);
+				update_v(v.rb_mut(), par.reborrow(), stack);
 				update_u(u, par, stack);
 			},
 		},
@@ -1618,6 +1787,125 @@ mod tests {
 		}
 	}
 	#[test]
+	fn test_issue81_qr_near_repeated_pair() {
+		fn check<T: RealField>(f: T, g: T, h: T, expected: [f64; 3]) {
+			for scale in [1.0, 2.0, 1e-8, 1e8] {
+				let ref scale = from_f64::<T>(scale);
+				for (want_u, want_v) in
+					[(true, true), (true, false), (false, true), (false, false)]
+				{
+					let mut d = Col::<T>::from_fn(3, |i| {
+						(match i {
+							0 => one(),
+							1 => f.copy(),
+							_ => h.copy(),
+						}) * scale
+					});
+					let mut e = Col::<T>::from_fn(3, |i| {
+						if i == 1 { &g * scale } else { zero() }
+					});
+					let original = bidiag_to_mat(
+						d.as_ref().try_as_col_major().unwrap(),
+						e.as_ref().try_as_col_major().unwrap(),
+					);
+					let mut u = Mat::<T>::identity(3, 3);
+					let mut v = Mat::<T>::identity(3, 3);
+					qr_algorithm(
+						d.as_mut().try_as_col_major_mut().unwrap(),
+						e.as_mut().try_as_col_major_mut().unwrap(),
+						if want_u { Some(u.as_mut()) } else { None },
+						if want_v { Some(v.as_mut()) } else { None },
+					)
+					.unwrap();
+					let tol = from_f64::<T>(32.0) * eps::<T>();
+					for i in 0..3 {
+						let expected = from_f64::<T>(expected[i]);
+						assert!(
+							((&d[i] / scale) - &expected).abs()
+								<= &tol * expected
+						);
+						assert_eq!(e[i], zero::<T>());
+					}
+					if want_u {
+						assert!(
+							(u.adjoint() * &u - Mat::<T>::identity(3, 3))
+								.norm_max() <= tol
+						);
+					}
+					if want_v {
+						assert!(
+							(v.adjoint() * &v - Mat::<T>::identity(3, 3))
+								.norm_max() <= tol
+						);
+					}
+					if want_u && want_v {
+						let back = &u * d.as_diagonal() * v.adjoint();
+						assert!(
+							(&back - &original).norm_max()
+								/ original.norm_max() <= tol
+						);
+					}
+				}
+			}
+		}
+		let f = 0.02874731110238686_f64;
+		let h = 0.028747311102386864_f64;
+		check(f, 2.0_f64.powi(-57), h, [1.0, h, f]);
+		let f = f as f32;
+		let h = f32::from_bits(f.to_bits() + 1);
+		check(f, 2.0_f32.powi(-28), h, [1.0, h as f64, f as f64]);
+		check(
+			1.0_f64,
+			1.0,
+			1.0,
+			[1.618033988749895, 1.0, 0.6180339887498948],
+		);
+		check(
+			1.0_f32,
+			1.0,
+			-1.0,
+			[1.618033988749895, 1.0, 0.6180339887498948],
+		);
+		check(
+			1.0_f64,
+			-1.0,
+			1e-200,
+			[
+				core::f64::consts::SQRT_2,
+				1.0,
+				1e-200 / core::f64::consts::SQRT_2,
+			],
+		);
+		check(
+			-1.0_f32,
+			1.0,
+			1e-30,
+			[
+				core::f64::consts::SQRT_2,
+				1.0,
+				1e-30 / core::f64::consts::SQRT_2,
+			],
+		);
+		// Multiplying f*h first would lose precision in this subnormal value.
+		let mut d = Col::from_fn(3, |i| match i {
+			0 => 1.0,
+			1 => 1e-15,
+			_ => f64::MIN_POSITIVE,
+		});
+		let mut e = Col::from_fn(3, |i| if i == 1 { 1e-15 } else { 0.0 });
+		qr_algorithm(
+			d.as_mut().try_as_col_major_mut().unwrap(),
+			e.as_mut().try_as_col_major_mut().unwrap(),
+			None,
+			None,
+		)
+		.unwrap();
+		assert!(
+			(d[2] - f64::MIN_POSITIVE / core::f64::consts::SQRT_2).abs()
+				<= 64.0 * f64::EPSILON * f64::MIN_POSITIVE
+		);
+	}
+	#[test]
 	fn test_qr_algorithm() {
 		for file in std::fs::read_dir(
 			PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data/svd/"),
@@ -1662,6 +1950,146 @@ mod tests {
 		}
 	}
 	#[test]
+	fn test_divide_and_conquer_exact_scratch() {
+		for n in 1..=70 {
+			for threshold in [4, 5, 8] {
+				for u_mode in 0..3 {
+					for want_v in [false, true] {
+						check_divide_and_conquer_scratch::<f32>(
+							n,
+							threshold,
+							u_mode,
+							want_v,
+							Par::Seq,
+						);
+						check_divide_and_conquer_scratch::<f64>(
+							n,
+							threshold,
+							u_mode,
+							want_v,
+							Par::Seq,
+						);
+					}
+				}
+			}
+		}
+	}
+	#[test]
+	#[cfg(feature = "rayon")]
+	fn test_divide_and_conquer_exact_scratch_rayon() {
+		let pool = rayon::ThreadPoolBuilder::new()
+			.num_threads(2)
+			.build()
+			.unwrap();
+		pool.install(|| {
+			for n in [4, 5, 7, 8, 9, 15, 16, 17, 63, 64, 65] {
+				for threshold in [4, 5, 8] {
+					check_divide_and_conquer_scratch::<f32>(
+						n,
+						threshold,
+						0,
+						true,
+						Par::rayon(2),
+					);
+					check_divide_and_conquer_scratch::<f64>(
+						n,
+						threshold,
+						0,
+						true,
+						Par::rayon(2),
+					);
+				}
+			}
+		});
+	}
+	fn check_divide_and_conquer_scratch<T: RealField>(
+		n: usize,
+		threshold: usize,
+		u_mode: usize,
+		want_v: bool,
+		mut par: Par,
+	) {
+		for rank_one in [false, true] {
+			for unaligned in [false, true] {
+				let mut d = Col::<T>::from_fn(n, |i| {
+					if rank_one {
+						if i == 0 { one() } else { zero() }
+					} else {
+						from_f64(2.0 + (i % 11) as f64 / 11.0)
+					}
+				});
+				let mut e = Col::<T>::from_fn(n, |i| {
+					if rank_one {
+						zero()
+					} else {
+						from_f64(0.25 + (i % 7) as f64 / 16.0)
+					}
+				});
+				let norm = (d.squared_norm_l2() + e.squared_norm_l2()).sqrt();
+				let u_rows = if u_mode == 0 { n + 1 } else { 2 };
+				let mut u = Mat::<T>::zeros(u_rows, n + 1);
+				let mut v = Mat::<T>::zeros(n, if want_v { n } else { 0 });
+				let req = divide_and_conquer_scratch::<T>(
+					n,
+					threshold,
+					u_mode == 0,
+					want_v,
+					par.shape(),
+				);
+				let mut mem = MemBuffer::new(StackReq::new_aligned::<u8>(
+					req.unaligned_bytes_required() + 1,
+					req.align_bytes(),
+				));
+				let (offset, len) = if unaligned {
+					(1, req.unaligned_bytes_required())
+				} else {
+					(0, req.size_bytes())
+				};
+				assert_eq!(mem[offset..].as_ptr() as usize % 2, offset);
+				let stack = MemStack::new(&mut mem[offset..][..len]);
+				assert_eq!(stack.len_bytes(), len);
+				let u_arg = match u_mode {
+					0 => MatU::Full(u.as_mut()),
+					1 => MatU::TwoRows(u.as_mut()),
+					_ => MatU::TwoRowsStorage(u.as_mut()),
+				};
+				divide_and_conquer(
+					d.as_mut().try_as_col_major_mut().unwrap(),
+					e.as_mut().try_as_col_major_mut().unwrap(),
+					u_arg,
+					if want_v { Some(v.as_mut()) } else { None },
+					par.reborrow(),
+					stack,
+					threshold,
+				)
+				.unwrap();
+				assert!(
+					d.is_all_finite() && u.is_all_finite() && v.is_all_finite()
+				);
+				let tol = from_f64::<T>(128.0 * n as f64) * eps::<T>();
+				assert!((d.norm_l2() - &norm).abs() <= &tol * norm);
+				if rank_one {
+					let expected = Col::<T>::from_fn(n, |i| {
+						if i == 0 { one() } else { zero() }
+					});
+					assert!((&d - &expected).norm_max() <= tol);
+				}
+				if u_mode != 2 {
+					assert!(
+						(&u * u.adjoint() - Mat::<T>::identity(u_rows, u_rows))
+							.norm_max() <= tol
+					);
+				}
+				if want_v {
+					assert!(
+						(v.adjoint() * &v - Mat::<T>::identity(n, n))
+							.norm_max() <= tol
+					);
+				}
+			}
+		}
+	}
+	#[test]
 	fn test_divide_and_conquer() {
 		for file in std::fs::read_dir(
 			PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data/svd/"),
@@ -1696,7 +2124,7 @@ mod tests {
 						4,
 						true,
 						true,
-						Par::Seq,
+						ParShape::Seq,
 					),
 				)),
 				4,
@@ -1760,7 +2188,7 @@ mod tests {
 						4,
 						true,
 						true,
-						Par::Seq,
+						ParShape::Seq,
 					),
 				)),
 				4,
@@ -2011,7 +2439,7 @@ mod tests {
 								4,
 								true,
 								true,
-								Par::Seq,
+								ParShape::Seq,
 							),
 						)),
 						4,
@@ -2036,6 +2464,99 @@ mod tests {
 					);
 				}
 			}
+		}
+	}
+	/// A nonzero value below `min_positive` is a real singular value, not a
+	/// deflated zero. The merge collects the exactly-zero entries into a group
+	/// that the final reversal leaves at the end; that group's own order is by
+	/// index, so a nonzero subnormal value placed in it comes out unordered.
+	/// Group by an exact-zero test instead and the spectrum stays sorted
+	/// (#82).
+	fn subnormal_diag_at_split_is_ordered<T: RealField>(threshold: usize) {
+		let n = 128;
+		let tiny = min_positive::<T>().mul_pow2(from_f64::<T>(0.5));
+		assert!(tiny > zero::<T>() && tiny < min_positive::<T>());
+		for pos in [n / 2 + 1, n / 2 + 36, n - 1] {
+			let mut d = Col::<T>::zeros(n);
+			let mut e = Col::<T>::zeros(n);
+			d[0] = one();
+			d[1] = from_f64::<T>(0.5);
+			d[pos] = tiny.copy();
+			let d0 = Col::<T>::from_fn(n, |i| d[i].copy());
+			let e0 = Col::<T>::from_fn(n, |i| e[i].copy());
+			let (d0, e0) = (
+				d0.as_ref().try_as_col_major().unwrap(),
+				e0.as_ref().try_as_col_major().unwrap(),
+			);
+			let mut u = Mat::<T>::zeros(n + 1, n + 1);
+			let mut v = Mat::<T>::zeros(n, n);
+			divide_and_conquer(
+				d.as_mut().try_as_col_major_mut().unwrap(),
+				e.as_mut().try_as_col_major_mut().unwrap(),
+				MatU::Full(u.as_mut()),
+				Some(v.as_mut()),
+				Par::Seq,
+				MemStack::new(&mut MemBuffer::new(
+					divide_and_conquer_scratch::<T>(
+						n,
+						threshold,
+						true,
+						true,
+						ParShape::Seq,
+					),
+				)),
+				threshold,
+			)
+			.unwrap();
+			for i in 0..n {
+				assert!(d[i].is_finite() && d[i] >= zero());
+				if i + 1 < n {
+					assert!(
+						d[i] >= d[i + 1],
+						"pos={pos} threshold={threshold}: d[{i}] = {:?} < \
+						 d[{}] = {:?}",
+						d[i],
+						i + 1,
+						d[i + 1],
+					);
+				}
+			}
+			assert!((&d[0] - one::<T>()).abs() <= eps::<T>());
+			assert!((&d[1] - from_f64::<T>(0.5)).abs() <= eps::<T>());
+			// singular values below the merge's deflation floor
+			// `8 * eps * ||B||` (the subnormal one and the zeros) are only
+			// determined to that normwise bound, which the whole spectrum
+			// `[1, 1/2, tiny, 0, ...]` must meet
+			for i in 0..n {
+				let want = match i {
+					0 => one::<T>(),
+					1 => from_f64::<T>(0.5),
+					2 => tiny.copy(),
+					_ => zero::<T>(),
+				};
+				assert!(
+					(&d[i] - want).abs() <= from_f64::<T>(8.0) * eps::<T>(),
+					"pos={pos} threshold={threshold}: d[{i}] = {:?}",
+					d[i],
+				);
+			}
+			let mut sigma = Mat::<T>::zeros(n + 1, n);
+			for i in 0..n {
+				sigma[(i, i)] = d[i].copy();
+			}
+			assert!(u.is_all_finite() && v.is_all_finite());
+			let rec = &u * &sigma * v.transpose();
+			let residual = (&rec - bidiag_to_mat2(d0, e0)).norm_max();
+			// the merge's deflated-value perturbation is `8 * eps`, which is
+			// the accuracy the reconstruction carries
+			assert!(residual <= from_f64::<T>(100.0) * eps::<T>());
+		}
+	}
+	#[test]
+	fn subnormal_diag_at_split() {
+		for threshold in [128, 4] {
+			subnormal_diag_at_split_is_ordered::<f64>(threshold);
+			subnormal_diag_at_split_is_ordered::<f32>(threshold);
 		}
 	}
 	#[test]

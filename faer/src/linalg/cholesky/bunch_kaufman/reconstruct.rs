@@ -3,7 +3,7 @@ use crate::internal_prelude::*;
 use linalg::matmul::triangular::BlockStructure;
 pub fn reconstruct_scratch<I: Index, T: ComplexField>(
 	dim: usize,
-	par: Par,
+	par: ParShape,
 ) -> StackReq {
 	_ = par;
 	temp_mat_scratch::<T>(dim, dim)
@@ -117,7 +117,7 @@ mod tests {
 			MemStack::new(&mut {
 				MemBuffer::new(factor::cholesky_in_place_scratch::<usize, c64>(
 					n,
-					Par::Seq,
+					ParShape::Seq,
 					default(),
 				))
 			}),
@@ -133,7 +133,7 @@ mod tests {
 			perm,
 			Par::Seq,
 			MemStack::new(&mut MemBuffer::new(
-				reconstruct::reconstruct_scratch::<usize, c64>(n, Par::Seq),
+				reconstruct::reconstruct_scratch::<usize, c64>(n, ParShape::Seq),
 			)),
 		);
 		for j in 0..n {
@@ -142,6 +142,57 @@ mod tests {
 			}
 		}
 		assert!(A_rec ~ A);
+	}
+	/// a 1x1 pivot with no entries below it must still clear its subdiagonal
+	/// entry, since `subdiag` is an output the caller may reuse
+	/// (`tensor4all/faer#31`)
+	#[test]
+	fn test_factor_clears_stale_subdiag() {
+		// n = 100 exceeds the default block size, so the blocked path runs too
+		for n in [1usize, 3, 100] {
+			let A = Mat::<f64>::from_fn(n, n, |i, j| {
+				if i == j { 1.0 + i as f64 } else { 0.0 }
+			});
+			let mut LB = A.clone();
+			let mut subdiag = Diag::full(n, 7.0);
+			let perm_fwd = &mut *vec![0usize; n];
+			let perm_bwd = &mut *vec![0usize; n];
+			let (_, perm) = factor::cholesky_in_place(
+				LB.as_mut(),
+				subdiag.as_mut(),
+				perm_fwd,
+				perm_bwd,
+				Par::Seq,
+				MemStack::new(&mut MemBuffer::new(
+					factor::cholesky_in_place_scratch::<usize, f64>(
+						n,
+						ParShape::Seq,
+						default(),
+					),
+				)),
+				default(),
+			);
+			for i in 0..n {
+				assert!(subdiag[i] == 0.0);
+			}
+			let mut A_rec = Mat::zeros(n, n);
+			reconstruct::reconstruct(
+				A_rec.as_mut(),
+				LB.as_ref(),
+				LB.diagonal(),
+				subdiag.as_ref(),
+				perm,
+				Par::Seq,
+				MemStack::new(&mut MemBuffer::new(
+					reconstruct::reconstruct_scratch::<usize, f64>(n, ParShape::Seq),
+				)),
+			);
+			for j in 0..n {
+				for i in j..n {
+					assert!(A_rec[(i, j)] == A[(i, j)]);
+				}
+			}
+		}
 	}
 	/// The high-level wrapper stores the block diagonal separately and keeps a unit
 	/// diagonal in `L`, so reconstruction has to read `diagonal` for both block sizes.
@@ -188,7 +239,7 @@ mod tests {
 					MemStack::new(&mut MemBuffer::new(reconstruct_scratch::<
 						usize,
 						T,
-					>(n, Par::Seq))),
+					>(n, ParShape::Seq))),
 				);
 				// reconstruct fills the lower triangle only
 				for j in 0..n {

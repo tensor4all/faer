@@ -400,7 +400,7 @@ mod tests {
                 }
                 let mut want: Vec<f64> = mat
                     .as_ref()
-                    .thin_svd()
+                    .thin_svd(Par::Seq)
                     .unwrap()
                     .S()
                     .column_vector()
@@ -445,12 +445,12 @@ mod tests {
             let mut bid = a.clone();
             let mut hl = Mat::<f64>::zeros(1, n);
             let mut hr = Mat::<f64>::zeros(1, n - 1);
-            let mut mem = MemBuffer::new(bidiag::bidiag_in_place_scratch::<f64>(n, n, Par::Seq, Default::default()));
+            let mut mem = MemBuffer::new(bidiag::bidiag_in_place_scratch::<f64>(n, n, Par::Seq.shape(), Default::default()));
             bidiag::bidiag_in_place(bid.as_mut(), hl.as_mut(), hr.as_mut(), Par::Seq, MemStack::new(&mut mem), Default::default());
             let mut d: Vec<f64> = (0..n).map(|i| bid[(i, i)]).collect();
             let mut e: Vec<f64> = (0..n - 1).map(|i| bid[(i, i + 1)]).collect();
             singular_values(&mut d, &mut e).unwrap();
-            let want: Vec<f64> = a.as_ref().thin_svd().unwrap().S().column_vector().iter().copied().collect();
+            let want: Vec<f64> = a.as_ref().thin_svd(Par::Seq).unwrap().S().column_vector().iter().copied().collect();
             for i in 0..n {
                 core::assert!((d[i] - want[i]).abs() <= 1e-12 * want[i], "n={n} i={i}: {} vs {}", d[i], want[i]);
             }

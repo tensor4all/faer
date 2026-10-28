@@ -6,6 +6,33 @@ use linalg::householder::*;
 use linalg::jacobi::JacobiRotation;
 use linalg::matmul::{dot, matmul};
 use linalg::svd::bidiag_svd::secular_eq_root_finder;
+/// Scales `(diag, offdiag)` into the range where the algorithm's squares and
+/// reciprocals stay finite, and returns the factor that takes the computed
+/// eigenvalues back to the input scale. LAPACK's `dsteqr` rescales `anorm` the
+/// same way: a spectrum that is finite can still overflow a shift or underflow
+/// a reciprocal.
+fn normalize_range<T: RealField>(
+	diag: &mut ColMut<'_, T, usize, ContiguousFwd>,
+	offdiag: &mut ColMut<'_, T, usize, ContiguousFwd>,
+) -> T {
+	let ref anorm = diag.rb().norm_max().fmax(offdiag.rb().norm_max());
+	// below `lo` the square of an entry of size `eps * anorm` underflows, above
+	// `hi` an entry squared overflows
+	let ref lo = min_positive::<T>().sqrt() / eps::<T>();
+	let ref hi = max_positive::<T>().sqrt();
+	if *anorm == zero() || (*anorm > *lo && *anorm < *hi) {
+		return one();
+	}
+	// dividing by `anorm` also works where its reciprocal has no finite value,
+	// which is what a subnormal norm would ask for
+	for x in diag.rb_mut().iter_mut() {
+		*x = x.copy() / anorm;
+	}
+	for x in offdiag.rb_mut().iter_mut() {
+		*x = x.copy() / anorm;
+	}
+	anorm.copy()
+}
 pub(crate) fn qr_algorithm<T: RealField>(
 	diag: ColMut<'_, T, usize, ContiguousFwd>,
 	offdiag: ColMut<'_, T, usize, ContiguousFwd>,
@@ -24,6 +51,7 @@ pub(crate) fn qr_algorithm<T: RealField>(
 	}
 	let ref eps = eps::<T>();
 	let ref sml = min_positive::<T>();
+	let ref scale = normalize_range(&mut diag, &mut offdiag);
 	if n == 2 {
 		let ref a = diag[0].copy();
 		let ref d = diag[1].copy();
@@ -85,20 +113,9 @@ pub(crate) fn qr_algorithm<T: RealField>(
 				}
 			}
 		}
-		diag[0] = r0.copy();
-		diag[1] = r1.copy();
+		diag[0] = r0 * scale;
+		diag[1] = r1 * scale;
 		return Ok(());
-	}
-	let ref max = diag.norm_max().fmax(offdiag.norm_max());
-	if *max == zero() {
-		return Ok(());
-	}
-	let ref max_inv = max.recip();
-	for x in diag.rb_mut().iter_mut() {
-		*x *= max_inv;
-	}
-	for x in offdiag.rb_mut().iter_mut() {
-		*x *= max_inv;
 	}
 	let mut end = n - 1;
 	let mut start = 0;
@@ -121,10 +138,10 @@ pub(crate) fn qr_algorithm<T: RealField>(
 		}
 		if iter + 1 == max_iters {
 			for x in diag.rb_mut().iter_mut() {
-				*x *= max;
+				*x *= scale;
 			}
 			for x in offdiag.rb_mut().iter_mut() {
-				*x *= max;
+				*x *= scale;
 			}
 			return Err(EvdError::NoConvergence);
 		}
@@ -133,45 +150,55 @@ pub(crate) fn qr_algorithm<T: RealField>(
 			start -= 1;
 		}
 		{
-			let td = (&diag[end - 1] - &diag[end]).mul_pow2(from_f64::<T>(0.5));
+			// The shift and the implicit QR step below translate the QR branch
+			// (labels 90-140) of DSTEQR, `SRC/dsteqr.f` of Reference-LAPACK
+			// release v3.12.1, commit 6ec7f2bc4ecf4c4a93496aa2fa519575bc0e39ca
+			// (https://github.com/Reference-LAPACK/lapack). Material changes:
+			// faer's block splitting, deflation test, ordering and eigenvector
+			// update are kept, and `make_givens` replaces DLARTG. LAPACK's
+			// copyright notice and license terms are in
+			// `faer/COPYING.LAPACK.BSD` (see `NOTICE`).
+			//
+			// Shift `g = diag[start] - mu`, where `mu` is the eigenvalue of the
+			// trailing 2x2 block that is nearest to `diag[end]`.
+			let p0 = diag[end].copy();
 			let ref e = offdiag[end - 1].copy();
-			let mut mu = diag[end].copy();
-			if td == zero() {
-				mu -= e.abs();
-			} else if *e != zero() {
-				let e2 = e.abs2();
-				let h = td.hypot(e);
-				let h = if td > zero() { h.copy() } else { -h };
-				if e2 == zero() {
-					mu = mu - e / ((td + h) / e)
-				} else {
-					mu = mu - e2 / (td + h)
-				};
-			}
-			let mut x = &diag[start] - mu;
-			let mut z = offdiag[start].copy();
-			let mut k = start;
-			while k < end && z != zero() {
-				let rot = JacobiRotation::make_givens(x.copy(), z.copy());
-				let ref sdk = &rot.s * &diag[k] + &rot.c * &offdiag[k];
-				let ref dkp1 = &rot.s * &offdiag[k] + &rot.c * &diag[k + 1];
-				diag[k] = &rot.c * (&rot.c * &diag[k] - &rot.s * &offdiag[k])
-					- &rot.s * (&rot.c * &offdiag[k] - &rot.s * &diag[k + 1]);
-				diag[k + 1] = &rot.s * sdk + &rot.c * dkp1;
-				offdiag[k] = &rot.c * sdk - &rot.s * dkp1;
+			let g0 = (&diag[end - 1] - &p0) / (e + e);
+			let r0 = g0.hypot(one::<T>());
+			let ref sgn = if g0 >= zero() { r0.copy() } else { -r0 };
+			// implicit QR step, chased from `start` to `end`. `p` carries the
+			// correction that the previous rotation applied to the entry being
+			// visited, so a diagonal is updated as `g + p` instead of being
+			// re-rounded as `c^2 d - 2 c s e + s^2 d'` on every rotation (#76).
+			let ref two = from_f64::<T>(2.0);
+			let mut g = &diag[start] - &p0 + e / (g0 + sgn);
+			let mut c = one::<T>();
+			let mut s = one::<T>();
+			let mut p = zero::<T>();
+			for k in start..end {
+				let ref ek = offdiag[k].copy();
+				let ref f = &s * ek;
+				let ref b = &c * ek;
+				let rot = JacobiRotation::make_givens(g.copy(), f.copy());
 				if k > start {
-					offdiag[k - 1] = &rot.c * &offdiag[k - 1] - &rot.s * &z;
+					offdiag[k - 1] = &rot.c * &g - &rot.s * f;
 				}
-				x = offdiag[k].copy();
-				if k < end - 1 {
-					z = -&rot.s * &offdiag[k + 1];
-					offdiag[k + 1] = &rot.c * &offdiag[k + 1];
-				}
+				// `make_givens` and `dlartg` describe the same rotation but
+				// carry opposite signs for its sine; the update below is the
+				// `dlartg` one.
+				s = -&rot.s;
+				c = rot.c.copy();
+				g = &diag[k] - &p;
+				let ref r = (&diag[k + 1] - &g) * &s + (&c * b).mul_pow2(two);
+				p = &s * r;
+				diag[k] = &g + &p;
+				g = &c * r - b;
 				if let Some(u) = u.rb_mut() {
 					rot.apply_on_the_right_in_place(u.two_cols_mut(k + 1, k));
 				}
-				k += 1;
 			}
+			diag[end] = &diag[end] - &p;
+			offdiag[end - 1] = g;
 		}
 	}
 	for i in 0..n - 1 {
@@ -193,7 +220,7 @@ pub(crate) fn qr_algorithm<T: RealField>(
 		}
 	}
 	for x in diag.rb_mut().iter_mut() {
-		*x *= max;
+		*x *= scale;
 	}
 	Ok(())
 }
@@ -278,7 +305,7 @@ fn divide_and_conquer_recurse<T: RealField>(
 	mut diag: ColMut<'_, T, usize, ContiguousFwd>,
 	mut offdiag: ColMut<'_, T, usize, ContiguousFwd>,
 	mut u: MatMut<'_, T, usize, usize>,
-	par: Par,
+	mut par: Par,
 	pl_before: &mut [usize],
 	pl_after: &mut [usize],
 	pr: &mut [usize],
@@ -325,6 +352,17 @@ fn divide_and_conquer_recurse<T: RealField>(
 		let (tmp0, _, _, tmp1) = tmp.rb_mut().split_at_mut(n1, n1);
 		let mut r0 = Ok(());
 		let mut r1 = Ok(());
+		// one section for the join of the two halves, each a whole solve of size `n / 2`
+		let join_par = if crate::utils::cost::halves_pays::<T>(
+			&par,
+			n,
+			crate::utils::cost::rate::tridiag_evd_dc(),
+			2,
+		) {
+			par.reborrow()
+		} else {
+			Par::Seq
+		};
 		join_raw(
 			|par| {
 				r0 = divide_and_conquer_recurse(
@@ -368,7 +406,7 @@ fn divide_and_conquer_recurse<T: RealField>(
 					qr_fallback_threshold,
 				);
 			},
-			par,
+			join_par,
 		);
 		r0?;
 		r1?;
@@ -597,6 +635,17 @@ fn divide_and_conquer_recurse<T: RealField>(
 	}
 	let (repaired_u_top, repaired_u_bot) = repaired_u.rb().split_at_row(n1);
 	let (tmp_top, tmp_bot) = tmp.rb_mut().split_at_row_mut(n1);
+	// one section; the two products `n1 x n1` and `(n - n1) x (n - n1)` against `n` columns
+	let join_par = if crate::utils::cost::join_pays::<T>(
+		&par,
+		(n1 * n1 + (n - n1) * (n - n1)).saturating_mul(n),
+		crate::utils::cost::rate::gemm_mac(),
+		1,
+	) {
+		par
+	} else {
+		Par::Seq
+	};
 	crate::utils::thread::join_raw(
 		|par| {
 			matmul(tmp_top, Accum::Replace, u0.rb(), repaired_u_top, one(), par)
@@ -604,7 +653,7 @@ fn divide_and_conquer_recurse<T: RealField>(
 		|par| {
 			matmul(tmp_bot, Accum::Replace, u1.rb(), repaired_u_bot, one(), par)
 		},
-		par,
+		join_par,
 	);
 	u.copy_from(tmp.rb());
 	for i in 0..n {
@@ -613,14 +662,15 @@ fn divide_and_conquer_recurse<T: RealField>(
 	Ok(())
 }
 pub(crate) fn divide_and_conquer<T: RealField>(
-	diag: ColMut<'_, T, usize, ContiguousFwd>,
-	offdiag: ColMut<'_, T, usize, ContiguousFwd>,
+	mut diag: ColMut<'_, T, usize, ContiguousFwd>,
+	mut offdiag: ColMut<'_, T, usize, ContiguousFwd>,
 	u: MatMut<'_, T, usize, usize>,
 	par: Par,
 	stack: &mut MemStack,
 	qr_fallback_threshold: usize,
 ) -> Result<(), EvdError> {
 	let n = diag.nrows();
+	let ref scale = normalize_range(&mut diag, &mut offdiag);
 	let (mut pl_before, stack) = stack.make_with(n, |_| 0usize);
 	let (mut pl_after, stack) = stack.make_with(n, |_| 0usize);
 	let (mut pr, stack) = stack.make_with(n, |_| 0usize);
@@ -633,9 +683,9 @@ pub(crate) fn divide_and_conquer<T: RealField>(
 	let (mut shifts, stack) = unsafe { temp_mat_uninit(n, 1, stack) };
 	let (mut repaired_u, stack) = unsafe { temp_mat_uninit(n, n, stack) };
 	let (mut tmp, _) = unsafe { temp_mat_uninit(n, n, stack) };
-	divide_and_conquer_recurse(
-		diag,
-		offdiag,
+	let res = divide_and_conquer_recurse(
+		diag.rb_mut(),
+		offdiag.rb_mut(),
 		u,
 		par,
 		&mut pl_before,
@@ -667,11 +717,15 @@ pub(crate) fn divide_and_conquer<T: RealField>(
 		repaired_u.as_mat_mut().try_as_col_major_mut().unwrap(),
 		tmp.as_mat_mut().try_as_col_major_mut().unwrap(),
 		qr_fallback_threshold,
-	)
+	);
+	for x in diag.iter_mut() {
+		*x *= scale;
+	}
+	res
 }
 pub(crate) fn divide_and_conquer_scratch<T: ComplexField>(
 	n: usize,
-	par: Par,
+	par: ParShape,
 ) -> StackReq {
 	let _ = par;
 	StackReq::all_of(&[
@@ -739,7 +793,7 @@ mod evd_qr_tests {
 				u.as_mut(),
 				Par::Seq,
 				MemStack::new(&mut MemBuffer::new(
-					divide_and_conquer_scratch::<f64>(n, Par::Seq),
+					divide_and_conquer_scratch::<f64>(n, ParShape::Seq),
 				)),
 				4,
 			)
