@@ -125,8 +125,16 @@ fixtures and with the same residual formula:
   of 20 at n <= 16 (`nep.in`: N = 0, 1, 2, 3, 5, 10, 16), and the GET22 ratio has no
   dimension factor. The comparison does not show a faer-specific defect on these
   fixtures, but it covers the compared fixtures only, not every side and precision.
-  Whether the threshold should grow with n is the maintainer's decision (#112); it is
-  unchanged here.
+  The maintainer then set the threshold to `20 * max(1, sqrt(n / 16))` (#112,
+  2026-10-29): LAPACK's 20 at n <= 16, 39.7 at n = 63, 56.8 at n = 129. The square root
+  grows like an accumulated rounding error and still catches a residual that grows with n:
+  the clamp defect fixed in #121 gave 62.5 at n = 63, which a linear `20 * n / 16` (78.75)
+  would have let pass. With it the f32, f64 and c64 groups and every parallel group pass.
+  What remains is c32 only: kinds 6 and 7 (scaled to `sqrt(MAX) / 16` and
+  `sqrt(MIN) * 16`) at n = 63 to 65, ratios 41.7 to 59.4 against 39.7 to 40.3.
+  Single-precision LAPACK `cgeev` (through scipy, OpenBLAS) gives 29 to 40 on the same
+  matrices, itself 39.77 against 39.69 on kind 6 at n = 63 (left vectors). That test stays
+  in `scripts/lapack-known-failures.json` under #112.
 
 ### Phase 4 — Balancing and back-transformation
 
