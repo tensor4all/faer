@@ -29,15 +29,49 @@ use threadteam::TeamExec;
 /// let a = Mat::<f64>::from_fn(8, 8, |i, j| (i + j) as f64);
 /// let mut dst = Mat::<f64>::zeros(8, 8);
 /// faer::team::with_team(2, |par| {
-///     // every faer call in here runs its regions on the two reserved members
+///     // every faer call in here runs its regions on 2 participants: the calling thread and
+///     // 1 reserved worker
 ///     faer::linalg::matmul::matmul(dst.as_mut(), Accum::Replace, a.as_ref(), a.as_ref(), 1.0, par);
 /// });
 /// ```
 ///
 /// `width` is clamped to at least one; a width of one is [`crate::Par::Seq`] and reserves nothing.
-/// The pool is the host's own ([`threadteam::Pool::builder`], `width` threads); a caller that
-/// already owns a pool or a team should borrow from it directly instead, because two pools do not
-/// share their members.
+/// The team has `width` participants: the calling thread and `width - 1` reserved workers. The pool
+/// is the host's own ([`threadteam::Pool::builder`], `width` threads); a caller that already owns a
+/// pool or a team should borrow from it directly instead, because two pools do not share their
+/// members.
+///
+/// `with_team` is for a one-off call: every call builds a new pool, so it spawns its worker threads
+/// and joins them again when the closure ends. A caller that runs parallel work repeatedly should
+/// own the [`threadteam::Pool`] and [`threadteam::Team`] itself, build them once, and lend a `Par`
+/// from the team to each call:
+///
+/// ```
+/// use faer::{Accum, Mat, Par};
+/// let a = Mat::<f64>::from_fn(8, 8, |i, j| (i + j) as f64);
+/// let mut dst = Mat::<f64>::zeros(8, 8);
+///
+/// // once: 4 participants, the calling thread and 3 reserved workers
+/// let pool = threadteam::Pool::builder().threads(4).build().unwrap();
+/// let team = pool.into_team(4).ok().expect("an idle pool");
+///
+/// // per call: lend the team to faer for the duration of the closure
+/// for _ in 0..3 {
+///     let mut exec = team.exec(4);
+///     exec.team(|t| {
+///         faer::linalg::matmul::matmul(
+///             dst.as_mut(),
+///             Accum::Replace,
+///             a.as_ref(),
+///             a.as_ref(),
+///             1.0,
+///             Par::Team(t),
+///         );
+///     })
+///     .ok()
+///     .expect("a team token for an idle team");
+/// }
+/// ```
 ///
 /// Panics if the team cannot be built or acquired: the closure's members wake asynchronously, so
 /// the acquisition waits as long as the team tests do (30 s) instead of threadteam's 2 ms default,
@@ -724,6 +758,27 @@ mod tests {
 		let team = team_of(width);
 		let mut exec = team.exec(width);
 		exec.team(|team| f(Par::Team(team))).ok().expect("a team token")
+	}
+
+	/// `with_team(width)` hands out `width` participants: the calling thread and `width - 1`
+	/// reserved workers. `into_team` clamps the width to the pool's, so a pool of `width - 1`
+	/// threads would give one participant fewer.
+	#[test]
+	fn with_team_has_width_participants() {
+		for width in [2usize, 3, 4] {
+			let size = with_team(width, |par| match par {
+				Par::Team(t) => t.size().get(),
+				_ => 1,
+			});
+			assert!(size == width);
+		}
+		let pool = Pool::builder()
+			.threads(3)
+			.acquire_timeout(std::time::Duration::from_secs(30))
+			.build()
+			.unwrap();
+		let team = pool.into_team(4).ok().expect("an idle pool");
+		assert!(team.size().get() == 3);
 	}
 
 	fn rand_mat(m: usize, n: usize, seed: u64) -> Mat<f64> {

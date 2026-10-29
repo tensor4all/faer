@@ -203,7 +203,8 @@
 //!     Default::default(),
 //! ));
 //! faer::team::with_team(4, |par| {
-//!     // every faer call in here with `par` runs its regions on the four reserved members
+//!     // every faer call in here with `par` runs its regions on 4 participants: the calling
+//!     // thread and 3 reserved workers
 //!     faer::linalg::svd::svd(
 //!         a.as_ref(),
 //!         s.as_mut().col_mut(0).as_diagonal_mut(),
@@ -219,6 +220,11 @@
 //!
 //! the members busy-wait for a bounded time between regions, then sleep; the width is the one the
 //! caller asked `with_team` for, and there is no process-wide setting to override it.
+//!
+//! `with_team` is for a one-off call: each call builds a new pool, spawning its worker threads and
+//! joining them again at the end. Code that runs parallel work repeatedly should build a
+//! [`threadteam::Pool`] and [`threadteam::Team`] once and lend a `Par` from the team to each call
+//! (see the example on [`team::with_team`]).
 //!
 //! # crate features
 //!
