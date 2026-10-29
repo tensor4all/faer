@@ -41,13 +41,24 @@
 
 use crate::internal_prelude::*;
 use crate::linalg::svd::SvdError;
-use alloc::vec;
 
 
 /// How many sweeps one entry may take before the block gives up.
 const SWEEPS_PER_ENTRY: usize = 200;
 
-/// Singular values of the bidiagonal with diagonal `d` and off-diagonal `e`, in place.
+/// The workspace of [`singular_values`] for an `n x n` bidiagonal: the squared factors and the
+/// second buffer of the ping-pong, two arrays of `n` and two of `n - 1`.
+pub(crate) fn singular_values_scratch<T: RealField>(n: usize) -> StackReq {
+	StackReq::all_of(&[
+		StackReq::new::<T>(n),
+		StackReq::new::<T>(n.saturating_sub(1)),
+		StackReq::new::<T>(n),
+		StackReq::new::<T>(n.saturating_sub(1)),
+	])
+}
+
+/// Singular values of the bidiagonal with diagonal `d` and off-diagonal `e`, in place. The work
+/// arrays come from `stack` ([`singular_values_scratch`]); nothing is allocated on the heap.
 ///
 /// On success `d` holds the singular values in **descending** order. `e` is never written, and on
 /// an error `d` is unchanged too, so a caller can finish on another path from the same bidiagonal
@@ -57,7 +68,7 @@ const SWEEPS_PER_ENTRY: usize = 200;
 /// `d` must not contain a zero: the transform divides by the factors, and a rank-deficient
 /// bidiagonal has a cheaper answer than this loop. The caller checks that and keeps its own
 /// rotation-based path for it.
-pub(crate) fn singular_values<T: RealField>(d: &mut [T], e: &mut [T]) -> Result<(), SvdError> {
+pub(crate) fn singular_values<T: RealField>(d: &mut [T], e: &mut [T], stack: &mut MemStack) -> Result<(), SvdError> {
     let n = d.len();
     core::assert!(e.len() + 1 >= n, "off-diagonal shorter than the diagonal");
     if n == 0 {
@@ -84,8 +95,8 @@ pub(crate) fn singular_values<T: RealField>(d: &mut [T], e: &mut [T]) -> Result<
     }
 
     let inv_scale = scale.recip();
-    let mut a = vec![zero::<T>(); n];
-    let mut b = vec![zero::<T>(); n.saturating_sub(1)];
+    let (mut a, stack) = stack.make_with::<T>(n, |_| zero());
+    let (mut b, stack) = stack.make_with::<T>(n.saturating_sub(1), |_| zero());
     for i in 0..n {
         let v = d[i].clone() * inv_scale.clone();
         a[i] = v.clone() * v.clone();
@@ -97,8 +108,8 @@ pub(crate) fn singular_values<T: RealField>(d: &mut [T], e: &mut [T]) -> Result<
 
     // The second buffer of the ping-pong: a sweep writes the factors it produces beside the ones it
     // reads, so a rejected sweep costs nothing to undo and an accepted one is a swap of roles.
-    let mut a2 = vec![zero::<T>(); n];
-    let mut b2 = vec![zero::<T>(); n.saturating_sub(1)];
+    let (mut a2, stack) = stack.make_with::<T>(n, |_| zero());
+    let (mut b2, _) = stack.make_with::<T>(n.saturating_sub(1), |_| zero());
 
     // Split at off-diagonals that are negligible against their neighbours before any shift exists.
     let tol2 = {
@@ -124,8 +135,10 @@ pub(crate) fn singular_values<T: RealField>(d: &mut [T], e: &mut [T]) -> Result<
     for i in 0..n {
         d[i] = a[i].clone().fmax(zero::<T>()).sqrt() * scale.clone();
     }
-    // The public contract is descending order; the iteration produces none.
-    d.sort_by(|x, y| y.partial_cmp(x).unwrap_or(core::cmp::Ordering::Equal));
+    // The public contract is descending order; the iteration produces none. Unstable: the stable
+    // sort allocates its merge buffer on the heap once the slice outgrows a stack buffer (700 `f64`
+    // values do).
+    d.sort_unstable_by(|x, y| y.partial_cmp(x).unwrap_or(core::cmp::Ordering::Equal));
     Ok(())
 }
 
@@ -360,6 +373,12 @@ fn two_by_two_shifted<T: RealField>(d1: T, f2: T, d2: T) -> (T, T) {
 mod tests {
     use super::*;
     use crate::Mat;
+    use dyn_stack::MemBuffer;
+
+    /// `singular_values` with its scratch from a fresh buffer
+    fn values<T: RealField>(d: &mut [T], e: &mut [T]) -> Result<(), SvdError> {
+        singular_values(d, e, MemStack::new(&mut MemBuffer::new(singular_values_scratch::<T>(d.len()))))
+    }
 
     /// The kernel against `thin_svd` of the same bidiagonal, over spectra that make the iteration
     /// work: well separated, clustered, repeated, badly scaled, and with negative diagonals.
@@ -413,7 +432,7 @@ mod tests {
 
                 let mut dd = d.clone();
                 let mut ee = e.clone();
-                singular_values(&mut dd, &mut ee).unwrap();
+                values(&mut dd, &mut ee).unwrap();
                 for i in 0..n {
                     let tol = 1e-10 * want[0].max(1.0);
                     core::assert!(
@@ -451,7 +470,7 @@ mod tests {
             bidiag::bidiag_in_place(bid.as_mut(), hl.as_mut(), hr.as_mut(), Par::Seq, MemStack::new(&mut mem), Default::default());
             let mut d: Vec<f64> = (0..n).map(|i| bid[(i, i)]).collect();
             let mut e: Vec<f64> = (0..n - 1).map(|i| bid[(i, i + 1)]).collect();
-            singular_values(&mut d, &mut e).unwrap();
+            values(&mut d, &mut e).unwrap();
             let want: Vec<f64> = a.as_ref().thin_svd(Par::Seq).unwrap().S().column_vector().iter().copied().collect();
             for i in 0..n {
                 core::assert!((d[i] - want[i]).abs() <= 1e-12 * want[i], "n={n} i={i}: {} vs {}", d[i], want[i]);
@@ -464,7 +483,7 @@ mod tests {
     fn diagonal_is_its_own_answer() {
         let mut d = vec![3.0f64, 1.0, 2.0];
         let mut e: Vec<f64> = vec![0.0; 2];
-        singular_values(&mut d, &mut e).unwrap();
+        values(&mut d, &mut e).unwrap();
         core::assert_eq!(d, vec![3.0, 2.0, 1.0]);
     }
 
@@ -475,11 +494,11 @@ mod tests {
         let e = vec![0.3f64, 0.2, 0.1];
         let mut d1 = d.clone();
         let mut e1 = e.clone();
-        singular_values(&mut d1, &mut e1).unwrap();
+        values(&mut d1, &mut e1).unwrap();
 
         let mut d2: Vec<f64> = d.iter().map(|x| x * 1e150).collect();
         let mut e2: Vec<f64> = e.iter().map(|x| x * 1e150).collect();
-        singular_values(&mut d2, &mut e2).unwrap();
+        values(&mut d2, &mut e2).unwrap();
         for i in 0..d1.len() {
             let got = d2[i] * 1e-150;
             core::assert!((got - d1[i]).abs() <= 1e-10 * d1[0], "{got} vs {}", d1[i]);
