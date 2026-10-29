@@ -291,8 +291,10 @@ fired only for a failure that is not listed - or for a listed test that starts p
 lose its entry in the same change. Adding an entry without an issue is a bug in the entry.
 It caches dependencies on failure and uploads environment, build timing, exact
 selection, family logs and summary for 14 days. Per-family timeouts sum to
-20 minutes; the build limit is 20 minutes, the combined step 44 minutes and the
-validation job 50 minutes. A separate two-minute reporting job creates/updates one
+25 minutes; the build limit is 20 minutes, the combined step 49 minutes and the
+validation job 55 minutes. The family `svd_large` runs upstream's large SVD matrix
+test `test_josef` (n = 8660, f32, full U and V; about 70 s and 2.3 GB locally), which is too slow to
+run with every test and is therefore ignored there. A separate two-minute reporting job creates/updates one
 open issue titled “Scheduled LAPACK numerical validation is failing” with label
 `scheduled-lapack-validation`, retaining the failed status and run link. These are
 upper bounds, not expected runtimes. They allow every family timeout to expire
