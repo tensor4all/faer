@@ -2,7 +2,7 @@
 use super::temp_mat_scratch;
 use crate::col::ColRef;
 use crate::internal_prelude::*;
-use crate::mat::{MatMut, MatRef};
+use crate::mat::{MatMut, MatRef, MatUninitMut};
 use crate::row::RowRef;
 use crate::utils::bound::Dim;
 use crate::utils::simd::SimdCtx;
@@ -1610,6 +1610,269 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 		},
 	}
 }
+/// `alpha * sum_p op(lhs[i, p]) * op(rhs[p, j])` written into the uninitialized slot `(i, j)` of
+/// `dst`: read through raw pointers, written with `ptr::write`, no reference to the slot.
+///
+/// # Safety
+/// The pointers and strides describe valid `m x k`, `k x n` and `m x n` matrices with `i < m`,
+/// `j < n`; `dst` does not overlap the operands.
+#[inline(always)]
+unsafe fn matmul_uninit_one<T: ComplexField>(
+	dst: *mut MaybeUninit<T>,
+	(dst_rs, dst_cs): (isize, isize),
+	lhs: *const T,
+	(lhs_rs, lhs_cs): (isize, isize),
+	rhs: *const T,
+	(rhs_rs, rhs_cs): (isize, isize),
+	k: usize,
+	(i, j): (usize, usize),
+	(conj_lhs, conj_rhs): (Conj, Conj),
+	alpha: &T,
+) {
+	let mut acc: T = zero();
+	for p in 0..k {
+		let l = unsafe { &*lhs.offset(i as isize * lhs_rs + p as isize * lhs_cs) };
+		let r = unsafe { &*rhs.offset(p as isize * rhs_rs + j as isize * rhs_cs) };
+		acc = &conj_lhs.apply_rt(l) * &conj_rhs.apply_rt(r) + acc;
+	}
+	unsafe {
+		dst.offset(i as isize * dst_rs + j as isize * dst_cs)
+			.write(MaybeUninit::new(alpha * &acc));
+	}
+}
+
+/// The body of [`matmul_with_conj_uninit`], on dynamic shapes: every logical element of `dst` is
+/// written through raw pointers before it returns, and its prior contents are never read.
+fn matmul_uninit_imp<T: ComplexField>(
+	dst: MatUninitMut<'_, T>,
+	lhs: MatRef<'_, T>,
+	conj_lhs: Conj,
+	rhs: MatRef<'_, T>,
+	conj_rhs: Conj,
+	alpha: T,
+	par: Par,
+) {
+	let m = dst.nrows();
+	let n = dst.ncols();
+	let k = lhs.ncols();
+	precondition(m, n, lhs.nrows(), k, rhs.nrows(), rhs.ncols());
+	if m == 0 || n == 0 {
+		return;
+	}
+	let ptr = dst.as_ptr_mut();
+	let (dst_rs, dst_cs) = (dst.row_stride(), dst.col_stride());
+	// zeros through raw writes, after which the destination is initialized
+	let fill_zero = || {
+		for j in 0..n {
+			for i in 0..m {
+				unsafe {
+					ptr.offset(i as isize * dst_rs + j as isize * dst_cs)
+						.write(MaybeUninit::new(zero()));
+				}
+			}
+		}
+	};
+	if k == 0 {
+		// an empty product is zero; the kernels below write nothing when the depth is empty
+		fill_zero();
+		return;
+	}
+	// The native types on x86_64 with AVX2 or AVX-512: `t4a-private-gemm-x86` with
+	// `Accum::Replace`, which writes every element in its first depth block and never loads the
+	// destination before that (on a `Par::Team`, `gemm_team` takes the same kernel). The `gemm`
+	// and `nano-gemm` crates are not given uninitialized storage: `gemm`'s GEMV forms a
+	// `&mut [T]` of the destination and its Apple AMX kernel copies partial tiles of it before
+	// checking `alpha`, and `nano-gemm` scales it by `beta`.
+	#[cfg(all(target_arch = "x86_64", feature = "std"))]
+	{
+		macro_rules! gemm_call {
+			($kind:ident, $ty:ty) => {
+				unsafe {
+					use private_gemm_x86::*;
+					let feat = if std::arch::is_x86_feature_detected!("avx512f") {
+						Some(InstrSet::Avx512)
+					} else if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") {
+						Some(InstrSet::Avx256)
+					} else {
+						None
+					};
+					if let Some(feat) = feat {
+						let alpha: $ty = core::mem::transmute_copy(&alpha);
+						let dst = ptr as *mut $ty;
+						let (lhs_p, rhs_p) = (lhs.as_ptr() as *const $ty, rhs.as_ptr() as *const $ty);
+						#[cfg(feature = "threadteam")]
+						if let Par::Team(team) = par {
+							// the same instruction set test as `gemm_team`'s, so it takes the kernel
+							crate::utils::team::gemm_team::<$ty>(
+								team,
+								m,
+								n,
+								k,
+								crate::utils::cost::gemm_ns_per_mac::<T>(),
+								dst,
+								dst_cs,
+								dst_rs,
+								false,
+								lhs_p,
+								lhs.col_stride(),
+								lhs.row_stride(),
+								rhs_p,
+								rhs.col_stride(),
+								rhs.row_stride(),
+								core::mem::zeroed(),
+								alpha,
+								conj_lhs == Conj::Yes,
+								conj_rhs == Conj::Yes,
+							);
+							return;
+						}
+						gemm(
+							DType::$kind,
+							IType::U64,
+							feat,
+							m,
+							n,
+							k,
+							dst as *mut (),
+							dst_rs,
+							dst_cs,
+							core::ptr::null(),
+							core::ptr::null(),
+							DstKind::Full,
+							Accum::Replace,
+							lhs_p as *const (),
+							lhs.row_stride(),
+							lhs.col_stride(),
+							conj_lhs == Conj::Yes,
+							core::ptr::null(),
+							0,
+							rhs_p as *const (),
+							rhs.row_stride(),
+							rhs.col_stride(),
+							conj_rhs == Conj::Yes,
+							&raw const alpha as *const (),
+							1,
+						);
+						return;
+					}
+				}
+			};
+		}
+		if const { T::IS_NATIVE_F64 } {
+			gemm_call!(F64, f64);
+		}
+		if const { T::IS_NATIVE_C64 } {
+			gemm_call!(C64, num_complex::Complex<f64>);
+		}
+		if const { T::IS_NATIVE_F32 } {
+			gemm_call!(F32, f32);
+		}
+		if const { T::IS_NATIVE_C32 } {
+			gemm_call!(C32, num_complex::Complex<f32>);
+		}
+	}
+	if const { T::IS_NATIVE_F64 || T::IS_NATIVE_C64 || T::IS_NATIVE_F32 || T::IS_NATIVE_C32 } {
+		// a native type without that kernel: initialize, then the ordinary product, which
+		// overwrites the zeros without reading them (the zero pass is the cost the kernel route
+		// avoids)
+		fill_zero();
+		let dst = unsafe { MatMut::from_raw_parts_mut(ptr as *mut T, m, n, dst_rs, dst_cs) };
+		matmul_with_conj(dst, Accum::Replace, lhs, conj_lhs, rhs, conj_rhs, alpha, par);
+		return;
+	}
+	// any other scalar: one dot product per element, by columns (a column per task on a team)
+	let (dst_w, lhs_w, rhs_w) = (
+		crate::utils::thread::Ptr(ptr),
+		crate::utils::thread::Ptr(lhs.as_ptr() as *mut T),
+		crate::utils::thread::Ptr(rhs.as_ptr() as *mut T),
+	);
+	let lhs_s = (lhs.row_stride(), lhs.col_stride());
+	let rhs_s = (rhs.row_stride(), rhs.col_stride());
+	let alpha = &alpha;
+	let column = move |j: usize| {
+		let (dst_w, lhs_w, rhs_w) = (dst_w, lhs_w, rhs_w);
+		for i in 0..m {
+			// SAFETY: the shapes were checked by `precondition`; `dst` is exclusive and does not
+			// overlap the operands (the caller's contract); each column is written by one task
+			unsafe {
+				matmul_uninit_one(dst_w.0, (dst_rs, dst_cs), lhs_w.0, lhs_s, rhs_w.0, rhs_s, k, (i, j), (conj_lhs, conj_rhs), alpha)
+			}
+		}
+	};
+	match par {
+		Par::Seq => (0..n).for_each(column),
+		#[cfg(feature = "threadteam")]
+		par => {
+			use rayon::prelude::*;
+			let degree = par.degree();
+			crate::utils::thread::for_each(par, degree, (0..n).into_par_iter(), column);
+		},
+		#[cfg(not(feature = "threadteam"))]
+		_ => (0..n).for_each(column),
+	}
+}
+
+/// computes `alpha * op(lhs) * op(rhs)` into a destination whose elements may be uninitialized,
+/// and returns it as an initialized [`MatMut`].
+///
+/// This is the overwrite-only entry for callers that hold `MaybeUninit<T>` storage and do not
+/// want an output-sized initialization pass before the product (upstream request
+/// sarah-quinones/faer-rs#269). The destination's prior contents are never read, no `&T` or
+/// `&mut T` to one of its elements is formed before the element is written, and every logical
+/// element is written before the function returns. Only then is the returned [`MatMut`] formed.
+/// If the call panics, the storage stays `MaybeUninit<T>` (some elements may have been written)
+/// and nothing is exposed as initialized.
+///
+/// The output-sized initialization pass is skipped for the native types on x86_64 with AVX2 or
+/// AVX-512, and for other scalar types. On other targets the native types are zero-filled first
+/// and then multiplied as by [`matmul_with_conj`].
+///
+/// The parallelism is the explicit `par`. The operands must not overlap the destination, and the
+/// destination's elements must not overlap each other: the safe slice constructors of
+/// [`MatUninitMut`] check this, and the raw constructor requires it.
+///
+/// # example
+///
+/// ```
+/// use core::mem::MaybeUninit;
+/// use faer::linalg::matmul::matmul_with_conj_uninit;
+/// use faer::{mat, Conj, MatUninitMut, Par};
+///
+/// let lhs = mat![[1.0_f64, 2.0], [3.0, 4.0]];
+/// let rhs = mat![[5.0_f64, 6.0], [7.0, 8.0]];
+/// let mut storage = [MaybeUninit::<f64>::uninit(); 4];
+/// let dst = MatUninitMut::from_column_major_slice_mut(&mut storage, 2, 2);
+/// let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, Par::Seq);
+/// assert_eq!(result[(0, 0)], 19.0);
+/// ```
+#[track_caller]
+#[inline]
+pub fn matmul_with_conj_uninit<'a, T: ComplexField, M: Shape, N: Shape, K: Shape, RStride: Stride, CStride: Stride>(
+	dst: MatUninitMut<'a, T, M, N, RStride, CStride>,
+	lhs: impl AsMatRef<T = T, Rows = M, Cols = K>,
+	conj_lhs: Conj,
+	rhs: impl AsMatRef<T = T, Rows = K, Cols = N>,
+	conj_rhs: Conj,
+	alpha: T,
+	par: Par,
+) -> MatMut<'a, T, M, N, RStride, CStride> {
+	let ptr = dst.as_ptr_mut();
+	let (nrows, ncols) = (dst.nrows(), dst.ncols());
+	let (row_stride, col_stride) = (dst.row_stride(), dst.col_stride());
+	matmul_uninit_imp(
+		dst.as_dyn(),
+		lhs.as_mat_ref().as_dyn(),
+		conj_lhs,
+		rhs.as_mat_ref().as_dyn(),
+		conj_rhs,
+		alpha,
+		par,
+	);
+	// SAFETY: `matmul_uninit_imp` returned, so every logical element has been written; the view
+	// keeps the destination's exclusive borrow `'a`
+	unsafe { MatMut::from_raw_parts_mut(ptr.cast(), nrows, ncols, row_stride, col_stride) }
+}
+
 #[track_caller]
 fn precondition<M: Shape, N: Shape, K: Shape>(
 	dst_nrows: M,
@@ -1805,7 +2068,8 @@ mod tests {
 	use super::*;
 	use crate::mat::{Mat, MatMut, MatRef};
 	use crate::stats::prelude::*;
-	use crate::{assert, c32};
+	use crate::{assert, c32, c64, fx128};
+	use core::mem::MaybeUninit;
 	use std::num::NonZeroUsize;
 	/// Below the flop floor `matmul` runs the sequential kernel whatever budget
 	/// the caller passes, and above it the kernel threads: both must compute the
@@ -2002,6 +2266,188 @@ mod tests {
 			}
 		}
 	}
+	#[test]
+	fn test_matmul_with_conj_uninit() {
+		let lhs = mat![[1.0_f64, 2.0], [3.0, 4.0]];
+		let rhs = mat![[5.0_f64, 6.0], [7.0, 8.0]];
+		let mut data = [MaybeUninit::<f64>::uninit(); 4];
+		let dst = MatUninitMut::from_column_major_slice_mut(&mut data, 2, 2);
+		let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, Par::Seq);
+		assert!(result[(0, 0)] == 19.0);
+		assert!(result[(1, 0)] == 43.0);
+		assert!(result[(0, 1)] == 22.0);
+		assert!(result[(1, 1)] == 50.0);
+	}
+
+	/// A matrix-vector product into uninitialized storage: the shape for which the `gemm` crate
+	/// would take its GEMV path, which forms a slice of the destination (run it under Miri).
+	#[test]
+	fn test_matmul_with_conj_uninit_matrix_vector() {
+		let lhs = mat![[1.0_f64, 2.0, 3.0], [4.0, 5.0, 6.0]];
+		let rhs = mat![[1.0_f64], [-1.0], [2.0]];
+		let mut data = [MaybeUninit::<f64>::uninit(); 2];
+		let dst = MatUninitMut::from_column_major_slice_mut(&mut data, 2, 1);
+		let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, Par::Seq);
+		assert!(result[(0, 0)] == 5.0);
+		assert!(result[(1, 0)] == 11.0);
+	}
+
+	#[test]
+	fn test_matmul_with_conj_uninit_strided_and_conjugated() {
+		let lhs = mat![[c64::new(1.0, 2.0), c64::new(2.0, -1.0)], [c64::new(3.0, 1.0), c64::new(-2.0, 4.0)],];
+		let rhs = mat![[c64::new(5.0, -1.0), c64::new(1.0, 3.0)], [c64::new(2.0, 2.0), c64::new(-4.0, 1.0)],];
+		let mut expected = Mat::<c64>::zeros(2, 2);
+		matmul_with_conj(expected.as_mut(), Accum::Replace, lhs.as_ref(), Conj::Yes, rhs.as_ref(), Conj::No, c64::new(2.0, 0.0), Par::Seq);
+		let mut data = [MaybeUninit::<c64>::uninit(); 7];
+		let dst = unsafe { MatUninitMut::from_raw_parts_mut(data.as_mut_ptr(), 2, 2, 3, 1) };
+		let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::Yes, rhs.as_ref(), Conj::No, c64::new(2.0, 0.0), Par::Seq);
+		for j in 0..2 {
+			for i in 0..2 {
+				assert!((result[(i, j)] - expected[(i, j)]).norm() < 1e-12);
+			}
+		}
+	}
+
+	#[test]
+	fn test_matmul_with_conj_uninit_negative_destination_stride() {
+		let lhs = mat![[1.0_f64, 2.0], [3.0, 4.0]];
+		let rhs = mat![[5.0_f64, 6.0], [7.0, 8.0]];
+		let mut data = [MaybeUninit::<f64>::uninit(); 4];
+		let dst = unsafe { MatUninitMut::from_raw_parts_mut(data.as_mut_ptr().add(1), 2, 2, -1, 2) };
+		let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, Par::Seq);
+		assert!(result[(0, 0)] == 19.0);
+		assert!(result[(1, 0)] == 43.0);
+		assert!(result[(0, 1)] == 22.0);
+		assert!(result[(1, 1)] == 50.0);
+	}
+
+	#[test]
+	fn test_matmul_with_conj_uninit_empty_inner_dimension() {
+		let lhs = Mat::<f64>::zeros(2, 0);
+		let rhs = Mat::<f64>::zeros(0, 3);
+		let mut data = [MaybeUninit::<f64>::uninit(); 6];
+		let dst = MatUninitMut::from_row_major_slice_mut(&mut data, 2, 3);
+		let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 2.0, Par::Seq);
+		for i in 0..2 {
+			for j in 0..3 {
+				assert!(result[(i, j)] == 0.0);
+			}
+		}
+	}
+
+	#[test]
+	fn test_matmul_with_conj_uninit_generic_scalar() {
+		let from = |x: f64| <fx128 as ComplexFieldExt>::from_f64(x);
+		let lhs = Mat::<fx128>::from_fn(2, 2, |i, j| from((i + 2 * j + 1) as f64));
+		let rhs = Mat::<fx128>::from_fn(2, 2, |i, j| from((3 * i + j + 1) as f64));
+		let mut data = [MaybeUninit::<fx128>::uninit(); 4];
+		let dst = MatUninitMut::from_column_major_slice_mut(&mut data, 2, 2);
+		let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, from(2.0), Par::Seq);
+		assert!(result[(0, 0)] == from(26.0));
+		assert!(result[(1, 0)] == from(36.0));
+		assert!(result[(0, 1)] == from(34.0));
+		assert!(result[(1, 1)] == from(48.0));
+	}
+
+	/// The native kernels at sizes below and above the small-matrix and tiling thresholds: the destination starts as NaN, which a kernel that
+	/// read it would carry into the product, and its padding rows must be left untouched.
+	fn check_uninit_native<T: ComplexField + Copy + core::fmt::Debug>(
+		from: impl Fn(f64, f64) -> T,
+		dist: impl Fn(T, T) -> f64,
+		tol: f64,
+	) {
+		let nan = <T as ComplexFieldExt>::from_f64(f64::NAN);
+		for (m, k, n) in [(1, 1, 1), (3, 4, 5), (17, 23, 31), (64, 64, 64), (130, 70, 90), (5, 300, 7), (9, 600, 7)] {
+			for (conj_lhs, conj_rhs) in [(Conj::No, Conj::No), (Conj::Yes, Conj::No), (Conj::No, Conj::Yes)] {
+				for row_major in [false, true] {
+					let lhs = Mat::<T>::from_fn(m, k, |i, j| from(((i * 7 + j * 3) % 11) as f64 - 5.0, ((i + 2 * j) % 5) as f64 - 2.0));
+					let rhs = Mat::<T>::from_fn(k, n, |i, j| from(((i * 5 + j) % 13) as f64 - 6.0, ((3 * i + j) % 7) as f64 - 3.0));
+					let alpha = from(0.5, -1.5);
+					let mut expected = Mat::<T>::zeros(m, n);
+					matmul_with_conj(expected.as_mut(), Accum::Replace, lhs.as_ref(), conj_lhs, rhs.as_ref(), conj_rhs, alpha, Par::Seq);
+					// a padded leading dimension: three NaN elements between columns (or rows)
+					let (rs, cs, len) = if row_major { (n as isize + 3, 1, m * (n + 3)) } else { (1, m as isize + 3, n * (m + 3)) };
+					let mut data = alloc::vec![MaybeUninit::new(nan); len];
+					let dst = unsafe { MatUninitMut::<T>::from_raw_parts_mut(data.as_mut_ptr(), m, n, rs, cs) };
+					let result = matmul_with_conj_uninit(dst, lhs.as_ref(), conj_lhs, rhs.as_ref(), conj_rhs, alpha, Par::Seq);
+					for j in 0..n {
+						for i in 0..m {
+							let err = dist(result[(i, j)], expected[(i, j)]);
+							::core::assert!(err <= tol * k as f64 * 200.0, "{m}x{k}x{n} ({i}, {j}): {:?} vs {:?}", result[(i, j)], expected[(i, j)]);
+						}
+					}
+					let inner = if row_major { n } else { m };
+					for (p, x) in data.iter().enumerate() {
+						if p % (inner + 3) >= inner {
+							let x = unsafe { x.assume_init() };
+							::core::assert!(x != x, "{m}x{k}x{n}: padding element {p} was written");
+						}
+					}
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn test_matmul_with_conj_uninit_native_never_reads_destination() {
+		check_uninit_native(|x, _| x as f32, |a: f32, b| (a - b).abs() as f64, 1e-6);
+		check_uninit_native(|x, _| x, |a: f64, b| (a - b).abs(), 1e-14);
+		check_uninit_native(|x, y| c32::new(x as f32, y as f32), |a: c32, b| (a - b).norm() as f64, 1e-6);
+		check_uninit_native(|x, y| c64::new(x, y), |a: c64, b| (a - b).norm(), 1e-14);
+	}
+
+	#[cfg(feature = "threadteam")]
+	#[test]
+	fn test_matmul_with_conj_uninit_team() {
+		crate::utils::team::with_team(3, |mut par| {
+			{
+				let lhs = Mat::<f64>::from_fn(130, 70, |i, j| ((i * 7 + j * 3) % 11) as f64 - 5.0);
+				let rhs = Mat::<f64>::from_fn(70, 90, |i, j| ((i * 5 + j) % 13) as f64 - 6.0);
+				let mut expected = Mat::<f64>::zeros(130, 90);
+				matmul_with_conj(expected.as_mut(), Accum::Replace, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, Par::Seq);
+				let mut data = alloc::vec![MaybeUninit::new(f64::NAN); 130 * 90];
+				let dst = MatUninitMut::from_column_major_slice_mut(&mut data, 130, 90);
+				let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, par.reborrow());
+				assert!(result == expected);
+			}
+			{
+				let from = |x: f64| <fx128 as ComplexFieldExt>::from_f64(x);
+				let lhs = Mat::<fx128>::from_fn(9, 6, |i, j| from((i + 2 * j) as f64));
+				let rhs = Mat::<fx128>::from_fn(6, 11, |i, j| from((3 * i + j) as f64));
+				let mut expected = Mat::<fx128>::zeros(9, 11);
+				matmul_with_conj(expected.as_mut(), Accum::Replace, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, from(1.0), Par::Seq);
+				let mut data = alloc::vec![MaybeUninit::<fx128>::uninit(); 9 * 11];
+				let dst = MatUninitMut::from_column_major_slice_mut(&mut data, 9, 11);
+				let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, from(1.0), par.reborrow());
+				assert!(result == expected);
+			}
+		});
+	}
+
+	/// A batched destination: one buffer holding `batch` matrices at a batch stride, each filled
+	/// through its own strided view.
+	#[test]
+	fn test_matmul_with_conj_uninit_batched() {
+		let (batch, m, k, n) = (3, 5, 4, 6);
+		let batch_stride = m * n + 2;
+		let mut data = alloc::vec![MaybeUninit::new(f64::NAN); batch * batch_stride];
+		for b in 0..batch {
+			let lhs = Mat::<f64>::from_fn(m, k, |i, j| (i + j + b) as f64);
+			let rhs = Mat::<f64>::from_fn(k, n, |i, j| (i * j + b) as f64 - 2.0);
+			let mut expected = Mat::<f64>::zeros(m, n);
+			matmul_with_conj(expected.as_mut(), Accum::Replace, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, Par::Seq);
+			// row major inside each batch slot
+			let dst = unsafe { MatUninitMut::<f64>::from_raw_parts_mut(data.as_mut_ptr().add(b * batch_stride), m, n, n as isize, 1) };
+			let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, Par::Seq);
+			assert!(result == expected);
+		}
+		for b in 0..batch {
+			for p in m * n..batch_stride {
+				assert!(unsafe { data[b * batch_stride + p].assume_init() }.is_nan());
+			}
+		}
+	}
+
 	fn matmul_with_conj_fallback<T: Copy + ComplexField>(
 		acc: MatMut<'_, T>,
 		a: MatRef<'_, T>,
