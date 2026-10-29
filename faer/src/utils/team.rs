@@ -385,20 +385,11 @@ pub(crate) mod kernel {
 			stats::bump(&stats::GEMM_BELOW_FLOOR);
 			return None;
 		}
-		// the widest width that pays, on the cost the shapes read (`Exec::width_for` searches the
-		// raw table, which is flat beyond the measured widths and would always answer the full
-		// width); the cost never falls with the width, so the first width that does not pay ends
-		// the search
+		// the widest width that pays, on the cost the shapes read, searched from the full width
+		// down: a measured row can fall with the width (aarch64-apple's team row is 3.0, 2.3,
+		// 1.4 us at widths 2, 4, 6), so a narrow width that does not pay says nothing about a wide one
 		let size = team.size().get();
-		let mut best = None;
-		for w in 2..=size {
-			let width = core::num::NonZeroUsize::new(w).unwrap();
-			if crate::utils::cost::pays_at(estimate, 2, crate::utils::cost::team_section_cost(team.dispatch_costs(), width)) {
-				best = Some(w);
-			} else {
-				break;
-			}
-		}
+		let best = (2..=size).rev().find(|&w| crate::utils::cost::pays_at(estimate, 2, team.dispatch_cost(core::num::NonZeroUsize::new(w).unwrap())));
 		match best {
 			Some(width) => Some(width),
 			None => {
@@ -597,10 +588,7 @@ pub(crate) unsafe fn gemm_tiled<E: 'static + Copy + Send + Sync>(
 		|| !crate::utils::cost::pays_at(
 			estimate,
 			1,
-			crate::utils::cost::team_section_cost(
-				team.dispatch_costs(),
-				core::num::NonZeroUsize::new(nt).unwrap(),
-			),
+			team.dispatch_cost(core::num::NonZeroUsize::new(nt).unwrap()),
 		)
 	{
 		stats::bump(&stats::GEMM_BELOW_FLOOR);
@@ -720,6 +708,7 @@ mod tests {
 	/// for a table whose cost rises with the width: here 2 us at width 2 and 12 us at width 6, a
 	/// 13 us product (two sections) pays at width 2 only, and a 11 us one nowhere.
 	#[test]
+	#[cfg(all(target_arch = "x86_64", feature = "std"))]
 	fn kernel_width_rejects_at_the_cheapest_width() {
 		use threadteam::{DispatchCosts, DispatchKind, WidthCosts};
 		use core::time::Duration;
@@ -741,6 +730,34 @@ mod tests {
 			let par = Par::Team(team);
 			assert!(crate::utils::cost::par_can_pay_time(&par, us(6), 1));
 			assert!(!crate::utils::cost::par_can_pay_time(&par, us(5), 1));
+		})
+		.ok()
+		.expect("a team token");
+	}
+
+	/// A measured row can fall with the width (aarch64-apple's team row does): a 7 us product
+	/// (two sections) pays at width 6 (1 us) but not at width 2 (3 us), so the search must not stop
+	/// at the first width that does not pay.
+	#[test]
+	#[cfg(all(target_arch = "x86_64", feature = "std"))]
+	fn kernel_width_finds_the_widest_paying_width_on_a_falling_row() {
+		use threadteam::{DispatchCosts, DispatchKind, WidthCosts};
+		use core::time::Duration;
+		let _turn = team_turn();
+		let us = Duration::from_micros;
+		let costs = DispatchCosts::for_class(threadteam::HostClass::Generic).with(DispatchKind::Team, WidthCosts::new([us(3), us(2), us(1)]));
+		let team = Pool::builder()
+			.threads(6)
+			.acquire_timeout(std::time::Duration::from_secs(30))
+			.dispatch_costs(costs)
+			.build()
+			.unwrap()
+			.into_team(6)
+			.expect("an idle pool");
+		let mut exec = team.exec(6);
+		exec.team(|team| {
+			assert_eq!(kernel::kernel_width(&team, us(7)), Some(6));
+			assert_eq!(kernel::kernel_width(&team, us(5)), None);
 		})
 		.ok()
 		.expect("a team token");

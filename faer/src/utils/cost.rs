@@ -582,8 +582,9 @@ pub(crate) fn par_pays_time(par: &crate::Par, estimate: Duration, sections: u32,
 		crate::Par::Seq => false,
 		#[cfg(feature = "threadteam")]
 		crate::Par::Team(team) => {
-			// the same cost the shape reports, extrapolated beyond the measured widths
-			pays_at(estimate, sections, team_section_cost(team.dispatch_costs(), width))
+			// the same cost the shape reports (threadteam's table, extrapolated by threadteam above
+			// its largest anchor)
+			pays_at(estimate, sections, team.dispatch_cost(width))
 		},
 		// a build without the route has no team token to ask
 		#[cfg(not(feature = "threadteam"))]
@@ -720,40 +721,15 @@ pub(crate) fn serial_time(count: usize, ns: f64) -> Duration {
 	Duration::from_secs_f64(count as f64 * ns * 1e-9)
 }
 
-/// The widest team the dispatch tables were measured at. `threadteam::DispatchCosts` holds the
-/// anchors measured at widths 2, 4 and 6 and is flat above them (the Linux data at width 8 is below
-/// the width-6 value, so flat is conservative that far); nothing was measured beyond 8.
-pub(crate) const MEASURED_MAX_WIDTH: usize = 8;
-
-/// The dispatch cost of one section on a team token at `width`, beyond the measured range
-/// *extrapolated*: from [`MEASURED_MAX_WIDTH`] on the cost grows linearly with the width, so a
-/// region that does not pay at 8 members does not pay at 32 or 64 with the same work. Without it a
-/// flat table lets a wide team open a region for a few microseconds of work and pick the full width
-/// every time.
-///
-/// Provisional until `tensor4all/faer#91`'s measurements (broccoli, widths 2 to 64) replace the
-/// extrapolation with measured rows; `threadteam` itself is not changed.
-#[cfg(feature = "threadteam")]
-pub(crate) fn team_section_cost(costs: threadteam::DispatchCosts, width: NonZeroUsize) -> Duration {
-	let cost = costs.cost(threadteam::DispatchKind::Team, width);
-	let w = width.get();
-	if w <= MEASURED_MAX_WIDTH {
-		cost
-	} else {
-		// at least linear in the width: never shallower than the table grew over the measured
-		// anchors, and a lower bound on what a wider team costs
-		cost.mul_f64(w as f64 / MEASURED_MAX_WIDTH as f64)
-	}
-}
-
 impl ParShape {
 	/// The cost of one parallel section of `width` participants on this shape, in the steady
 	/// state (sections back to back); [`Duration::MAX`] for a sequential shape or `width < 2`.
 	/// `width` is clamped to the degree of the shape.
 	///
 	/// `Team` is the cost of the team token the shape was taken from (threadteam's
-	/// `DispatchKind::Team`, with the costs of that token's pool), extrapolated beyond the widest
-	/// measured team ([`MEASURED_MAX_WIDTH`]).
+	/// `DispatchKind::Team`, with the costs of that token's pool). Above the largest measured
+	/// anchor of the row threadteam grows the cost linearly with the width (threadteam 0.1.1);
+	/// faer keeps no second model.
 	pub fn dispatch_cost(self, width: NonZeroUsize) -> Duration {
 		let width = width.min(NonZeroUsize::new(self.degree().max(1)).unwrap());
 		if width.get() < 2 {
@@ -762,7 +738,7 @@ impl ParShape {
 		match self {
 			Self::Seq => Duration::MAX,
 			#[cfg(feature = "threadteam")]
-			Self::Team(_, costs) => team_section_cost(costs, width),
+			Self::Team(_, costs) => costs.cost(threadteam::DispatchKind::Team, width),
 		}
 	}
 
@@ -1004,27 +980,42 @@ mod tests {
 		}
 	}
 
-	/// Beyond the widest measured team the cost grows at least linearly with the width, so a region
-	/// that cannot pay at eight members cannot pay at 64 for the same work (#97 review, provisional
-	/// until #91 measures broccoli up to width 64).
+	/// The team cost is threadteam's table, nothing else: faer keeps no second extrapolation
+	/// (threadteam-rs#6). Above a row's largest anchor threadteam grows the cost in proportion to
+	/// the width, so a region that does not pay at eight members does not pay at 64.
 	#[test]
-	fn widths_beyond_the_measured_range_cost_proportionally_more() {
-		use threadteam::{DispatchCosts, DispatchKind, WidthCosts};
+	fn the_team_cost_is_threadteams_table_at_every_width() {
+		use threadteam::{DispatchCosts, DispatchKind, HostClass, WidthCosts};
 		let us = Duration::from_micros;
-		let costs = DispatchCosts::for_class(threadteam::HostClass::Generic)
-			.with(DispatchKind::Team, WidthCosts::flat(us(1)));
-		let s = ParShape::Team(nz(64), costs);
-		// the measured widths are unchanged
-		assert_eq!(s.dispatch_cost(nz(8)), us(1));
-		assert_eq!(s.dispatch_cost(nz(4)), us(1));
-		// beyond them: `cost(w_max) * w / w_max`
-		assert_eq!(s.dispatch_cost(nz(16)), us(2));
-		assert_eq!(s.dispatch_cost(nz(32)), us(4));
-		assert_eq!(s.dispatch_cost(nz(64)), us(8));
+		let rows = [
+			DispatchCosts::for_class(HostClass::Generic),
+			DispatchCosts::for_class(HostClass::X86_64Avx512),
+			DispatchCosts::for_class(HostClass::X86_64Avx2),
+			DispatchCosts::for_class(HostClass::Aarch64Apple),
+			DispatchCosts::for_class(HostClass::Generic).with(DispatchKind::Team, WidthCosts::flat(us(1))),
+		];
+		for costs in rows {
+			let s = ParShape::Team(nz(128), costs);
+			for w in 2..=128 {
+				assert_eq!(s.dispatch_cost(nz(w)), costs.cost(DispatchKind::Team, nz(w)), "{costs:?} width {w}");
+			}
+		}
+		// above the largest anchor: `cost(w_m) * w / w_m` in integer nanoseconds. The flat row ends
+		// at 6, the avx512 team row at 8, the Zen2 avx2 row at 64.
+		let flat = ParShape::Team(nz(128), rows[4]);
+		for (w, ns) in [(8, 1333), (12, 2000), (16, 2666), (32, 5333), (64, 10666), (128, 21333)] {
+			assert_eq!(flat.dispatch_cost(nz(w)), Duration::from_nanos(ns), "flat width {w}");
+		}
+		let avx512 = ParShape::Team(nz(128), rows[1]);
+		assert_eq!(avx512.dispatch_cost(nz(8)), Duration::from_nanos(980));
+		assert_eq!(avx512.dispatch_cost(nz(64)), Duration::from_nanos(980 * 8));
+		let zen2 = ParShape::Team(nz(128), rows[2]);
+		assert_eq!(zen2.dispatch_cost(nz(64)), Duration::from_nanos(9333));
+		assert_eq!(zen2.dispatch_cost(nz(128)), Duration::from_nanos(18666));
 		// a region that does not pay at 8 members does not pay at 64 either
-		let at_8 = s.dispatch_cost(nz(8)) * 3;
-		assert!(s.pays(at_8, 1, nz(8)));
-		assert!(!s.pays(at_8, 1, nz(64)));
+		let at_8 = flat.dispatch_cost(nz(8)) * 3;
+		assert!(flat.pays(at_8, 1, nz(8)));
+		assert!(!flat.pays(at_8, 1, nz(64)));
 	}
 
 	#[test]
