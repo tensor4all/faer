@@ -273,6 +273,11 @@ pub fn partial_svd_imp<T: ComplexField>(
 				Group::Retain => {
 					if hi > mi {
 						H[(mi, mi)] = H[(hi, hi)].copy();
+						// the residual estimate belongs to the Ritz pair, not to the slot: the
+						// coupling row of the next iteration is built from this array, so a
+						// retained pair that moves must carry its estimate with it (the locked
+						// branch above does the same)
+						residual[mi] = residual[hi].copy();
 						{
 							let (mut mi, hi) = X.rb_mut().two_cols_mut(mi, hi);
 							mi.copy_from(hi);
