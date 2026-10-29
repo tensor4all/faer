@@ -221,8 +221,9 @@
 //! the members busy-wait for a bounded time between regions, then sleep; the width is the one the
 //! caller asked `with_team` for, and there is no process-wide setting to override it.
 //!
-//! `with_team` is for a one-off call: each call builds a new pool, spawning its worker threads and
-//! joining them again at the end. Code that runs parallel work repeatedly should build a
+//! `with_team` is for a one-off call: each call builds a new pool and acquires its members again;
+//! the threads themselves come from threadteam's cache of idle pools, so repeated calls at one
+//! width reuse running threads. Code that runs parallel work repeatedly should build a
 //! [`threadteam::Pool`] and [`threadteam::Team`] once and lend a `Par` from the team to each call
 //! (see the example on [`team::with_team`]).
 //!
