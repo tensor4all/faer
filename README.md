@@ -20,6 +20,15 @@
 > also reproduce on the published upstream crates are written up in
 > [`upstream-reports/`](upstream-reports/). Published versions follow semver.
 
+# Community
+
+Questions and discussion about this fork go to the tensor4all Matrix space:
+[#tensor4all:matrix.org](https://matrix.to/#/#tensor4all:matrix.org). Bug reports and feature
+requests go to the [GitHub issues](https://github.com/tensor4all/faer/issues).
+
+The upstream community is the [zulip server](https://faer.zulipchat.com), for questions about upstream
+faer itself. The fork's own channel is the Matrix space above.
+
 <p align="center">
   <img src="https://faer.veganb.tw/faer-logo-color.png" alt="faer logo"/ width="25%">
 </p>
