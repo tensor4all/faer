@@ -467,29 +467,30 @@ fn solve_unit_lower_triangular_in_place_imp<'N, 'K, T: ComplexField>(
 		// rule for a sequential run.
 	#[cfg(feature = "rayon")]
 		{
-			let jobs = Ord::min(par.degree(), k.div_ceil(64));
-			if jobs >= 2
-				&& crate::utils::cost::par_pays::<T>(
-					&par,
-					n.saturating_mul(n).saturating_mul(k) / 2,
-					crate::utils::cost::rate::gemm_mac(),
-					1,
-				) {
-				crate::utils::thread::for_each_with_par(
-					par,
-					jobs,
-					rhs.as_dyn_cols_mut().par_col_partition_mut(jobs),
-					|chunk, par| {
-						make_guard!(CHUNK);
-						let width = chunk.ncols().bind(CHUNK);
-						solve_unit_lower_triangular_in_place_imp(
-							tril,
-							conj_lhs,
-							chunk.as_col_shape_mut(width),
-							par,
-						)
-					},
-				);
+			// the split: the widest number of jobs, at most `ceil(k / 64)` (the inherited cap), that
+			// pays for its section; the region: the widest width that pays, shared out among the jobs
+			let units = n.saturating_mul(n).saturating_mul(k) / 2;
+			let rate = crate::utils::cost::rate::gemm_mac();
+			let jobs = crate::utils::cost::par_width_upto::<T>(&par, units, rate, 1, k.div_ceil(64));
+			let width = crate::utils::cost::par_width::<T>(&par, units, rate, 1);
+			if jobs >= 2 {
+				crate::utils::thread::with_width(par, width, |par| {
+					crate::utils::thread::for_each_with_par(
+						par,
+						jobs,
+						rhs.as_dyn_cols_mut().par_col_partition_mut(jobs),
+						|chunk, par| {
+							make_guard!(CHUNK);
+							let width = chunk.ncols().bind(CHUNK);
+							solve_unit_lower_triangular_in_place_imp(
+								tril,
+								conj_lhs,
+								chunk.as_col_shape_mut(width),
+								par,
+							)
+						},
+					)
+				});
 				return;
 			}
 		}
@@ -589,29 +590,30 @@ fn solve_lower_triangular_in_place_imp<'N, 'K, T: ComplexField>(
 	if k > 64 && n <= 128 {
 	#[cfg(feature = "rayon")]
 		{
-			let jobs = Ord::min(par.degree(), k.div_ceil(64));
-			if jobs >= 2
-				&& crate::utils::cost::par_pays::<T>(
-					&par,
-					n.saturating_mul(n).saturating_mul(k) / 2,
-					crate::utils::cost::rate::gemm_mac(),
-					1,
-				) {
-				crate::utils::thread::for_each_with_par(
-					par,
-					jobs,
-					rhs.as_dyn_cols_mut().par_col_partition_mut(jobs),
-					|chunk, par| {
-						make_guard!(CHUNK);
-						let width = chunk.ncols().bind(CHUNK);
-						solve_lower_triangular_in_place_imp(
-							tril,
-							conj_lhs,
-							chunk.as_col_shape_mut(width),
-							par,
-						)
-					},
-				);
+			// the split: the widest number of jobs, at most `ceil(k / 64)` (the inherited cap), that
+			// pays for its section; the region: the widest width that pays, shared out among the jobs
+			let units = n.saturating_mul(n).saturating_mul(k) / 2;
+			let rate = crate::utils::cost::rate::gemm_mac();
+			let jobs = crate::utils::cost::par_width_upto::<T>(&par, units, rate, 1, k.div_ceil(64));
+			let width = crate::utils::cost::par_width::<T>(&par, units, rate, 1);
+			if jobs >= 2 {
+				crate::utils::thread::with_width(par, width, |par| {
+					crate::utils::thread::for_each_with_par(
+						par,
+						jobs,
+						rhs.as_dyn_cols_mut().par_col_partition_mut(jobs),
+						|chunk, par| {
+							make_guard!(CHUNK);
+							let width = chunk.ncols().bind(CHUNK);
+							solve_lower_triangular_in_place_imp(
+								tril,
+								conj_lhs,
+								chunk.as_col_shape_mut(width),
+								par,
+							)
+						},
+					)
+				});
 				return;
 			}
 		}

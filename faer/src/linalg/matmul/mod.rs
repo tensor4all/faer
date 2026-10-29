@@ -773,102 +773,72 @@ mod matvec_rowmajor {
 		// One section (a split of the rows or columns); the unit is a matrix element. The
 		// product reads each element once, so the rate is the streaming one.
 		let size = *lhs.nrows() * *lhs.ncols();
-		let par = if crate::utils::cost::par_pays::<T>(
+		let width = crate::utils::cost::par_width::<T>(
 			&par,
 			size,
 			crate::utils::cost::rate::matvec(),
 			1,
-		) {
-			par
-		} else {
-			Par::Seq
-		};
-		match par {
-			Par::Seq => {
-				pub struct Impl<'a, 'M, 'K, T: ComplexField> {
-					dst: ColMut<'a, T, Dim<'M>>,
-					beta: Accum,
-					lhs: MatRef<'a, T, Dim<'M>, Dim<'K>, isize, ContiguousFwd>,
-					conj_lhs: Conj,
-					rhs: ColRef<'a, T, Dim<'K>, ContiguousFwd>,
-					conj_rhs: Conj,
-					alpha: &'a T,
-				}
-				impl<'a, 'M, 'K, T: ComplexField> pulp::WithSimd for Impl<'a, 'M, 'K, T> {
-					type Output = ();
+		);
+		crate::utils::thread::with_width(par, width, |par| {
+			match par {
+				Par::Seq => {
+					pub struct Impl<'a, 'M, 'K, T: ComplexField> {
+						dst: ColMut<'a, T, Dim<'M>>,
+						beta: Accum,
+						lhs: MatRef<'a, T, Dim<'M>, Dim<'K>, isize, ContiguousFwd>,
+						conj_lhs: Conj,
+						rhs: ColRef<'a, T, Dim<'K>, ContiguousFwd>,
+						conj_rhs: Conj,
+						alpha: &'a T,
+					}
+					impl<'a, 'M, 'K, T: ComplexField> pulp::WithSimd for Impl<'a, 'M, 'K, T> {
+						type Output = ();
 
-					#[inline(always)]
-					fn with_simd<S: Simd>(self, simd: S) -> Self::Output {
-						let Self {
-							dst,
-							beta,
-							lhs,
-							conj_lhs,
-							rhs,
-							conj_rhs,
-							alpha,
-						} = self;
-						let simd = T::simd_ctx(simd);
-						let mut dst = dst;
-						let K = lhs.ncols();
-						let simd = SimdCtx::new(simd, K);
-						for i in lhs.nrows().indices() {
-							let dst = &mut dst[i];
-							let lhs = lhs.row(i);
-							let rhs = rhs;
-							let mut tmp = if conj_lhs == conj_rhs {
-								dot::inner_prod_no_conj_simd::<T, S>(
-									simd,
-									lhs.transpose(),
-									rhs,
-								)
-							} else {
-								dot::inner_prod_conj_lhs_simd::<T, S>(
-									simd,
-									lhs.transpose(),
-									rhs,
-								)
-							};
-							if conj_rhs == Conj::Yes {
-								tmp = tmp.conj();
+						#[inline(always)]
+						fn with_simd<S: Simd>(self, simd: S) -> Self::Output {
+							let Self {
+								dst,
+								beta,
+								lhs,
+								conj_lhs,
+								rhs,
+								conj_rhs,
+								alpha,
+							} = self;
+							let simd = T::simd_ctx(simd);
+							let mut dst = dst;
+							let K = lhs.ncols();
+							let simd = SimdCtx::new(simd, K);
+							for i in lhs.nrows().indices() {
+								let dst = &mut dst[i];
+								let lhs = lhs.row(i);
+								let rhs = rhs;
+								let mut tmp = if conj_lhs == conj_rhs {
+									dot::inner_prod_no_conj_simd::<T, S>(
+										simd,
+										lhs.transpose(),
+										rhs,
+									)
+								} else {
+									dot::inner_prod_conj_lhs_simd::<T, S>(
+										simd,
+										lhs.transpose(),
+										rhs,
+									)
+								};
+								if conj_rhs == Conj::Yes {
+									tmp = tmp.conj();
+								}
+								tmp = alpha * tmp;
+								if let Accum::Add = beta {
+									tmp = &*dst + tmp;
+								}
+								*dst = tmp;
 							}
-							tmp = alpha * tmp;
-							if let Accum::Add = beta {
-								tmp = &*dst + tmp;
-							}
-							*dst = tmp;
 						}
 					}
-				}
-				dispatch!(
-					Impl {
-						dst,
-						beta,
-						lhs,
-						conj_lhs,
-						rhs,
-						conj_rhs,
-						alpha,
-					},
-					Impl,
-					T
-				);
-			},
-	#[cfg(feature = "rayon")]
-			_ => {
-			let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
-				let nthreads = nthreads.get();
-				use rayon::prelude::*;
-				crate::utils::thread::for_each(par, 
-					nthreads,
-					dst.par_partition_mut(nthreads)
-						.zip_eq(lhs.par_row_partition(nthreads)),
-					|(dst, lhs)| {
-						make_guard!(M);
-						let nrows = dst.nrows().bind(M);
-						let dst = dst.as_row_shape_mut(nrows);
-						let lhs = lhs.as_row_shape(nrows);
-						matvec(
+					dispatch!(
+						Impl {
 							dst,
 							beta,
 							lhs,
@@ -876,12 +846,40 @@ mod matvec_rowmajor {
 							rhs,
 							conj_rhs,
 							alpha,
-							Par::Seq,
-						);
-					},
-				)
-			},
-		}
+						},
+						Impl,
+						T
+					);
+				},
+		#[cfg(feature = "rayon")]
+				_ => {
+				let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
+					let nthreads = nthreads.get();
+					use rayon::prelude::*;
+					crate::utils::thread::for_each(par, 
+						nthreads,
+						dst.par_partition_mut(nthreads)
+							.zip_eq(lhs.par_row_partition(nthreads)),
+						|(dst, lhs)| {
+							make_guard!(M);
+							let nrows = dst.nrows().bind(M);
+							let dst = dst.as_row_shape_mut(nrows);
+							let lhs = lhs.as_row_shape(nrows);
+							matvec(
+								dst,
+								beta,
+								lhs,
+								conj_lhs,
+								rhs,
+								conj_rhs,
+								alpha,
+								Par::Seq,
+							);
+						},
+					)
+				},
+			}
+		});
 	}
 }
 mod matvec_colmajor {
@@ -904,157 +902,155 @@ mod matvec_colmajor {
 		// One section (a split of the rows or columns); the unit is a matrix element. The
 		// product reads each element once, so the rate is the streaming one.
 		let size = *lhs.nrows() * *lhs.ncols();
-		let par = if crate::utils::cost::par_pays::<T>(
+		let width = crate::utils::cost::par_width::<T>(
 			&par,
 			size,
 			crate::utils::cost::rate::matvec(),
 			1,
-		) {
-			par
-		} else {
-			Par::Seq
-		};
-		match par {
-			Par::Seq => {
-				pub struct Impl<'a, 'M, 'K, T: ComplexField> {
-					dst: ColMut<'a, T, Dim<'M>, ContiguousFwd>,
-					beta: Accum,
-					lhs: MatRef<'a, T, Dim<'M>, Dim<'K>, ContiguousFwd, isize>,
-					conj_lhs: Conj,
-					rhs: ColRef<'a, T, Dim<'K>>,
-					conj_rhs: Conj,
-					alpha: &'a T,
-				}
-				impl<'a, 'M, 'K, T: ComplexField> pulp::WithSimd for Impl<'a, 'M, 'K, T> {
-					type Output = ();
+		);
+		crate::utils::thread::with_width(par, width, |par| {
+			match par {
+				Par::Seq => {
+					pub struct Impl<'a, 'M, 'K, T: ComplexField> {
+						dst: ColMut<'a, T, Dim<'M>, ContiguousFwd>,
+						beta: Accum,
+						lhs: MatRef<'a, T, Dim<'M>, Dim<'K>, ContiguousFwd, isize>,
+						conj_lhs: Conj,
+						rhs: ColRef<'a, T, Dim<'K>>,
+						conj_rhs: Conj,
+						alpha: &'a T,
+					}
+					impl<'a, 'M, 'K, T: ComplexField> pulp::WithSimd for Impl<'a, 'M, 'K, T> {
+						type Output = ();
 
-					#[inline(always)]
-					fn with_simd<S: Simd>(self, simd: S) -> Self::Output {
-						let Self {
-							dst,
-							beta,
-							lhs,
-							conj_lhs,
-							rhs,
-							conj_rhs,
-							alpha,
-						} = self;
-						let simd = T::simd_ctx(simd);
-						let M = lhs.nrows();
-						let simd = SimdCtx::<T, S>::new(simd, M);
-						let indices = simd.indices();
-						let mut dst = dst;
-						match beta {
-							Accum::Add => {},
-							Accum::Replace => {
-								simd_iter!(for i in [indices] {
-									simd.write(dst.rb_mut(), i, simd.zero());
-								});
-							},
-						}
-						for j in lhs.ncols().indices() {
-							let mut dst = dst.rb_mut();
-							let lhs = lhs.col(j);
-							let rhs = &rhs[j];
-							let rhs = conj_rhs.apply_rt(rhs);
-							let rhs = rhs * alpha;
-							let vrhs = simd.splat(&rhs);
-							if conj_lhs == Conj::Yes {
-								simd_iter!(for i in [indices] {
-									let y = simd.read(dst.rb(), i);
-									let x = simd.read(lhs, i);
-									simd.write(
-										dst.rb_mut(),
-										i,
-										simd.conj_mul_add(x, vrhs, y),
-									);
-								});
-							} else {
-								simd_iter!(for i in [indices] {
-									let y = simd.read(dst.rb(), i);
-									let x = simd.read(lhs, i);
-									simd.write(
-										dst.rb_mut(),
-										i,
-										simd.mul_add(x, vrhs, y),
-									);
-								});
+						#[inline(always)]
+						fn with_simd<S: Simd>(self, simd: S) -> Self::Output {
+							let Self {
+								dst,
+								beta,
+								lhs,
+								conj_lhs,
+								rhs,
+								conj_rhs,
+								alpha,
+							} = self;
+							let simd = T::simd_ctx(simd);
+							let M = lhs.nrows();
+							let simd = SimdCtx::<T, S>::new(simd, M);
+							let indices = simd.indices();
+							let mut dst = dst;
+							match beta {
+								Accum::Add => {},
+								Accum::Replace => {
+									simd_iter!(for i in [indices] {
+										simd.write(dst.rb_mut(), i, simd.zero());
+									});
+								},
+							}
+							for j in lhs.ncols().indices() {
+								let mut dst = dst.rb_mut();
+								let lhs = lhs.col(j);
+								let rhs = &rhs[j];
+								let rhs = conj_rhs.apply_rt(rhs);
+								let rhs = rhs * alpha;
+								let vrhs = simd.splat(&rhs);
+								if conj_lhs == Conj::Yes {
+									simd_iter!(for i in [indices] {
+										let y = simd.read(dst.rb(), i);
+										let x = simd.read(lhs, i);
+										simd.write(
+											dst.rb_mut(),
+											i,
+											simd.conj_mul_add(x, vrhs, y),
+										);
+									});
+								} else {
+									simd_iter!(for i in [indices] {
+										let y = simd.read(dst.rb(), i);
+										let x = simd.read(lhs, i);
+										simd.write(
+											dst.rb_mut(),
+											i,
+											simd.mul_add(x, vrhs, y),
+										);
+									});
+								}
 							}
 						}
 					}
-				}
-				dispatch!(
-					Impl {
-						dst,
-						lhs,
-						conj_lhs,
-						rhs,
-						conj_rhs,
-						beta,
-						alpha,
-					},
-					Impl,
-					T
-				)
-			},
-	#[cfg(feature = "rayon")]
-			_ => {
-			let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
-				use rayon::prelude::*;
-				let nthreads = nthreads.get();
-				let mut mem = MemBuffer::new(temp_mat_scratch::<T>(
-					dst.nrows().unbound(),
-					nthreads,
-				));
-				let stack = MemStack::new(&mut mem);
-				alloca!('stack: {
-					let tmp =
-						unsafe { mat![uninit::<T>, dst.nrows(), nthreads] };
-				});
-				let mut tmp = tmp.try_as_col_major_mut().unwrap();
-				let mut dst = dst;
-				make_guard!(Z);
-				let Z = 0usize.bind(Z);
-				let z = IdxInc::new_checked(0, lhs.ncols());
-				crate::utils::thread::for_each(par, 
-					nthreads,
-					tmp.rb_mut()
-						.par_col_iter_mut()
-						.zip_eq(lhs.par_col_partition(nthreads))
-						.zip_eq(rhs.par_partition(nthreads)),
-					|((dst, lhs), rhs)| {
-						make_guard!(K);
-						let K = lhs.ncols().bind(K);
-						let lhs = lhs.as_col_shape(K);
-						let rhs = rhs.as_row_shape(K);
-						matvec(
+					dispatch!(
+						Impl {
 							dst,
-							Accum::Replace,
 							lhs,
 							conj_lhs,
 							rhs,
 							conj_rhs,
+							beta,
 							alpha,
-							Par::Seq,
-						);
-					},
-				);
-				matvec(
-					dst.rb_mut(),
-					beta,
-					lhs.subcols(z, Z),
-					conj_lhs,
-					rhs.subrows(z, Z),
-					conj_rhs,
-					&zero(),
-					Par::Seq,
-				);
-				for j in 0..nthreads {
-					zip!(dst.rb_mut(), tmp.rb().col(j))
-						.for_each(|unzip!(dst, src)| *dst = &*dst + &*src)
-				}
-			},
-		}
+						},
+						Impl,
+						T
+					)
+				},
+		#[cfg(feature = "rayon")]
+				_ => {
+				let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
+					use rayon::prelude::*;
+					let nthreads = nthreads.get();
+					let mut mem = MemBuffer::new(temp_mat_scratch::<T>(
+						dst.nrows().unbound(),
+						nthreads,
+					));
+					let stack = MemStack::new(&mut mem);
+					alloca!('stack: {
+						let tmp =
+							unsafe { mat![uninit::<T>, dst.nrows(), nthreads] };
+					});
+					let mut tmp = tmp.try_as_col_major_mut().unwrap();
+					let mut dst = dst;
+					make_guard!(Z);
+					let Z = 0usize.bind(Z);
+					let z = IdxInc::new_checked(0, lhs.ncols());
+					crate::utils::thread::for_each(par, 
+						nthreads,
+						tmp.rb_mut()
+							.par_col_iter_mut()
+							.zip_eq(lhs.par_col_partition(nthreads))
+							.zip_eq(rhs.par_partition(nthreads)),
+						|((dst, lhs), rhs)| {
+							make_guard!(K);
+							let K = lhs.ncols().bind(K);
+							let lhs = lhs.as_col_shape(K);
+							let rhs = rhs.as_row_shape(K);
+							matvec(
+								dst,
+								Accum::Replace,
+								lhs,
+								conj_lhs,
+								rhs,
+								conj_rhs,
+								alpha,
+								Par::Seq,
+							);
+						},
+					);
+					matvec(
+						dst.rb_mut(),
+						beta,
+						lhs.subcols(z, Z),
+						conj_lhs,
+						rhs.subrows(z, Z),
+						conj_rhs,
+						&zero(),
+						Par::Seq,
+					);
+					for j in 0..nthreads {
+						zip!(dst.rb_mut(), tmp.rb().col(j))
+							.for_each(|unzip!(dst, src)| *dst = &*dst + &*src)
+					}
+				},
+			}
+		});
 	}
 }
 mod rank_update {
@@ -1379,7 +1375,7 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 						);
 						return;
 					} else {
-						let par = match par {
+						let _ = match par {
 							#[cfg(feature = "threadteam")]
 							Par::Team(team) => {
 							// the team path runs both kernels below on the team. On
@@ -1463,24 +1459,9 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 									rhs.col_stride(),
 									conj_rhs == Conj::Yes,
 									&raw const alpha as *const (),
-									// The kernel below (`private_gemm_x86`) threads whenever it is
-									// handed more than one thread and has no work floor of its own,
-									// so the decision is faer's: the serial time of the product
-									// (its MACs at the dtype's rate, `utils::cost::ns_per_mac`)
-									// against `PAYS` times the cost of one section of this shape
-									// (`ParShape::dispatch_cost`). One section: the kernel cuts
-									// the product into one grid of tiles.
-									if par.shape().pays_full(
-										$crate::utils::cost::serial_time(
-											(*M).saturating_mul(*N).saturating_mul(*K),
-											$crate::utils::cost::gemm_ns_per_mac::<T>(),
-										),
-										1,
-									) {
-										par.degree()
-									} else {
-										1
-									},
+									// one thread: a team returned above (`gemm_team`), so `par`
+									// is sequential here
+									1,
 									// a team is the only parallel route: the `gemm` crate's own
 									// parallelism is never handed a thread (the team runs the
 									// kernel on its members instead, or the kernel stays serial)

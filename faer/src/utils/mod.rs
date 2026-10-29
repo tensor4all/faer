@@ -68,6 +68,45 @@ pub mod thread {
 			parallelism,
 		)
 	}
+	/// Runs `f` on a part of `par` of `width` participants: `par` itself when `width` is its
+	/// degree or more, `Par::Seq` below two, otherwise a sub-team of `width` (a split into one
+	/// child, which is led by the caller and dispatches nothing; the members it leaves out stay
+	/// idle). A region decides its width with [`cost::par_width`](crate::utils::cost) and runs
+	/// here, so only that region is narrowed and the caller keeps its whole `par`.
+	pub fn with_width<R>(par: Par, width: usize, f: impl FnOnce(Par) -> R) -> R {
+		if width >= par.degree() {
+			return f(par);
+		}
+		if width < 2 {
+			return f(Par::Seq);
+		}
+		match par {
+			Par::Seq => f(Par::Seq),
+			#[cfg(feature = "threadteam")]
+			Par::Team(team) => {
+				super::team::note_width(width);
+				struct Once<F, R>(core::cell::UnsafeCell<(Option<F>, Option<R>)>);
+				// SAFETY: a split into the single child `[width]` runs its callback once, on the
+				// calling thread (child 0 is led by the caller), so the cell is never shared.
+				unsafe impl<F, R> Sync for Once<F, R> {}
+				impl<F, R> Once<F, R> {
+					fn get(&self) -> *mut (Option<F>, Option<R>) {
+						self.0.get()
+					}
+				}
+				let once = Once(core::cell::UnsafeCell::new((Some(f), None)));
+				team.split(&[width], |_, child| {
+					// SAFETY: see `Once`.
+					let (f, out) = unsafe { &mut *once.get() };
+					*out = Some((f.take().expect("one child"))(Par::Team(child)));
+				})
+				.expect("2 <= width < size is a valid split");
+				once.0.into_inner().1.expect("the child ran")
+			},
+			#[cfg(not(feature = "threadteam"))]
+			Par::__Lifetime(x, _) => match x {},
+		}
+	}
 	/// unsafe [`Send`] and [`Sync`] pointer type
 	pub struct Ptr<T>(pub *mut T);
 	unsafe impl<T> Send for Ptr<T> {}

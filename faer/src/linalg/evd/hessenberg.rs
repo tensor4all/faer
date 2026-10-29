@@ -1,5 +1,6 @@
 use crate::assert;
 use crate::internal_prelude::*;
+use crate::utils::thread::with_width;
 use crate::utils::cost::{ParThreshold, rate};
 use linalg::householder::{self, HouseholderInfo};
 use linalg::matmul::triangular::BlockStructure;
@@ -249,6 +250,10 @@ fn hessenberg_rearranged_unblocked<T: ComplexField>(
 	let mut A = A;
 	let mut H = H;
 	let mut par = par;
+	// `Never` keeps the whole call sequential (the steps decide their own width otherwise)
+	if matches!(params.par_threshold, ParThreshold::Never) {
+		par = Par::Seq;
+	}
 	{
 		let mut H = H.rb_mut().row_mut(0);
 		alloca!('stack: {
@@ -289,20 +294,14 @@ fn hessenberg_rearranged_unblocked<T: ComplexField>(
 					|uz!(a, u, z): Zip!(&mut T, &T, &T)| *a -= u * &y1 + z,
 				);
 			}
-			{
-				// Two sections per step: the two matrix-vector products (`w0` and the rank-one
-				// update of `A02`, or `z2` and `y2` on the first step); the unit is an element
-				// of the trailing block.
+			// Two sections per step: the two matrix-vector products (`w0` and the rank-one
+			// update of `A02`, or `z2` and `y2` on the first step); the unit is an element of
+			// the trailing block. The step's products run at the widest width that pays; the
+			// next step decides again (`A02` grows while the trailing block shrinks).
+			let width = {
 				let n = n - k - 1;
-				if !params.par_threshold.region_pays::<T>(
-					par.shape(),
-					n * n,
-					rate::hessenberg(),
-					2,
-				) {
-					par = Par::Seq;
-				}
-			}
+				params.par_threshold.region_width::<T>(&par, n * n, rate::hessenberg(), 2)
+			};
 			if k + 1 == n {
 				break;
 			}
@@ -337,22 +336,26 @@ fn hessenberg_rearranged_unblocked<T: ComplexField>(
 				y2.copy_from(v2.rb());
 				z2.copy_from(w2.rb().col(0));
 			} else {
-				matmul(
-					z2.rb_mut().as_mat_mut(),
-					Accum::Replace,
-					A22.rb(),
-					x2.as_mat(),
-					one(),
-					par.reborrow(),
-				);
-				matmul(
-					y2.rb_mut().as_mat_mut(),
-					Accum::Replace,
-					x2.adjoint().as_mat(),
-					A22.rb(),
-					one(),
-					par.reborrow(),
-				);
+				with_width(par.reborrow(), width, |par| {
+					matmul(
+						z2.rb_mut().as_mat_mut(),
+						Accum::Replace,
+						A22.rb(),
+						x2.as_mat(),
+						one(),
+						par,
+					);
+				});
+				with_width(par.reborrow(), width, |par| {
+					matmul(
+						y2.rb_mut().as_mat_mut(),
+						Accum::Replace,
+						x2.adjoint().as_mat(),
+						A22.rb(),
+						one(),
+						par,
+					);
+				});
 			}
 			let u2 = x2;
 			let ref b = dot::inner_prod(
@@ -376,22 +379,26 @@ fn hessenberg_rearranged_unblocked<T: ComplexField>(
 					.mul_real(&tau_inv);
 			z!(&mut A12, u2.transpose())
 				.for_each(|uz!(a, u): Zip!(&mut T, &T)| *a -= dot * u.conj());
-			matmul(
-				w0.rb_mut().col_mut(0).as_mat_mut(),
-				Accum::Replace,
-				A02.rb(),
-				u2.as_mat(),
-				one(),
-				par.reborrow(),
-			);
-			matmul(
-				A02.rb_mut(),
-				Accum::Add,
-				w0.rb().col(0).as_mat(),
-				u2.adjoint().as_mat(),
-				(-&tau_inv).to_cplx(),
-				par.reborrow(),
-			);
+			with_width(par.reborrow(), width, |par| {
+				matmul(
+					w0.rb_mut().col_mut(0).as_mat_mut(),
+					Accum::Replace,
+					A02.rb(),
+					u2.as_mat(),
+					one(),
+					par,
+				);
+			});
+			with_width(par.reborrow(), width, |par| {
+				matmul(
+					A02.rb_mut(),
+					Accum::Add,
+					w0.rb().col(0).as_mat(),
+					u2.adjoint().as_mat(),
+					(-&tau_inv).to_cplx(),
+					par,
+				);
+			});
 			A21[0] = beta;
 		}
 	}

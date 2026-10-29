@@ -2,6 +2,7 @@ use crate::internal_prelude::*;
 use crate::utils::cost::{ParThreshold, rate};
 use crate::perm::{swap_cols_idx, swap_rows_idx};
 use crate::utils::thread::par_split_indices;
+use crate::utils::thread::with_width;
 use faer_traits::{Real, RealReg};
 use linalg::matmul::matmul;
 use pulp::Simd;
@@ -352,6 +353,10 @@ fn lu_in_place_unblocked<T: ComplexField>(
 		return 0;
 	}
 	let mut par = par;
+	// `Never` keeps the whole call sequential (the steps decide their own width otherwise)
+	if matches!(params.par_threshold, ParThreshold::Never) {
+		par = Par::Seq;
+	}
 	let mut A = A;
 	let (mut max_row, mut max_col, mut max_score) = best_in_matrix(A.rb());
 	for k in 0..Ord::min(m, n) {
@@ -390,68 +395,68 @@ fn lu_in_place_unblocked<T: ComplexField>(
 		}
 		// One section per step (the fused rank-one update and pivot search over column
 		// blocks); the unit is an element of the trailing block.
-		if !params.par_threshold.region_pays::<T>(
-			par.shape(),
+		let width = params.par_threshold.region_width::<T>(
+			&par,
 			(m - k - 1) * (n - k - 1),
 			rate::lu_full_pivot(),
 			1,
-		) {
-			par = Par::Seq;
-		}
+		);
 		let (_, A01, A10, mut A11) = A.rb_mut().split_at_mut(k + 1, k + 1);
 		let lhs = A10.col(k);
 		let rhs = A01.row(k);
-		match par {
-			Par::Seq => {
-				(max_row, max_col, max_score) =
-					rank_one_update_and_best_in_matrix(
-						A11.rb_mut(),
-						lhs,
-						rhs,
-						simd_align(k + 1),
+		with_width(par.reborrow(), width, |par| {
+			match par {
+				Par::Seq => {
+					(max_row, max_col, max_score) =
+						rank_one_update_and_best_in_matrix(
+							A11.rb_mut(),
+							lhs,
+							rhs,
+							simd_align(k + 1),
+						);
+				},
+		#[cfg(feature = "rayon")]
+				_ => {
+				let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
+					use rayon::prelude::*;
+					let nthreads = nthreads.get();
+					let mut best = core::iter::repeat_with(|| (0, 0, zero()))
+						.take(nthreads)
+						.collect::<alloc::vec::Vec<_>>();
+					let full_cols = A11.ncols();
+					crate::utils::thread::for_each(par, 
+						nthreads,
+						best.par_iter_mut()
+							.zip_eq(A11.rb_mut().par_col_partition_mut(nthreads))
+							.zip_eq(rhs.par_partition(nthreads))
+							.enumerate(),
+						|(idx, (((max_row, max_col, max_score), A11), rhs))| {
+							(*max_row, *max_col, *max_score) = {
+								let (a, mut b, c) =
+									rank_one_update_and_best_in_matrix(
+										A11,
+										lhs,
+										rhs,
+										simd_align(k + 1),
+									);
+								b += par_split_indices(full_cols, idx, nthreads).0;
+								(a, b, c)
+							};
+						},
 					);
-			},
-	#[cfg(feature = "rayon")]
-			_ => {
-			let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
-				use rayon::prelude::*;
-				let nthreads = nthreads.get();
-				let mut best = core::iter::repeat_with(|| (0, 0, zero()))
-					.take(nthreads)
-					.collect::<alloc::vec::Vec<_>>();
-				let full_cols = A11.ncols();
-				crate::utils::thread::for_each(par.reborrow(), 
-					nthreads,
-					best.par_iter_mut()
-						.zip_eq(A11.rb_mut().par_col_partition_mut(nthreads))
-						.zip_eq(rhs.par_partition(nthreads))
-						.enumerate(),
-					|(idx, (((max_row, max_col, max_score), A11), rhs))| {
-						(*max_row, *max_col, *max_score) = {
-							let (a, mut b, c) =
-								rank_one_update_and_best_in_matrix(
-									A11,
-									lhs,
-									rhs,
-									simd_align(k + 1),
-								);
-							b += par_split_indices(full_cols, idx, nthreads).0;
-							(a, b, c)
-						};
-					},
-				);
-				max_row = 0;
-				max_col = 0;
-				max_score = zero();
-				for (row, col, val) in best {
-					if val > max_score {
-						max_row = row;
-						max_col = col;
-						max_score = val;
+					max_row = 0;
+					max_col = 0;
+					max_score = zero();
+					for (row, col, val) in best {
+						if val > max_score {
+							max_row = row;
+							max_col = col;
+							max_score = val;
+						}
 					}
-				}
-			},
-		}
+				},
+			}
+		});
 		max_row += k + 1;
 		max_col += k + 1;
 	}

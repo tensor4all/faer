@@ -2,6 +2,7 @@ pub use super::super::no_pivoting::factor::recommended_block_size;
 use crate::assert;
 use crate::internal_prelude::*;
 use crate::utils::cost::{ParThreshold, rate};
+use crate::utils::thread::with_width;
 use crate::perm::swap_cols_idx;
 use linalg::householder::{self, HouseholderInfo};
 use pulp::Simd;
@@ -128,6 +129,10 @@ fn qr_in_place_unblocked<'out, I: Index, T: ComplexField>(
 	let mut A = A;
 	let mut H = H;
 	let mut par = par;
+	// `Never` keeps the whole call sequential (the steps decide their own width otherwise)
+	if matches!(params.par_threshold, ParThreshold::Never) {
+		par = Par::Seq;
+	}
 	assert!(size == Ord::min(m, n));
 	for j in 0..n {
 		col_perm[j] = I::truncate(j);
@@ -162,6 +167,9 @@ fn qr_in_place_unblocked<'out, I: Index, T: ComplexField>(
 		}
 		best = best * scale_bwd;
 		let mut best_threshold = best * threshold;
+		// the width the previous step's decision chose: it also covers the product that the
+		// next step opens with when the update was not delayed
+		let mut width = par.degree();
 		'unscale: {
 			for k in 0..size {
 				let mut new_best = zero::<T::Real>();
@@ -180,14 +188,16 @@ fn qr_in_place_unblocked<'out, I: Index, T: ComplexField>(
 					let (_, _, A10, mut A11) = A.rb_mut().split_at_mut(k, k);
 					let dot = dot.rb().get(k..);
 					let A10 = A10.rb().col(k - 1);
-					linalg::matmul::matmul(
-						A11.rb_mut(),
-						Accum::Add,
-						A10,
-						dot,
-						one(),
-						par.reborrow(),
-					);
+					with_width(par.reborrow(), width, |par| {
+						linalg::matmul::matmul(
+							A11.rb_mut(),
+							Accum::Add,
+							A10,
+							dot,
+							one(),
+							par,
+						);
+					});
 					best = zero();
 					for j in k..n {
 						let val = A11.rb().col(j - k).norm_l2();
@@ -247,67 +257,69 @@ fn qr_in_place_unblocked<'out, I: Index, T: ComplexField>(
 				// One section per step: the fused update of the trailing block and the
 				// norms (or, without the delayed update, the product, which the same
 				// decision covers); the unit is an element of the trailing block.
-				if !params.par_threshold.region_pays::<T>(
-					par.shape(),
+				width = params.par_threshold.region_width::<T>(
+					&par,
 					(m - k - 1) * (n - k - 1),
 					rate::qr_col_pivot(),
 					1,
-				) {
-					par = Par::Seq;
-				}
+				);
 				if delayed_update {
 					let A10 = A10.col(k - 1).get(1..);
-					match par {
-						Par::Seq => {
-							update_mat_and_dot_simd(
-								norm.rb_mut(),
-								dot.rb_mut(),
-								B01.rb_mut(),
-								B11.rb_mut().try_as_col_major_mut().unwrap(),
-								A10.try_as_col_major().unwrap(),
-								B10.rb().try_as_col_major().unwrap(),
-								l.copy(),
-								tau_inv.copy(),
-								simd_align(k + 1),
-							);
-						},
-	#[cfg(feature = "rayon")]
-						_ => {
-						let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
-							let nthreads = nthreads.get();
-							use rayon::prelude::*;
-							crate::utils::thread::for_each(par.reborrow(), 
-								nthreads,
-								norm.par_partition_mut(nthreads)
-									.zip(dot.par_partition_mut(nthreads))
-									.zip(B01.par_partition_mut(nthreads))
-									.zip(B11.par_col_partition_mut(nthreads)),
-								|(((norm, dot), B01), B11)| {
-									update_mat_and_dot_simd(
-										norm,
-										dot,
-										B01,
-										B11.try_as_col_major_mut().unwrap(),
-										A10.try_as_col_major().unwrap(),
-										B10.rb().try_as_col_major().unwrap(),
-										l.copy(),
-										tau_inv.copy(),
-										simd_align(k + 1),
-									);
-								},
-							);
-						},
-					}
+					with_width(par.reborrow(), width, |par| {
+						match par {
+							Par::Seq => {
+								update_mat_and_dot_simd(
+									norm.rb_mut(),
+									dot.rb_mut(),
+									B01.rb_mut(),
+									B11.rb_mut().try_as_col_major_mut().unwrap(),
+									A10.try_as_col_major().unwrap(),
+									B10.rb().try_as_col_major().unwrap(),
+									l.copy(),
+									tau_inv.copy(),
+									simd_align(k + 1),
+								);
+							},
+		#[cfg(feature = "rayon")]
+							_ => {
+							let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
+								let nthreads = nthreads.get();
+								use rayon::prelude::*;
+								crate::utils::thread::for_each(par, 
+									nthreads,
+									norm.par_partition_mut(nthreads)
+										.zip(dot.par_partition_mut(nthreads))
+										.zip(B01.par_partition_mut(nthreads))
+										.zip(B11.par_col_partition_mut(nthreads)),
+									|(((norm, dot), B01), B11)| {
+										update_mat_and_dot_simd(
+											norm,
+											dot,
+											B01,
+											B11.try_as_col_major_mut().unwrap(),
+											A10.try_as_col_major().unwrap(),
+											B10.rb().try_as_col_major().unwrap(),
+											l.copy(),
+											tau_inv.copy(),
+											simd_align(k + 1),
+										);
+									},
+								);
+							},
+						}
+					});
 				} else {
 					dot.copy_from(B01.rb());
-					linalg::matmul::matmul(
-						dot.rb_mut(),
-						Accum::Add,
-						B10.rb().adjoint(),
-						B11.rb(),
-						one(),
-						par.reborrow(),
-					);
+					with_width(par.reborrow(), width, |par| {
+						linalg::matmul::matmul(
+							dot.rb_mut(),
+							Accum::Add,
+							B10.rb().adjoint(),
+							B11.rb(),
+							one(),
+							par,
+						);
+					});
 					zip!(B01.rb_mut(), dot.rb_mut(), norm.rb_mut()).for_each(
 						|unzip!(a, dot, norm)| {
 							*dot = -dot.mul_real(tau_inv);
@@ -377,6 +389,10 @@ pub fn qr_in_place<'out, I: Index, T: ComplexField>(
 	// copy's, so the factor, the `tau` matrix and the permutations are the
 	// column-major ones.
 	let mut A = A;
+	// `Never` keeps the whole call sequential, the compact-factor upgrade included
+	if matches!(params.config.par_threshold, ParThreshold::Never) {
+		par = Par::Seq;
+	}
 	if A.row_stride().unsigned_abs() != 1
 		&& A.nrows() > 1
 		&& A.ncols() > 1

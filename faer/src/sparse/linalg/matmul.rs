@@ -112,15 +112,15 @@ pub fn sparse_sparse_matmul_numeric<
 	unsafe impl<T> Sync for SyncWrapper<T> {}
 	unsafe impl<T> Send for SyncWrapper<T> {}
 	let c_values = SyncWrapper(&*UnsafeCell::from_mut(c_values));
-	// one section over the column ranges; the work is the symbolic flop count, which is already
-	// known. The workspace keeps one column per thread of `par` either way.
-	let parallel = crate::utils::cost::par_pays::<T>(
+	// one section over the column ranges, at the widest width that pays; the work is the
+	// symbolic flop count, which is already known. The workspace keeps one column per thread of
+	// `par` either way.
+	let nthreads = crate::utils::cost::par_width::<T>(
 		&par,
 		total_flop_count as usize,
 		crate::utils::cost::rate::sparse_matmul(),
 		1,
 	);
-	let nthreads = if parallel { par.degree() } else { 1 };
 	let job = &|tid: usize| {
 		assert!(tid < nthreads);
 		fn partition_fn(
@@ -170,26 +170,22 @@ pub fn sparse_sparse_matmul_numeric<
 			}
 		}
 	};
-	match par {
-		Par::Seq => {
-			job(0);
-		},
-	#[cfg(feature = "rayon")]
-		_ if !parallel => {
-			job(0);
-		},
-	#[cfg(feature = "rayon")]
-		_ => {
-		let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
-			use rayon::prelude::*;
-			crate::utils::thread::for_each(
-				par,
-				nthreads.get(),
-				(0..nthreads.get()).into_par_iter(),
-				|tid| job(tid),
-			);
-		},
+	if nthreads < 2 {
+		job(0);
+		return;
 	}
+	#[cfg(feature = "rayon")]
+	crate::utils::thread::with_width(par, nthreads, |par| {
+		use rayon::prelude::*;
+		crate::utils::thread::for_each(
+			par,
+			nthreads,
+			(0..nthreads).into_par_iter(),
+			|tid| job(tid),
+		);
+	});
+	#[cfg(not(feature = "rayon"))]
+	unreachable!("no parallel route in this build");
 }
 
 /// performs a numeric matrix multiplication of a sparse matrix `lhs` by a

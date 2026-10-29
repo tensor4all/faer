@@ -2,6 +2,7 @@ use crate::assert;
 use crate::internal_prelude::*;
 use linalg::householder::*;
 use crate::utils::cost::{ParThreshold, rate};
+use crate::utils::thread::with_width;
 use linalg::matmul::{dot, matmul};
 
 /// width of one blocked panel: `BLOCK_SIZE` columns and rows are reduced with level-2 work
@@ -99,6 +100,10 @@ pub fn bidiag_in_place<T: ComplexField>(
 	let mut Hl = H_left;
 	let mut Hr = H_right;
 	let mut par = par;
+	// `Never` keeps the whole call sequential, the compact-factor upgrades included
+	if matches!(params.par_threshold, ParThreshold::Never) {
+		par = Par::Seq;
+	}
 	// blocked phase: whole panels while the remaining dimension clears the floor. its regions are
 	// two vector products per step and one update per panel, and they run fastest when the caller
 	// holds a team around the call (see the crate docs): spinning members that keep their column
@@ -196,27 +201,23 @@ fn bidiag_blocked_phase<T: ComplexField>(
 	let mut w = w.as_mat_mut();
 	let mut p = 0;
 	while size - p > BLOCK_FLOOR {
-		// the decision is made on the full remaining area, never latched by a panel
-		let par = if par_threshold.region_pays::<T>(
-			par.shape(),
-			(m - p) * (n - p),
-			rate::bidiag(),
-			2,
-		) {
-			par.reborrow()
-		} else {
-			Par::Seq
-		};
-		bidiag_blocked_panel(
-			A.rb_mut().get_mut(p.., p..),
-			Hl.rb_mut().get_mut(p..p + BLOCK_SIZE),
-			Hr.rb_mut().get_mut(p..p + BLOCK_SIZE),
-			X.rb_mut().get_mut(p.., ..),
-			Y.rb_mut().get_mut(p.., ..),
-			de.rb_mut(),
-			w.rb_mut().col_mut(0).get_mut(p..),
-			par,
-		);
+		// the decision is made on the full remaining area, never latched by a panel. It is the
+		// floor of the panel only: the panel's own products choose their widths, so a paying
+		// panel keeps the whole `par` rather than capping them at this estimate's width
+		let width = par_threshold.region_width::<T>(&par, (m - p) * (n - p), rate::bidiag(), 2);
+		let width = if width > 1 { par.degree() } else { 1 };
+		with_width(par.reborrow(), width, |par| {
+			bidiag_blocked_panel(
+				A.rb_mut().get_mut(p.., p..),
+				Hl.rb_mut().get_mut(p..p + BLOCK_SIZE),
+				Hr.rb_mut().get_mut(p..p + BLOCK_SIZE),
+				X.rb_mut().get_mut(p.., ..),
+				Y.rb_mut().get_mut(p.., ..),
+				de.rb_mut(),
+				w.rb_mut().col_mut(0).get_mut(p..),
+				par,
+			);
+		});
 		p += BLOCK_SIZE;
 	}
 	p
@@ -512,6 +513,10 @@ fn bidiag_unblocked<T: ComplexField>(
 	let mut Hl = Hl;
 	let mut Hr = Hr;
 	let mut par = par;
+	// `Never` keeps the whole call sequential (the steps decide their own width otherwise)
+	if matches!(par_threshold, ParThreshold::Never) {
+		par = Par::Seq;
+	}
 	let mut w = w0.rb_mut();
 	let mut wp = w1.rb_mut();
 	for k in 0..size {
@@ -548,62 +553,60 @@ fn bidiag_unblocked<T: ComplexField>(
 			make_householder_in_place(a11, A21.rb_mut());
 		let ref tl_inv = tl.recip();
 		Hl[k] = tl.to_cplx();
-		if !par_threshold.region_pays::<T>(
-			par.shape(),
-			(m - k - 1) * (n - k - 1),
-			rate::bidiag(),
-			2,
-		) {
-			par = Par::Seq;
-		}
+		// the step's two products run at the widest width that pays, decided per step
+		let width = par_threshold.region_width::<T>(&par, (m - k - 1) * (n - k - 1), rate::bidiag(), 2);
 		if k > 0 {
 			let k1 = k - 1;
 			let up = A20.rb().col(k1);
-			match par.reborrow() {
-				Par::Seq => bidiag_fused_op(
-					A22.rb_mut(),
-					A21.rb(),
-					up.rb(),
-					z2.rb(),
-					y2.rb_mut(),
-					vp,
-					simd_align(row_offset + k + 1),
-				),
-	#[cfg(feature = "rayon")]
-				_ => {
-					use rayon::prelude::*;
-					let nthreads =
-						core::num::NonZeroUsize::new(par.degree()).unwrap().get();
-					crate::utils::thread::for_each(
-						par.reborrow(),
-						nthreads,
-						A22.rb_mut()
-							.par_col_partition_mut(nthreads)
-							.zip_eq(y2.rb_mut().par_partition_mut(nthreads))
-							.zip_eq(vp.par_partition(nthreads)),
-						|((A22, y2), vp)| {
-							bidiag_fused_op(
-								A22,
-								A21.rb(),
-								up.rb(),
-								z2.rb(),
-								y2,
-								vp.rb(),
-								simd_align(row_offset + k + 1),
-							);
-						},
-					);
-				},
-			}
+			with_width(par.reborrow(), width, |mut par| {
+				match par.reborrow() {
+					Par::Seq => bidiag_fused_op(
+						A22.rb_mut(),
+						A21.rb(),
+						up.rb(),
+						z2.rb(),
+						y2.rb_mut(),
+						vp,
+						simd_align(row_offset + k + 1),
+					),
+		#[cfg(feature = "rayon")]
+					_ => {
+						use rayon::prelude::*;
+						let nthreads =
+							core::num::NonZeroUsize::new(par.degree()).unwrap().get();
+						crate::utils::thread::for_each(
+							par.reborrow(),
+							nthreads,
+							A22.rb_mut()
+								.par_col_partition_mut(nthreads)
+								.zip_eq(y2.rb_mut().par_partition_mut(nthreads))
+								.zip_eq(vp.par_partition(nthreads)),
+							|((A22, y2), vp)| {
+								bidiag_fused_op(
+									A22,
+									A21.rb(),
+									up.rb(),
+									z2.rb(),
+									y2,
+									vp.rb(),
+									simd_align(row_offset + k + 1),
+								);
+							},
+						);
+					},
+				}
+			});
 		} else {
-			matmul(
-				y2.rb_mut(),
-				Accum::Replace,
-				A21.rb().adjoint(),
-				A22.rb(),
-				one(),
-				par.reborrow(),
-			);
+			with_width(par.reborrow(), width, |par| {
+				matmul(
+					y2.rb_mut(),
+					Accum::Replace,
+					A21.rb().adjoint(),
+					A22.rb(),
+					one(),
+					par,
+				);
+			});
 		}
 		z!(y2.rb_mut(), wk.rb_mut()).for_each(|uz!(y, a)| {
 			*y = (&*y + &*a).mul_real(tl_inv);
@@ -623,14 +626,16 @@ fn bidiag_unblocked<T: ComplexField>(
 			};
 			z!(wk.rb_mut()).for_each(|uz!(a)| *a = a.mul_real(norm_inv));
 		}
-		matmul(
-			z2.rb_mut(),
-			Accum::Replace,
-			A22.rb(),
-			wk.rb().adjoint(),
-			one(),
-			par.reborrow(),
-		);
+		with_width(par.reborrow(), width, |par| {
+			matmul(
+				z2.rb_mut(),
+				Accum::Replace,
+				A22.rb(),
+				wk.rb().adjoint(),
+				one(),
+				par,
+			);
+		});
 		if k + 1 == size {
 			A12.copy_from(wk.rb());
 			break;

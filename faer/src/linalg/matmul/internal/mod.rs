@@ -78,17 +78,8 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 	let team_gate_pending = matches!(&par, Par::Team(_)) && par.degree() >= 2;
 	#[cfg(not(feature = "threadteam"))]
 	let team_gate_pending = false;
-	let mut par = if team_gate_pending
-		|| crate::utils::cost::par_pays::<T>(
-			&par,
-			units,
-			crate::utils::cost::rate::gemm_mac(),
-			1,
-		) {
-		par
-	} else {
-		Par::Seq
-	};
+	// a token that is not a team is sequential: nothing to decide before the kernel
+	let mut par = par;
 	if let Some(row_idx) = row_idx {
 		for &i in row_idx {
 			assert!(i.zx() < C.nrows());
@@ -303,15 +294,23 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 			return;
 		}
 	}
-	// no kernel for a team here: the one-section gate of the generic path
-	if team_gate_pending
-		&& !crate::utils::cost::par_pays::<T>(
+	// no kernel for a team here: the one-section gate of the generic path, at the widest width
+	// that pays; a narrower width reruns the call on a sub-team of that width, where the same
+	// decision then takes the whole sub-team
+	if team_gate_pending {
+		let width = crate::utils::cost::par_width::<T>(
 			&par,
 			units,
 			crate::utils::cost::rate::gemm_mac(),
 			1,
-		) {
-		par = Par::Seq;
+		);
+		if width < par.degree() {
+			return crate::utils::thread::with_width(par, width, |par| {
+				spicy_matmul(
+					C, C_block, row_idx, col_idx, beta, A, conj_A, B, conj_B, D, alpha, par, stack,
+				)
+			});
+		}
 	}
 	let (mut out, stack) = unsafe {
 		temp_mat_uninit::<T, _, _>(

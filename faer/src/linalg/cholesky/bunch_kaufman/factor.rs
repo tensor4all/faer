@@ -1,5 +1,6 @@
 use crate::internal_prelude::*;
 use crate::utils::cost::{ParThreshold, rate};
+use crate::utils::thread::with_width;
 use crate::{assert, perm};
 use linalg::matmul::triangular::BlockStructure;
 const TOP_BIT: usize = 1 << (usize::BITS - 1);
@@ -280,6 +281,10 @@ fn lblt_full_piv<T: ComplexField>(
 	let mut A = A;
 	let mut subdiag = subdiag.column_vector_mut();
 	let mut par = par;
+	// `Never` keeps the whole call sequential (the steps decide their own width otherwise)
+	if matches!(params.par_threshold, ParThreshold::Never) {
+		par = Par::Seq;
+	}
 	let n = A.nrows();
 	let scale_fwd = &A.norm_max();
 	let scale_bwd = &scale_fwd.recip();
@@ -331,14 +336,8 @@ fn lblt_full_piv<T: ComplexField>(
 		let rem = n - npiv;
 		// One section per step (the rank-1 or rank-2 update fused with the pivot search);
 		// the unit is an element of the trailing block.
-		if !params.par_threshold.region_pays::<T>(
-			par.shape(),
-			rem * rem,
-			rate::bunch_kaufman(),
-			1,
-		) {
-			par = Par::Seq;
-		}
+		// The step runs at the widest width that pays.
+		let width = params.par_threshold.region_width::<T>(&par, rem * rem, rate::bunch_kaufman(), 1);
 		if i0 != 0 {
 			swap_self_adjoint(A.rb_mut(), 0, i0);
 			perm::swap_rows_idx(Aprev.rb_mut(), 0, i0);
@@ -359,8 +358,9 @@ fn lblt_full_piv<T: ComplexField>(
 				A[(i, i)] = (A[(i, i)].real() - &diag * L[i].abs2()).to_cplx();
 			}
 			if n != 0 {
-				(max_i, max_j, max_offdiag) =
-					rank_1_update_and_argmax(A.rb_mut(), L.rb(), diag, par.reborrow());
+				(max_i, max_j, max_offdiag) = with_width(par.reborrow(), width, |par| {
+					rank_1_update_and_argmax(A.rb_mut(), L.rb(), diag, par)
+				});
 			}
 		} else {
 			let a00 = A[(0, 0)].real();
@@ -380,16 +380,18 @@ fn lblt_full_piv<T: ComplexField>(
 			let (mut L0, mut L1) = L.two_cols_mut(0, 1);
 			let n = A.nrows();
 			if n != 0 {
-				(max_i, max_j, max_offdiag) = rank_2_update_and_argmax(
-					A.rb_mut(),
-					L0.rb(),
-					L1.rb(),
-					d.copy(),
-					d00.copy(),
-					d11.copy(),
-					d10.copy(),
-					par.reborrow(),
-				);
+				(max_i, max_j, max_offdiag) = with_width(par.reborrow(), width, |par| {
+					rank_2_update_and_argmax(
+						A.rb_mut(),
+						L0.rb(),
+						L1.rb(),
+						d.copy(),
+						d00.copy(),
+						d11.copy(),
+						d10.copy(),
+						par,
+					)
+				});
 			}
 			for j in 0..n {
 				let x0 = &L0[j].copy();
@@ -761,35 +763,45 @@ fn lblt_blocked<T: ComplexField>(
 		let pivots = &pivots[k..next];
 		let A_left = A.rb_mut().get_mut(.., ..k);
 		if A_left.ncols() > 0 {
-			match par {
-				Par::Seq => {
-					for mut col in A_left.col_iter_mut() {
-						for (i, &j) in core::iter::zip(k..next, pivots) {
-							let j = j & !TOP_BIT;
-							linalg::lu::partial_pivoting::factor::swap_elems(
-								col.rb_mut(),
-								i,
-								j,
-							);
-						}
-					}
-				},
-	#[cfg(feature = "rayon")]
-				_ => {
-				let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
-					let nthreads = nthreads.get();
-					crate::utils::thread::for_each(par.reborrow(), 
-						nthreads,
-						A_left.par_col_iter_mut(),
-						|mut col| {
+			// one section over the columns left of the block, at the widest width that pays for
+			// its row swaps (it was split over the whole degree, whatever its size)
+			let width = crate::utils::cost::par_width::<T>(
+				&par,
+				A_left.ncols().saturating_mul(next - k),
+				rate::lu_swap(),
+				1,
+			);
+			with_width(par.reborrow(), width, |par| {
+				match par {
+					Par::Seq => {
+						for mut col in A_left.col_iter_mut() {
 							for (i, &j) in core::iter::zip(k..next, pivots) {
 								let j = j & !TOP_BIT;
-								linalg::lu::partial_pivoting::factor::swap_elems(col.rb_mut(), i, j);
+								linalg::lu::partial_pivoting::factor::swap_elems(
+									col.rb_mut(),
+									i,
+									j,
+								);
 							}
-						},
-					);
-				},
-			}
+						}
+					},
+		#[cfg(feature = "rayon")]
+					_ => {
+					let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
+						let nthreads = nthreads.get();
+						crate::utils::thread::for_each(par, 
+							nthreads,
+							A_left.par_col_iter_mut(),
+							|mut col| {
+								for (i, &j) in core::iter::zip(k..next, pivots) {
+									let j = j & !TOP_BIT;
+									linalg::lu::partial_pivoting::factor::swap_elems(col.rb_mut(), i, j);
+								}
+							},
+						);
+					},
+				}
+			});
 		}
 		k = next;
 	}

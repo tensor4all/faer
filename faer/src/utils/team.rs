@@ -120,13 +120,17 @@ pub mod stats {
 	pub(super) static RUN: [AtomicUsize; W] = [Z; W];
 	/// splits and forks by number of parts (index 1 = ran inline on the caller)
 	pub(super) static SPLIT: [AtomicUsize; W] = [Z; W];
+	/// bins of [`WIDTH`]: one per width up to 256 (the last bin collects anything wider)
+	const WW: usize = 257;
+	/// regions narrowed to a sub-team, by width (`thread::with_width` and the x86 kernel's fork)
+	pub(super) static WIDTH: [AtomicUsize; WW] = [Z; WW];
 	pub(super) static GEMM_BELOW_FLOOR: AtomicUsize = AtomicUsize::new(0);
 	pub(super) static GEMM_ONE_TILE: AtomicUsize = AtomicUsize::new(0);
 	pub(super) static GEMM_TILED: AtomicUsize = AtomicUsize::new(0);
 	pub(super) static GEMM_TEAM_KERNEL: AtomicUsize = AtomicUsize::new(0);
-	pub(super) fn hist(h: &[AtomicUsize; W], n: usize) {
+	pub(super) fn hist<const N: usize>(h: &[AtomicUsize; N], n: usize) {
 		if ON.load(Relaxed) {
-			h[n.min(W - 1)].fetch_add(1, Relaxed);
+			h[n.min(N - 1)].fetch_add(1, Relaxed);
 		}
 	}
 	pub(super) fn bump(c: &AtomicUsize) {
@@ -141,6 +145,8 @@ pub mod stats {
 		pub run: Vec<usize>,
 		/// splits and forks, index = parts
 		pub split: Vec<usize>,
+		/// regions narrowed to a sub-team, index = its width (up to 256)
+		pub width: Vec<usize>,
 		/// GEMM calls decided sequential by the work floor
 		pub gemm_below_floor: usize,
 		/// GEMM calls whose tile grid had a single tile
@@ -157,16 +163,24 @@ pub mod stats {
 	}
 	/// Returns and resets the counters.
 	pub fn take() -> Stats {
-		let t = |h: &[AtomicUsize; W]| h.iter().map(|c| c.swap(0, Relaxed)).collect();
+		fn t<const N: usize>(h: &[AtomicUsize; N]) -> Vec<usize> {
+			h.iter().map(|c| c.swap(0, Relaxed)).collect()
+		}
 		Stats {
 			run: t(&RUN),
 			split: t(&SPLIT),
+			width: t(&WIDTH),
 			gemm_below_floor: GEMM_BELOW_FLOOR.swap(0, Relaxed),
 			gemm_one_tile: GEMM_ONE_TILE.swap(0, Relaxed),
 			gemm_tiled: GEMM_TILED.swap(0, Relaxed),
 			gemm_team_kernel: GEMM_TEAM_KERNEL.swap(0, Relaxed),
 		}
 	}
+}
+
+/// Records a region narrowed to a sub-team of `width` (probes only).
+pub(crate) fn note_width(width: usize) {
+	stats::hist(&stats::WIDTH, width);
 }
 
 /// Records a split of the team into `parts` concurrent children (probes only).
@@ -375,27 +389,15 @@ pub(crate) mod kernel {
 
 	/// The width at which `team` runs a product of serial time `estimate` through the kernel, or
 	/// `None` (run sequentially on the caller) when no width pays. The kernel forks twice per
-	/// call (packing, then compute), so the gate is `pays(estimate, 2, width)` at the width
-	/// `width_for` chooses.
+	/// call (packing, then compute): the widest width at which two sections pay.
 	pub(crate) fn kernel_width(team: &TeamExec<'_>, estimate: Duration) -> Option<usize> {
-		// the cheap rejection first: a product that does not pay at the cheapest width of the table
-		// pays nowhere (whatever the shape of the table), so `width_for` need not search (a QR 128
-		// asks for every product of its 59 block applies)
-		if !crate::utils::cost::par_can_pay_time_team(team, estimate, 2) {
-			stats::bump(&stats::GEMM_BELOW_FLOOR);
-			return None;
-		}
-		// the widest width that pays, on the cost the shapes read, searched from the full width
-		// down: a measured row can fall with the width (aarch64-apple's team row is 3.0, 2.3,
-		// 1.4 us at widths 2, 4, 6), so a narrow width that does not pay says nothing about a wide one
-		let size = team.size().get();
-		let best = (2..=size).rev().find(|&w| crate::utils::cost::pays_at(estimate, 2, team.dispatch_cost(core::num::NonZeroUsize::new(w).unwrap())));
-		match best {
-			Some(width) => Some(width),
-			None => {
+		// the widest width that pays, the rule of every region (`cost::par_width_time`)
+		match crate::utils::cost::par_width_team(team, estimate, 2, usize::MAX) {
+			1 => {
 				stats::bump(&stats::GEMM_BELOW_FLOOR);
 				None
 			},
+			width => Some(width),
 		}
 	}
 
@@ -405,6 +407,9 @@ pub(crate) mod kernel {
 		stats::bump(&stats::GEMM_TEAM_KERNEL);
 		let size = team.size().get();
 		let width = width.clamp(1, size);
+		if width < size {
+			super::note_width(width);
+		}
 		if width == size {
 			return f(&TeamFork { team: RefCell::new(team), width });
 		}
@@ -579,18 +584,12 @@ pub(crate) unsafe fn gemm_tiled<E: 'static + Copy + Send + Sync>(
 			gemm::Parallelism::None,
 		)
 	};
-	let nt = team.size().get();
 	// The floor is time, not a count: the serial time of the product (its MACs at the dtype's
-	// rate) against `PAYS` times the cost of one section of this team. A complex MAC is 4.5
-	// real ones, so the floor of a complex product is that much lower in MACs.
+	// rate) against `PAYS` times the cost of one section, at the widest width that pays. A
+	// complex MAC is 4.5 real ones, so the floor of a complex product is that much lower in MACs.
 	let estimate = crate::utils::cost::serial_time(m.saturating_mul(n).saturating_mul(k), ns_per_mac);
-	if nt <= 1
-		|| !crate::utils::cost::pays_at(
-			estimate,
-			1,
-			team.dispatch_cost(core::num::NonZeroUsize::new(nt).unwrap()),
-		)
-	{
+	let nt = crate::utils::cost::par_width_team(&team, estimate, 1, usize::MAX);
+	if nt <= 1 {
 		stats::bump(&stats::GEMM_BELOW_FLOOR);
 		return seq(dst, lhs, rhs, m, n);
 	}
@@ -598,6 +597,17 @@ pub(crate) unsafe fn gemm_tiled<E: 'static + Copy + Send + Sync>(
 	if pm * pn <= 1 {
 		stats::bump(&stats::GEMM_ONE_TILE);
 		return seq(dst, lhs, rhs, m, n);
+	}
+	// the section runs on `pm * pn` participants, which the grid can leave below `nt`: that width
+	// must pay as well (a row need not be monotone)
+	if pm * pn < nt
+		&& !crate::utils::cost::pays_at(estimate, 1, team.dispatch_cost(core::num::NonZeroUsize::new(pm * pn).unwrap()))
+	{
+		stats::bump(&stats::GEMM_BELOW_FLOOR);
+		return seq(dst, lhs, rhs, m, n);
+	}
+	if pm * pn < team.size().get() {
+		note_width(pm * pn);
 	}
 	stats::bump(&stats::GEMM_TILED);
 	let (dst, lhs, rhs) = (
@@ -630,6 +640,7 @@ mod tests {
 	use crate::{c64, Accum, Mat, MatRef, Par};
 	use core::sync::atomic::{AtomicUsize, Ordering};
 	use threadteam::Pool;
+	use core::time::Duration as StdDuration;
 
 	fn team_of(width: usize) -> threadteam::Team {
 		Pool::builder()
@@ -761,6 +772,296 @@ mod tests {
 		})
 		.ok()
 		.expect("a team token");
+	}
+
+	/// A team of `width` whose dispatch cost row is `anchors` (widths in increasing order).
+	fn with_row<R>(width: usize, anchors: &[(usize, StdDuration)], f: impl FnOnce(Par<'_>) -> R) -> R {
+		use threadteam::{DispatchCosts, DispatchKind, WidthCosts};
+		let _turn = team_turn();
+		let costs = DispatchCosts::for_class(threadteam::HostClass::Generic)
+			.with(DispatchKind::Team, WidthCosts::from_anchors(anchors).expect("a valid row"));
+		let team = Pool::builder()
+			.threads(width)
+			.acquire_timeout(std::time::Duration::from_secs(30))
+			.dispatch_costs(costs)
+			.build()
+			.unwrap()
+			.into_team(width)
+			.expect("an idle pool");
+		let mut exec = team.exec(width);
+		exec.team(|team| f(Par::Team(team))).ok().expect("a team token")
+	}
+
+	/// The width of a region is the widest that pays, every width considered: on a row that
+	/// rises past 4 the region stops at 4, on a row that falls it takes a width past one that
+	/// does not pay, and a cap below the degree searches inside the cap.
+	#[test]
+	fn par_width_takes_the_widest_width_that_pays() {
+		use crate::utils::cost::{par_width_time, par_width_time_upto};
+		let us = StdDuration::from_micros;
+		// 1 us at 2 and 4, 100 us at 8: 6 us of work pays for one section at 4 (3 * 2 us) but not
+		// at 5 to 8 (interpolated 26.5 us and up)
+		with_row(8, &[(2, us(1)), (4, us(2)), (8, us(100))], |par| {
+			assert_eq!(par_width_time(&par, us(6), 1), 4);
+			// 5 us pays at 3 (interpolated 1.5 us) but not at 4
+			assert_eq!(par_width_time(&par, us(5), 1), 3);
+			assert_eq!(par_width_time(&par, us(2), 1), 1);
+			assert_eq!(par_width_time(&par, us(2000), 1), 8);
+		});
+		// a falling row: 9 us at 4, 1 us at 6 and 8; 3 us pays at 8 only, 9 us at 2 inside a cap of 5
+		with_row(8, &[(2, us(3)), (4, us(9)), (6, us(1)), (8, us(1))], |par| {
+			assert_eq!(par_width_time(&par, us(3), 1), 8);
+			assert_eq!(par_width_time_upto(&par, us(3), 1, 5), 1);
+			assert_eq!(par_width_time_upto(&par, us(9), 1, 5), 2);
+		});
+		assert_eq!(par_width_time(&Par::Seq, us(1_000_000), 1), 1);
+	}
+
+	/// `with_width` hands the region a sub-team of exactly that width, the whole token at its
+	/// degree or more, and `Seq` below two, and the parent keeps its width afterwards.
+	#[test]
+	fn with_width_runs_on_a_sub_team_of_that_width() {
+		use crate::utils::thread::with_width;
+		with_par(8, |mut par| {
+			stats::enable(true);
+			let _ = stats::take();
+			for (w, want) in [(3, 3), (8, 8), (9, 8), (1, 1), (0, 1)] {
+				let seen = AtomicUsize::new(0);
+				let degree = with_width(par.reborrow(), w, |par| {
+					let degree = par.degree();
+					if let Par::Team(team) = par {
+						team.run(|_, _| {
+							seen.fetch_add(1, Ordering::Relaxed);
+						});
+					}
+					degree
+				});
+				assert_eq!(degree, want, "width {w}");
+				if want > 1 {
+					assert_eq!(seen.load(Ordering::Relaxed), want, "width {w}");
+				}
+			}
+			assert_eq!(par.degree(), 8);
+			stats::enable(false);
+			let s = stats::take();
+			// only the narrowing to 3 is a sub-team; 8 and 9 are the token itself
+			assert_eq!(s.width[3], 1, "{s:?}");
+			assert_eq!(s.width.iter().sum::<usize>(), 1, "{s:?}");
+		});
+	}
+
+	/// Every converted family on a team of 8 whose row makes width 4 the widest that pays: the
+	/// regions narrow to 4 (counted) and the results equal the sequential ones.
+	#[test]
+	fn the_families_narrow_their_regions_and_match_sequential() {
+		use crate::dyn_stack::{MemBuffer, MemStack};
+		use crate::linalg;
+		let ns = StdDuration::from_nanos;
+		// cheap up to 4, prohibitive from 5 on
+		let row = [(2, ns(10)), (4, ns(10)), (5, StdDuration::from_secs(1))];
+		let tol = |a: MatRef<'_, f64>, b: MatRef<'_, f64>, what: &str| {
+			let scale = (0..a.ncols()).flat_map(|j| (0..a.nrows()).map(move |i| (i, j))).fold(1.0f64, |m, (i, j)| m.max(a[(i, j)].abs()));
+			let d = max_diff(a, b);
+			assert!(d <= 1e-10 * scale, "{what}: {d} against {scale}");
+		};
+		type Run = fn(Par<'_>) -> Vec<Mat<f64>>;
+		let families: [(&str, Run); 14] = [
+			("full pivoting lu", |par| {
+				let n = 200;
+				let mut a = rand_mat(n, n, 11);
+				let (mut p, mut pi, mut q, mut qi) = (vec![0usize; n], vec![0usize; n], vec![0usize; n], vec![0usize; n]);
+				let req = linalg::lu::full_pivoting::factor::lu_in_place_scratch::<usize, f64>(n, n, par.shape(), Default::default());
+				linalg::lu::full_pivoting::factor::lu_in_place(a.as_mut(), &mut p, &mut pi, &mut q, &mut qi, par, MemStack::new(&mut MemBuffer::new(req)), Default::default());
+				vec![a]
+			}),
+			("partial pivoting lu", |par| {
+				let n = 400;
+				let mut a = rand_mat(n, n, 12);
+				let (mut p, mut pi) = (vec![0usize; n], vec![0usize; n]);
+				let req = linalg::lu::partial_pivoting::factor::lu_in_place_scratch::<usize, f64>(n, n, par.shape(), Default::default());
+				linalg::lu::partial_pivoting::factor::lu_in_place(a.as_mut(), &mut p, &mut pi, par, MemStack::new(&mut MemBuffer::new(req)), Default::default());
+				vec![a]
+			}),
+			("column pivoting qr", |par| {
+				let n = 200;
+				let mut a = rand_mat(n, n, 13);
+				let bs = linalg::qr::no_pivoting::factor::recommended_block_size::<f64>(n, n);
+				let mut h = Mat::<f64>::zeros(bs, n);
+				let (mut q, mut qi) = (vec![0usize; n], vec![0usize; n]);
+				let req = linalg::qr::col_pivoting::factor::qr_in_place_scratch::<usize, f64>(n, n, bs, par.shape(), Default::default());
+				linalg::qr::col_pivoting::factor::qr_in_place(a.as_mut(), h.as_mut(), &mut q, &mut qi, par, MemStack::new(&mut MemBuffer::new(req)), Default::default());
+				vec![a, h]
+			}),
+			("hessenberg", |par| {
+				let n = 160;
+				let mut a = rand_mat(n, n, 14);
+				let bs = 8;
+				let mut h = Mat::<f64>::zeros(bs, n - 1);
+				let req = linalg::evd::hessenberg::hessenberg_in_place_scratch::<f64>(n, bs, par.shape(), Default::default());
+				linalg::evd::hessenberg::hessenberg_in_place(a.as_mut(), h.as_mut(), par, MemStack::new(&mut MemBuffer::new(req)), Default::default());
+				vec![a, h]
+			}),
+			("tridiagonalization", |par| {
+				let n = 200;
+				let x = rand_mat(n, n, 15);
+				let mut a = &x + x.transpose();
+				let bs = 8;
+				let mut h = Mat::<f64>::zeros(bs, n - 1);
+				let req = linalg::evd::tridiag::tridiag_in_place_scratch::<f64>(n, par.shape(), Default::default());
+				linalg::evd::tridiag::tridiag_in_place(a.as_mut(), h.as_mut(), par, MemStack::new(&mut MemBuffer::new(req)), Default::default());
+				vec![a, h]
+			}),
+			("bidiagonalization", |par| {
+				let (m, n) = (300, 200);
+				let mut a = rand_mat(m, n, 16);
+				let bs = 8;
+				let mut hl = Mat::<f64>::zeros(bs, n);
+				let mut hr = Mat::<f64>::zeros(bs, n - 1);
+				let req = linalg::svd::bidiag::bidiag_in_place_scratch::<f64>(m, n, par.shape(), Default::default());
+				linalg::svd::bidiag::bidiag_in_place(a.as_mut(), hl.as_mut(), hr.as_mut(), par, MemStack::new(&mut MemBuffer::new(req)), Default::default());
+				vec![a, hl, hr]
+			}),
+			("bunch kaufman, full pivoting", |par| {
+				use linalg::cholesky::lblt::factor::{LbltParams, PivotingStrategy};
+				let n = 200;
+				let x = rand_mat(n, n, 17);
+				let mut a = &x + x.transpose();
+				let mut sub = crate::diag::Diag::<f64>::zeros(n);
+				let (mut p, mut pi) = (vec![0usize; n], vec![0usize; n]);
+				let params = LbltParams {
+					pivoting: PivotingStrategy::Full,
+					..<LbltParams as crate::Auto<f64>>::auto()
+				};
+				let req = linalg::cholesky::lblt::factor::cholesky_in_place_scratch::<usize, f64>(n, par.shape(), params.into());
+				linalg::cholesky::lblt::factor::cholesky_in_place(a.as_mut(), sub.as_mut(), &mut p, &mut pi, par, MemStack::new(&mut MemBuffer::new(req)), params.into());
+				vec![a, sub.column_vector().as_mat().to_owned()]
+			}),
+			("triangular solve", |par| {
+				let (n, k) = (100, 512);
+				let l = rand_mat(n, n, 18) + Mat::<f64>::identity(n, n) * (n as f64);
+				let mut x = rand_mat(n, k, 19);
+				linalg::triangular_solve::solve_lower_triangular_in_place(l.as_ref(), x.as_mut(), par);
+				vec![x]
+			}),
+			("matvec, row split", |par| {
+				let a = rand_mat(1000, 1000, 20);
+				let v = rand_mat(1000, 1, 21);
+				let mut y = Mat::<f64>::zeros(1000, 1);
+				matmul(y.as_mut(), Accum::Replace, a.as_ref(), v.as_ref(), 1.0, par);
+				vec![y]
+			}),
+			("matvec, column split", |par| {
+				let a = rand_mat(1000, 1000, 22);
+				let v = rand_mat(1000, 1, 23);
+				let mut y = Mat::<f64>::zeros(1, 1000);
+				matmul(y.as_mut(), Accum::Replace, v.transpose(), a.as_ref(), 1.0, par);
+				vec![y]
+			}),
+			("block householder apply", |par| {
+				let (m, b, k) = (2000, 8, 256);
+				let basis = rand_mat(m, b, 24);
+				let factor = Mat::<f64>::from_fn(b, b, |i, j| if i == j { 1.5 } else if i < j { 0.1 } else { 0.0 });
+				let mut target = rand_mat(m, k, 25);
+				let req = linalg::householder::apply_block_householder_on_the_left_in_place_scratch::<f64>(m, b, k);
+				linalg::householder::apply_block_householder_on_the_left_in_place_with_conj(
+					basis.as_ref(), factor.as_ref(), crate::Conj::No, target.as_mut(), par, MemStack::new(&mut MemBuffer::new(req)),
+				);
+				vec![target]
+			}),
+			("householder factor upgrade", |par| {
+				let (rows, b) = (4000, 16);
+				let essentials = rand_mat(rows, b, 26);
+				let mut factor = Mat::<f64>::from_fn(b, b, |i, j| if i == j { 1.25 } else { 0.0 });
+				linalg::householder::upgrade_householder_factor(factor.as_mut(), essentials.as_ref(), b, 1, par);
+				vec![factor]
+			}),
+			("sparse product", |par| {
+				use crate::sparse::{SparseColMat, Triplet};
+				let n = 3000;
+				let triplets: Vec<_> = (0..n)
+					.flat_map(|j| (0..4).map(move |t| Triplet::new((j * 7 + t * 131) % n, j, ((j + t) as f64).sin())))
+					.collect();
+				let a = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).unwrap();
+				let c = crate::sparse::linalg::matmul::sparse_sparse_matmul(a.as_ref(), a.as_ref(), 1.0, par).unwrap();
+				vec![c.to_dense()]
+			}),
+			("tiled product (the non-x86 route)", |par| {
+				let (m, n, k) = (301, 263, 190);
+				let a = rand_mat(m, k, 27);
+				let b = rand_mat(k, n, 28);
+				let mut c = Mat::<f64>::zeros(m, n);
+				match par {
+					Par::Team(team) => unsafe {
+						gemm_tiled::<f64>(
+							team, m, n, k, 1.0, c.as_ptr_mut(), c.col_stride(), c.row_stride(), false,
+							a.as_ptr(), a.col_stride(), a.row_stride(), b.as_ptr(), b.col_stride(), b.row_stride(),
+							0.0, 1.0, false, false,
+						)
+					},
+					Par::Seq => matmul(c.as_mut(), Accum::Replace, a.as_ref(), b.as_ref(), 1.0, Par::Seq),
+				}
+				vec![c]
+			}),
+		];
+		for (name, run) in families {
+			let want = run(Par::Seq);
+			let (got, s) = with_row(8, &row, |par| {
+				stats::enable(true);
+				let _ = stats::take();
+				let got = run(par);
+				stats::enable(false);
+				(got, stats::take())
+			});
+			// narrowed to 4 somewhere, and never wider than 4 in a split
+			assert!(s.width[4] > 0, "{name}: no region narrowed to 4 ({s:?})");
+			// and the family's own region (a split or a flat section, not only the GEMM kernel's
+			// fork) ran on 4
+			assert!(s.split[4] + s.run[4] > 0, "{name}: no split or section of 4 ({s:?})");
+			assert!(s.split.iter().skip(5).all(|&c| c == 0), "{name}: a split wider than 4 ({s:?})");
+			for (k, (a, b)) in want.iter().zip(got.iter()).enumerate() {
+				tol(a.as_ref(), b.as_ref(), &alloc::format!("{name} output {k}"));
+			}
+		}
+	}
+
+	/// `Never` keeps the whole call sequential, the compact-factor upgrade after the steps included,
+	/// even where the upgrade's own gate would pay (a 33 x 9 column pivoting QR at block 9 and a
+	/// bidiagonalization, on a row that makes every width up to 4 cheap).
+	#[test]
+	fn never_reaches_the_compact_factor_upgrades() {
+		use crate::dyn_stack::{MemBuffer, MemStack};
+		use crate::linalg;
+		use crate::utils::cost::ParThreshold;
+		let ns = StdDuration::from_nanos;
+		let row = [(2, ns(10)), (4, ns(10)), (5, StdDuration::from_secs(1))];
+		let s = with_row(8, &row, |mut par| {
+			stats::enable(true);
+			let _ = stats::take();
+			{
+				use linalg::qr::col_pivoting::factor::*;
+				let (m, n) = (33, 9);
+				let mut a = rand_mat(m, n, 31);
+				let mut h = Mat::<f64>::zeros(n, n);
+				let (mut q, mut qi) = (vec![0usize; n], vec![0usize; n]);
+				let params = ColPivQrParams { par_threshold: ParThreshold::Never, ..<ColPivQrParams as crate::Auto<f64>>::auto() };
+				let req = qr_in_place_scratch::<usize, f64>(m, n, n, par.shape(), params.into());
+				qr_in_place(a.as_mut(), h.as_mut(), &mut q, &mut qi, par.reborrow(), MemStack::new(&mut MemBuffer::new(req)), params.into());
+			}
+			{
+				use linalg::svd::bidiag::*;
+				let (m, n) = (300, 200);
+				let mut a = rand_mat(m, n, 32);
+				let mut hl = Mat::<f64>::zeros(8, n);
+				let mut hr = Mat::<f64>::zeros(8, n - 1);
+				let params = BidiagParams { par_threshold: ParThreshold::Never, ..<BidiagParams as crate::Auto<f64>>::auto() };
+				let req = bidiag_in_place_scratch::<f64>(m, n, par.shape(), params.into());
+				bidiag_in_place(a.as_mut(), hl.as_mut(), hr.as_mut(), par, MemStack::new(&mut MemBuffer::new(req)), params.into());
+			}
+			stats::enable(false);
+			stats::take()
+		});
+		let parallel = s.run.iter().skip(2).sum::<usize>() + s.split.iter().skip(2).sum::<usize>() + s.gemm_tiled + s.gemm_team_kernel;
+		assert_eq!(parallel, 0, "{s:?}");
 	}
 
 	/// `par_pays_time` is `ParShape::pays` without the shape.
@@ -1124,7 +1425,7 @@ mod tests {
 	}
 	#[test]
 	fn a_team_of_one_behaves_exactly_like_seq() {
-		use crate::utils::cost::{par_pays, rate, ParThreshold};
+		use crate::utils::cost::{par_width, rate, ParThreshold};
 		// it reads the process-wide counters
 		let _turn = team_turn();
 		threadteam::Exec::serial()
@@ -1132,9 +1433,9 @@ mod tests {
 				let par = Par::Team(team);
 				assert_eq!(par.degree(), 1);
 				// no gate pays on a single participant, however large the work
-				assert!(!par_pays::<f64>(&par, 1 << 40, rate::gemm_mac(), 1));
+				assert_eq!(par_width::<f64>(&par, 1 << 40, rate::gemm_mac(), 1), 1);
 				assert!(!crate::utils::cost::join_pays::<f64>(&par, 1 << 40, rate::gemm_mac(), 1));
-				assert!(!ParThreshold::Derived.region_pays::<f64>(par.shape(), 1 << 40, rate::gemm_mac(), 1));
+				assert_eq!(ParThreshold::Derived.region_width::<f64>(&par, 1 << 40, rate::gemm_mac(), 1), 1);
 				// and the product equals the sequential one, with no team section at all
 				let a = rand_mat(200, 150, 1);
 				let b = rand_mat(150, 180, 2);
