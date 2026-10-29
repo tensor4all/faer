@@ -2,6 +2,7 @@
 name = "faer-macros"
 version = "0.22.1"
 edition = "2021"
+rust-version = "1.89.0"
 authors = ["sarah quiñones <sarah@veganb.tw>"]
 description = "linear algebra library"
 readme = "../README.md"

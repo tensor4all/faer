@@ -59,7 +59,8 @@ is unclear!
 
 # minimum supported rust version
 
-the current msrv is rust 1.84.0.
+the current msrv is rust 1.89.0 (`rust-version` in `faer/Cargo.toml`). Rust 1.89 is the first
+release with the AVX-512 target features stable, which the default `x86-v4` feature uses.
 
 # benchmarks
 
