@@ -1,3 +1,57 @@
+# t4a-faer 0.26.0 (tensor4all fork; with t4a-faer-traits 0.24.2)
+
+Changes since `t4a-faer` 0.25.2 (tag `faer-v0.25.2`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`.
+
+## Breaking: threadteam is the only parallel route (#97)
+
+`Par::Rayon(NonZeroUsize)`, `Par::rayon(nthreads)`, `ParShape::Rayon(NonZeroUsize)` and
+`ParShape::rayon(nthreads)` are removed, together with the spindle path and the Rayon cost model.
+`Par::Seq` and `Par::Team` remain. To migrate:
+
+- a one-off parallel call: `faer::team::with_team(n, |par| { /* faer calls with par */ })` replaces
+  `Par::rayon(n)`;
+- repeated parallel work: build a `threadteam::Pool` and `Team` once and lend `Par::Team(..)` to each
+  call, `par.reborrow()` for successive calls (see "parallelism" in `README.md`);
+- a workspace query: pass `par.shape()` (or `ParShape::Seq`) where `ParShape::rayon(n)` was used.
+
+A build without the `threadteam` feature has `Par::Seq` only.
+
+## New
+
+- `faer::linalg::matmul::matmul_with_conj_uninit` and `MatUninitMut`: a matrix product into
+  `MaybeUninit<T>` storage, returned as an initialized `MatMut`; prior contents are never read
+  (#136, requested upstream as sarah-quinones/faer-rs#269).
+
+## Correctness
+
+- Nonsymmetric EVD: the input is scaled into range as `?GEEV` does (#112); the eigenvector back
+  substitution clamps relative to the eigenvalue, so residuals no longer grow with n (#112); the real
+  Schur deflation-window sort always ends (#144); the 2 x 2 block solves of the real back
+  substitution follow `?LALN2` (#145).
+- SVD: the rotation path finishes when dqds does not converge (#110); a retained Ritz pair of the
+  partial SVD carries its residual estimate through the restart (#108).
+- LU: the full-pivoting search breaks ties by column then row, independent of the SIMD width (#105, #106).
+- Products with a diagonal read the depth in either direction (#113).
+- Sparse LU reports an exact zero pivot as `LuError::NumericSingular` in both backends (#132).
+- Krylov solvers: the final residual is reported on `NoConvergence`, and BiCGSTAB stops at the last
+  finite iterate after a breakdown (#133, #134).
+
+## Parallelism and performance
+
+- Every region runs at the widest width that pays, on a sub-team of that width (#91); the team
+  dispatch cost is read from threadteam (#104).
+- No heap allocation inside a parallel region (#111).
+- Layout copies split along the destination's major dimension, first touch in parallel (#99).
+- SVD: blocked bidiagonalization, dqds shift and a padded work copy (#52).
+
+## Dependencies and toolchain
+
+- `threadteam` 0.1.3 (#107 wait fix) and `t4a-private-gemm-x86` 0.1.27 (#113).
+- MSRV is Rust 1.89 (`rust-version = "1.89.0"` in both crates).
+- AVX-512 (`x86-v4`) no longer needs the nightly compiler but stays opt-in: enable the `x86-v4`
+  feature (`nightly` is kept as its old name).
+- `t4a-faer-traits` 0.24.2 only adds `rust-version`.
+
 # 0.24
 - add missing scratch space functions for matrix-free eigen/svd solvers
 - allow sparse-dense/dense-sparse matmuls to accept both CSC and CSR matrices
