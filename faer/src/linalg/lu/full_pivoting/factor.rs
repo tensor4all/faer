@@ -342,10 +342,13 @@ fn lu_in_place_unblocked<T: ComplexField>(
 	A: MatMut<'_, T>,
 	row_trans: &mut [usize],
 	col_trans: &mut [usize],
+	best: &mut [(usize, usize, T::Real)],
 	par: Par,
 	transpose: bool,
 	params: Spec<FullPivLuParams, T>,
 ) -> usize {
+	// the parallel arm is the only reader (absent without `rayon`)
+	let _ = &best;
 	let params = params.config;
 	let mut n_trans = 0;
 	let (m, n) = A.shape();
@@ -420,9 +423,9 @@ fn lu_in_place_unblocked<T: ComplexField>(
 				let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 					use rayon::prelude::*;
 					let nthreads = nthreads.get();
-					let mut best = core::iter::repeat_with(|| (0, 0, zero()))
-						.take(nthreads)
-						.collect::<alloc::vec::Vec<_>>();
+					// one entry per block, from the call's scratch (no allocation per step, #111); every
+					// entry is written by its block
+					let best = &mut best[..nthreads];
 					let full_cols = A11.ncols();
 					crate::utils::thread::for_each(par, 
 						nthreads,
@@ -447,11 +450,11 @@ fn lu_in_place_unblocked<T: ComplexField>(
 					max_row = 0;
 					max_col = 0;
 					max_score = zero();
-					for (row, col, val) in best {
-						if val > max_score {
-							max_row = row;
-							max_col = col;
-							max_score = val;
+					for (row, col, val) in best.iter() {
+						if *val > max_score {
+							max_row = *row;
+							max_col = *col;
+							max_score = val.copy();
 						}
 					}
 				},
@@ -488,10 +491,12 @@ pub fn lu_in_place_scratch<I: Index, T: ComplexField>(
 	par: ParShape,
 	params: Spec<FullPivLuParams, T>,
 ) -> StackReq {
-	_ = par;
 	_ = params;
 	let size = Ord::min(nrows, ncols);
-	StackReq::new::<usize>(size).array(2)
+	// the transpositions, and one pivot candidate per block of a parallel step
+	StackReq::new::<usize>(size)
+		.array(2)
+		.and(StackReq::new::<(usize, usize, T::Real)>(par.degree()))
 }
 #[derive(Copy, Clone, Debug)]
 pub struct FullPivLuInfo {
@@ -542,13 +547,16 @@ pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 	let size = Ord::min(M, N);
 	let (mut row_transpositions, stack) = stack.make_with(size, |_| 0);
 	let row_transpositions = row_transpositions.as_mut();
-	let (mut col_transpositions, _) = stack.make_with(size, |_| 0);
+	let (mut col_transpositions, stack) = stack.make_with(size, |_| 0);
 	let col_transpositions = col_transpositions.as_mut();
+	let (mut best, _) = stack.make_with(par.degree(), |_| (0usize, 0usize, zero::<T::Real>()));
+	let best = best.as_mut();
 	let n_transpositions = if mat.row_stride().abs() < mat.col_stride().abs() {
 		lu_in_place_unblocked(
 			mat,
 			row_transpositions,
 			col_transpositions,
+			best,
 			par,
 			false,
 			params,
@@ -558,6 +566,7 @@ pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 			mat.transpose_mut(),
 			col_transpositions,
 			row_transpositions,
+			best,
 			par,
 			true,
 			params,

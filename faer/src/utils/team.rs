@@ -12,7 +12,6 @@
 //! Nothing here starts a Rayon job: the team members are threadteam members that spin while the
 //! reservation is held, and the section dispatch is a write to their slots.
 
-use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use rayon::iter::plumbing::{Producer, ProducerCallback};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator};
@@ -207,25 +206,6 @@ pub(crate) fn run(team: TeamExec<'_>, n: usize, f: &(dyn Fn(usize, usize) + Sync
 	}
 }
 
-struct Slots<T>(Vec<UnsafeCell<Option<T>>>);
-// SAFETY: every slot is taken by exactly one participant.
-unsafe impl<T: Send> Sync for Slots<T> {}
-impl<T> Slots<T> {
-	/// # Safety
-	/// Slot `j` is taken by one participant only.
-	unsafe fn take(&self, j: usize) -> T {
-		unsafe { (*self.0[j].get()).take() }.unwrap()
-	}
-}
-
-struct Collect<'a, T>(&'a mut Vec<T>);
-impl<T: Send> ProducerCallback<T> for Collect<'_, T> {
-	type Output = ();
-	fn callback<P: Producer<Item = T>>(self, producer: P) {
-		self.0.extend(producer.into_iter());
-	}
-}
-
 /// A flat item loop on the team: the items of `iter` are dealt out in contiguous static blocks
 /// over `min(n_jobs, items, team size)` parts, each part processed by the leader of a sub-team.
 pub(crate) fn for_each<T: Send, I>(
@@ -241,6 +221,11 @@ pub(crate) fn for_each<T: Send, I>(
 }
 
 /// [`for_each`] whose closure also receives the sub-team of its block, lent for the call.
+///
+/// The items are not collected: the producer of `iter` is split on the leader into the blocks
+/// (`split_at`), and each block is iterated by the leader of its part, so the dispatch allocates
+/// nothing whatever the team's width (#111). An iterator adapter can still allocate in its own
+/// `split_at` (rayon's `map_with` clones its state).
 pub(crate) fn for_each_child<T: Send, I>(
 	team: TeamExec<'_>,
 	n_jobs: usize,
@@ -250,24 +235,102 @@ pub(crate) fn for_each_child<T: Send, I>(
 	I: IntoParallelIterator<Item = T>,
 	I::Iter: IndexedParallelIterator,
 {
-	let mut items = Vec::new();
-	// `with_producer` walks the splitting machinery without starting any Rayon job.
-	iter.into_par_iter().with_producer(Collect(&mut items));
-	let len = items.len();
+	let iter = iter.into_par_iter();
+	let len = iter.len();
 	if len == 0 {
 		return;
 	}
-	let slots = Slots(items.into_iter().map(|x| UnsafeCell::new(Some(x))).collect());
 	let jobs = n_jobs.max(1).min(len).min(team.size().get());
 	stats::hist(&stats::SPLIT, jobs);
-	team.fork(jobs, |c, mut child| {
-		let (start, n) = super::thread::par_split_indices(len, c, jobs);
-		for j in start..start + n {
-			// SAFETY: block `c` owns slots `start..start + n` alone.
-			let item = unsafe { slots.take(j) };
-			f(item, child.reborrow());
+	struct Deal<'t, 'f, F> {
+		team: TeamExec<'t>,
+		len: usize,
+		jobs: usize,
+		f: &'f F,
+	}
+	impl<T, F: Sync + for<'c> Fn(T, TeamExec<'c>)> ProducerCallback<T> for Deal<'_, '_, F> {
+		type Output = ();
+		fn callback<P: Producer<Item = T>>(self, producer: P) {
+			// the producer may borrow from this callback's frame: every block is run and joined
+			// before it returns
+			deal(self.team, producer, self.len, self.jobs, self.f)
 		}
-	});
+	}
+	iter.with_producer(Deal { team, len, jobs, f: &f });
+}
+
+/// Blocks a single fork deals out of an inline array: up to this many, and only while the array
+/// stays small (`FLAT_BYTES` per slot, 16 KiB in all), since a producer can carry state of any
+/// size. Wider or heavier splits halve recursively instead, which costs a section per level
+/// and allocates nothing either.
+const FLAT_JOBS: usize = 64;
+const FLAT_BYTES: usize = 256;
+
+/// One producer piece, taken by one participant.
+struct Piece<P>(UnsafeCell<Option<P>>);
+// SAFETY: each piece is taken by exactly one participant (the one-taker invariant below).
+unsafe impl<P: Send> Sync for Piece<P> {}
+impl<P> Piece<P> {
+	/// # Safety
+	/// Called once per piece, by the participant that owns it.
+	unsafe fn take(&self) -> P {
+		unsafe { (*self.0.get()).take() }.expect("each piece is taken once")
+	}
+}
+
+/// Runs the `len` items of `producer` as `jobs` contiguous blocks (the boundaries of
+/// `par_split_indices`), block `c` on the leader of the `c`-th part of `team`.
+fn deal<T, P: Producer<Item = T>, F: Sync + for<'c> Fn(T, TeamExec<'c>)>(
+	mut team: TeamExec<'_>,
+	producer: P,
+	len: usize,
+	jobs: usize,
+	f: &F,
+) {
+	if jobs <= 1 {
+		for item in producer.into_iter() {
+			f(item, team.reborrow());
+		}
+		return;
+	}
+	if jobs <= FLAT_JOBS && core::mem::size_of::<Option<P>>() <= FLAT_BYTES {
+		let mut pieces: [Piece<P>; FLAT_JOBS] = core::array::from_fn(|_| Piece(UnsafeCell::new(None)));
+		let mut rest = producer;
+		for (c, piece) in pieces.iter_mut().enumerate().take(jobs - 1) {
+			// split relative to what is left: the earlier blocks are already taken off
+			let (_, n) = super::thread::par_split_indices(len, c, jobs);
+			let (head, tail) = rest.split_at(n);
+			*piece.0.get_mut() = Some(head);
+			rest = tail;
+		}
+		*pieces[jobs - 1].0.get_mut() = Some(rest);
+		team.fork(jobs, |c, mut child| {
+			// SAFETY: the fork hands index `c` to one child only
+			let piece = unsafe { pieces[c].take() };
+			for item in piece.into_iter() {
+				f(item, child.reborrow());
+			}
+		});
+		return;
+	}
+	// two halves, each with the participants of its blocks
+	let left = jobs / 2;
+	let (left_len, _) = super::thread::par_split_indices(len, left, jobs);
+	let size = team.size().get();
+	let (left_size, _) = super::thread::par_split_indices(size, left, jobs);
+	let (a, b) = producer.split_at(left_len);
+	let halves = [Piece(UnsafeCell::new(Some(a))), Piece(UnsafeCell::new(Some(b)))];
+	note_split(2);
+	team.split(&[left_size, size - left_size], |c, child| {
+		// SAFETY: the split hands index `c` to one child only, and `c < 2`
+		let half = unsafe { halves[c].take() };
+		if c == 0 {
+			deal(child, half, left_len, left, f)
+		} else {
+			deal(child, half, len - left_len, jobs - left, f)
+		}
+	})
+	.expect("two non-empty parts within the team");
 }
 
 struct SendPtr<T>(*mut T);
@@ -1062,6 +1125,90 @@ mod tests {
 		});
 		let parallel = s.run.iter().skip(2).sum::<usize>() + s.split.iter().skip(2).sum::<usize>() + s.gemm_tiled + s.gemm_team_kernel;
 		assert_eq!(parallel, 0, "{s:?}");
+	}
+
+	/// The producer dealing of `for_each_child` (#111): every item exactly once, each on a child
+	/// of an even share of the team, on the flat path, on the recursive one (more blocks than
+	/// `FLAT_JOBS`, or a producer over `FLAT_BYTES`: `map_with` keeps its 512-byte state inline),
+	/// with item, block and team counts that do not divide each other.
+	#[test]
+	fn for_each_child_deals_every_item_once() {
+		use rayon::prelude::*;
+		for (width, len, n_jobs, big) in [
+			(8usize, 1000usize, 7usize, false),
+			(8, 1000, 7, true),
+			(70, 1000, 70, false),
+			(70, 333, 69, true),
+			(5, 3, 5, false),
+		] {
+			with_par(width, |par| {
+				let Par::Team(team) = par else { unreachable!() };
+				let seen: Vec<AtomicUsize> = (0..len).map(|_| AtomicUsize::new(0)).collect();
+				let widths: Vec<AtomicUsize> = (0..len).map(|_| AtomicUsize::new(0)).collect();
+				let f = |i: usize, child: TeamExec<'_>| {
+					seen[i].fetch_add(1, Ordering::Relaxed);
+					widths[i].store(child.size().get(), Ordering::Relaxed);
+				};
+				if big {
+					core::assert!(core::mem::size_of::<[u8; 512]>() > FLAT_BYTES);
+					for_each_child(team, n_jobs, (0..len).into_par_iter().map_with([0u8; 512], |_, i| i), f);
+				} else {
+					for_each_child(team, n_jobs, (0..len).into_par_iter(), f);
+				}
+				let jobs = n_jobs.min(len).min(width);
+				let (lo, hi) = (width / jobs, width.div_ceil(jobs));
+				for i in 0..len {
+					core::assert_eq!(seen[i].load(Ordering::Relaxed), 1, "{width} {len} {n_jobs} {big}: item {i}");
+					let w = widths[i].load(Ordering::Relaxed);
+					core::assert!(lo <= w && w <= hi, "{width} {len} {n_jobs} {big}: item {i} on a child of {w}");
+				}
+			});
+		}
+	}
+
+	/// A panic in one block reaches the caller after every block has finished, the items are
+	/// dropped once each, and the team stays usable.
+	#[test]
+	fn for_each_child_unwinds_and_keeps_the_team() {
+		use rayon::prelude::*;
+		use std::panic::{catch_unwind, AssertUnwindSafe};
+		struct Counted<'a>(&'a AtomicUsize);
+		impl Drop for Counted<'_> {
+			fn drop(&mut self) {
+				self.0.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+		for width in [8usize, 70] {
+			with_par(width, |mut par| {
+				let dropped = AtomicUsize::new(0);
+				let made = AtomicUsize::new(0);
+				let r = catch_unwind(AssertUnwindSafe(|| {
+					let Par::Team(team) = par.reborrow() else { unreachable!() };
+					for_each_child(
+						team,
+						width,
+						(0..1000usize).into_par_iter().map(|i| {
+							made.fetch_add(1, Ordering::Relaxed);
+							(i, Counted(&dropped))
+						}),
+						|(i, _c), _| {
+							if i == 500 {
+								panic!("block failure");
+							}
+						},
+					);
+				}));
+				core::assert!(r.is_err());
+				core::assert_eq!(dropped.load(Ordering::Relaxed), made.load(Ordering::Relaxed));
+				// the team still works
+				let Par::Team(team) = par.reborrow() else { unreachable!() };
+				let hits = AtomicUsize::new(0);
+				for_each_child(team, width, (0..100usize).into_par_iter(), |_, _| {
+					hits.fetch_add(1, Ordering::Relaxed);
+				});
+				core::assert_eq!(hits.load(Ordering::Relaxed), 100);
+			});
+		}
 	}
 
 	/// `par_pays_time` is `ParShape::pays` without the shape.
