@@ -19,6 +19,6 @@ opt-level = 3
 lto = "off"
 
 # Probe only (not for merge): threadteam with the staged waits (tensor4all/threadteam-rs
-# branch feat/own-threads), for the faer#107 before/after comparison.
+# branch exp/rayon-pool-reuse), for the faer#107 before/after comparison.
 [patch.crates-io]
-threadteam = { git = "https://github.com/tensor4all/threadteam-rs", rev = "0e259b5ad503d242c6b4804966d01b1cffecff7b" }
+threadteam = { git = "https://github.com/tensor4all/threadteam-rs", rev = "9dfcbdb1d43a86be48837840b08e3c81f3bbbdb6" }
