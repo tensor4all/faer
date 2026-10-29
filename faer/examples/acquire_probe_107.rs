@@ -1,10 +1,16 @@
 //! Probe for tensor4all/faer#107 (not for merge): does the slow mode come with a freshly created pool
-//! (new threads), or with every team acquisition?
+//! (new threads), with every team acquisition, or with the pool's spare worker?
 //!
-//! One process times `reps` calls of one kernel at `width` participants. It acquires the team in one
-//! of five ways, from "one team held for every call" to "a new pool per call" (what
-//! `faer::team::with_team` does, and so `fbench`). After each call, a census section asks every
-//! participant which CPU it is on. A call is *stacked* when two participants share a CPU.
+//! One process times `reps` calls of one kernel at `width` participants, acquiring the team in one of
+//! six ways (below). A pool of `width` workers gives a team of `width` participants (the calling
+//! thread and `width - 1` reserved workers), so one worker of the pool is a *spare* that the team
+//! never uses (tensor4all/threadteam-rs#12): the process runs `width + 1` threads.
+//!
+//! After each call, a census section on the same team asks every participant for its CPU and tid. A
+//! call is *stacked* when two participants share a CPU. Every other thread of the process, except
+//! the caller and the sampler, is a spare worker; for each call the probe reports their CPU time
+//! (`/proc/<tid>/schedstat` run time, during the call and since the thread started) and their state
+//! at the end of the call.
 //!
 //! Build: `cargo build --release -p t4a-faer --example acquire_probe_107`
 //! Run:   `taskset -c 0-63 target/release/examples/acquire_probe_107 <mode> <kernel> <width> <reps>`
@@ -14,33 +20,164 @@
 //!   - `team_per_call`: one Pool and Team, a fresh `team.exec(w).team(..)` per call (tenferro `CpuEngine`)
 //!   - `exec_team_per_call`: one Pool, `Exec::new(&pool, w).team(..)` per call (members acquired per call)
 //!   - `into_team_per_call`: one Pool, `pool.into_team(w)` ... `team.into_pool()` per call
-//!   - `fresh_pool`: a new Pool and Team per call, as `with_team` builds them (honours `PIN`)
+//!   - `fresh_pool`: a new Pool and Team per call, built as `with_team` builds them (honours `PIN`)
 //!   - `with_team`: `faer::team::with_team(w, ..)` per call, literally
 //! * `kernel`: `gemm128` (f64 128x128x128 product) or `chol2048` (f64 LLT of a 2048 SPD matrix)
 //!
 //! Environment:
 //! * `PIN=1`: `PoolBuilder::pin_participants(true)` (every mode except `with_team`)
 //! * `PRIME_MS=<ms>`: before the measured calls, run the same mode for this long (unmeasured)
-//! * `CENSUS=off`: skip the census section (it is one extra short section per call, after the timing)
+//! * `CENSUS=off`: skip the census section (one extra short section per call, after the timing)
 //! * `SAMPLE_CPU=<cpu>`: a sampler thread pinned to `<cpu>` (keep it outside the measured set) reads
-//!   every thread's state and CPU from `/proc` in a loop while a call runs, and reports per call how
-//!   many samples had two runnable (`R`) threads of this process on one CPU
+//!   every thread's state and CPU from `/proc` in a loop while a call runs, and reports how many
+//!   samples had two runnable (`R`) threads of this process on one CPU, how many of those involved a
+//!   spare worker, and how many samples found a spare worker runnable at all
+//! * `SPARE_WAIT=1` (`fresh_pool`, `with_team`): after each call, before the pool is dropped, wait
+//!   (up to 2 s, unmeasured) until every spare worker is sleeping, and report the time from the
+//!   pool's creation until then (the spare's spin-until-sleep time)
 //!
-//! Output: one `call` line per call (time, distinct CPUs, stacked), then a `summary` line.
+//! Output: one `call` line per call, then a `summary` line.
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt::factor as llt;
 use faer::{Accum, Mat, Par};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use threadteam::{Exec, Pool, Team};
+use threadteam::{Exec, Pool, Team, TeamExec};
+
+// ---------------------------------------------------------------- /proc
+
+fn my_tid() -> u32 {
+	std::fs::read_link("/proc/thread-self")
+		.ok()
+		.and_then(|l| l.file_name().and_then(|f| f.to_str()).and_then(|f| f.parse().ok()))
+		.unwrap_or(0)
+}
+
+/// (state, cpu) from `/proc/self/task/<tid>/stat`.
+fn stat_of(tid: u32) -> Option<(char, i32)> {
+	let stat = std::fs::read_to_string(format!("/proc/self/task/{tid}/stat")).ok()?;
+	let close = stat.rfind(')')?;
+	// fields after ")": index 0 = state (field 3), processor = field 39 -> index 36
+	let f: Vec<&str> = stat[close + 2..].split_whitespace().collect();
+	Some((f.first()?.chars().next()?, f.get(36)?.parse().ok()?))
+}
+
+/// Time on the CPU since the thread started, in ns (`schedstat` field 1).
+fn run_ns(tid: u32) -> u64 {
+	std::fs::read_to_string(format!("/proc/self/task/{tid}/schedstat"))
+		.ok()
+		.and_then(|s| s.split_whitespace().next().and_then(|v| v.parse().ok()))
+		.unwrap_or(0)
+}
+
+fn tids() -> Vec<u32> {
+	let Ok(rd) = std::fs::read_dir("/proc/self/task") else { return Vec::new() };
+	rd.flatten().filter_map(|e| e.file_name().to_str().and_then(|f| f.parse().ok())).collect()
+}
 
 fn this_cpu() -> i32 {
-	let stat = std::fs::read_to_string("/proc/thread-self/stat").unwrap_or_default();
-	let Some(close) = stat.rfind(')') else { return -1 };
-	// fields after ")": index 0 = state (field 3), processor = field 39 -> index 36
-	stat[close + 2..].split_whitespace().nth(36).and_then(|v| v.parse().ok()).unwrap_or(-1)
+	stat_of(my_tid()).map(|s| s.1).unwrap_or(-1)
 }
+
+// ---------------------------------------------------------------- sampler
+
+#[derive(Default, Clone)]
+struct Samples {
+	total: u64,
+	/// samples with two runnable threads of this process on one CPU
+	stacked: u64,
+	/// per tid: samples in which it was runnable
+	runnable: BTreeMap<u32, u64>,
+	/// per tid: samples in which it was runnable on a CPU that had another runnable thread
+	stacked_with: BTreeMap<u32, u64>,
+}
+
+struct Sampler {
+	tid: u32,
+	on: Arc<AtomicBool>,
+	acc: Arc<Mutex<Samples>>,
+}
+
+impl Sampler {
+	fn start(cpu: usize) -> Self {
+		let on = Arc::new(AtomicBool::new(false));
+		let acc = Arc::new(Mutex::new(Samples::default()));
+		let tid = Arc::new(AtomicU32::new(0));
+		let (o, a, t) = (on.clone(), acc.clone(), tid.clone());
+		let (tx, rx) = std::sync::mpsc::channel();
+		std::thread::spawn(move || {
+			let me = my_tid();
+			t.store(me, Ordering::Relaxed);
+			let ok = std::process::Command::new("taskset")
+				.args(["-pc", &cpu.to_string(), &me.to_string()])
+				.stdout(std::process::Stdio::null())
+				.status()
+				.map(|s| s.success())
+				.unwrap_or(false);
+			assert!(ok, "taskset -pc {cpu} {me} failed");
+			tx.send(()).unwrap();
+			let mut by_cpu = BTreeMap::<i32, Vec<u32>>::new();
+			loop {
+				if !o.load(Ordering::Acquire) {
+					std::thread::yield_now();
+					continue;
+				}
+				by_cpu.clear();
+				for tid in tids() {
+					if tid == me {
+						continue;
+					}
+					if let Some(('R', c)) = stat_of(tid) {
+						by_cpu.entry(c).or_default().push(tid);
+					}
+				}
+				let mut s = a.lock().unwrap();
+				s.total += 1;
+				let mut any = false;
+				for list in by_cpu.values() {
+					for &tid in list {
+						*s.runnable.entry(tid).or_default() += 1;
+						if list.len() > 1 {
+							*s.stacked_with.entry(tid).or_default() += 1;
+						}
+					}
+					any |= list.len() > 1;
+				}
+				s.stacked += any as u64;
+			}
+		});
+		rx.recv().unwrap();
+		let tid = tid.load(Ordering::Relaxed);
+		Sampler { tid, on, acc }
+	}
+}
+
+static SAMPLER: OnceLock<Option<Sampler>> = OnceLock::new();
+
+fn sampler_tid() -> u32 {
+	SAMPLER.get().and_then(|s| s.as_ref()).map(|s| s.tid).unwrap_or(0)
+}
+
+fn sample_begin() {
+	if let Some(Some(s)) = SAMPLER.get() {
+		*s.acc.lock().unwrap() = Samples::default();
+		s.on.store(true, Ordering::Release);
+	}
+}
+
+fn sample_end() -> Samples {
+	match SAMPLER.get() {
+		Some(Some(s)) => {
+			s.on.store(false, Ordering::Release);
+			s.acc.lock().unwrap().clone()
+		},
+		_ => Samples::default(),
+	}
+}
+
+// ---------------------------------------------------------------- kernels
 
 struct Kernel {
 	name: String,
@@ -94,6 +231,8 @@ impl Kernel {
 	}
 }
 
+// ---------------------------------------------------------------- one call
+
 fn pool(width: usize, pin: bool) -> Pool {
 	Pool::builder()
 		.threads(width)
@@ -103,127 +242,82 @@ fn pool(width: usize, pin: bool) -> Pool {
 		.expect("a pool")
 }
 
-/// Every participant reports its CPU.
-fn census(team: threadteam::TeamExec<'_>, out: &[AtomicI32]) {
-	team.run(|i, _| out[i].store(this_cpu(), Ordering::Relaxed));
+struct Opts {
+	width: usize,
+	census: bool,
+	spare_wait: bool,
+	main_tid: u32,
 }
 
 struct Call {
 	ms: f64,
-	cpus: Vec<i32>,
-	/// (samples with two runnable threads on one CPU, samples) during the call
-	stack: (u64, u64),
+	/// (tid, cpu) of every participant, from the census
+	parts: Vec<(u32, i32)>,
+	samples: Samples,
+	/// run time per tid at the start and at the end of the call
+	run_begin: BTreeMap<u32, u64>,
+	run_end: BTreeMap<u32, u64>,
+	/// state per tid at the end of the call
+	state_end: BTreeMap<u32, char>,
+	/// time from the pool's creation until every spare slept (`SPARE_WAIT`)
+	spare_sleep_ms: Option<f64>,
 }
 
-/// The `/proc` sampler: counts, while `on`, samples in which two runnable threads share a CPU.
-struct Sampler {
-	on: Arc<AtomicBool>,
-	stacked: Arc<AtomicU64>,
-	total: Arc<AtomicU64>,
+fn run_all() -> BTreeMap<u32, u64> {
+	tids().into_iter().map(|t| (t, run_ns(t))).collect()
 }
 
-impl Sampler {
-	fn start(cpu: usize) -> Self {
-		let on = Arc::new(AtomicBool::new(false));
-		let stacked = Arc::new(AtomicU64::new(0));
-		let total = Arc::new(AtomicU64::new(0));
-		let (o, st, to) = (on.clone(), stacked.clone(), total.clone());
-		let (tx, rx) = std::sync::mpsc::channel();
-		std::thread::spawn(move || {
-			let me = my_tid();
-			let ok = std::process::Command::new("taskset")
-				.args(["-pc", &cpu.to_string(), &me.to_string()])
-				.stdout(std::process::Stdio::null())
-				.status()
-				.map(|s| s.success())
-				.unwrap_or(false);
-			assert!(ok, "taskset -pc {cpu} {me} failed");
-			tx.send(()).unwrap();
-			loop {
-				if !o.load(Ordering::Acquire) {
-					std::thread::yield_now();
-					continue;
-				}
-				let mut seen = std::collections::BTreeMap::<i32, u32>::new();
-				let Ok(rd) = std::fs::read_dir("/proc/self/task") else { continue };
-				for e in rd.flatten() {
-					let p = e.path();
-					if p.file_name().and_then(|f| f.to_str()).and_then(|f| f.parse::<u32>().ok()) == Some(me) {
-						continue;
-					}
-					let Ok(stat) = std::fs::read_to_string(p.join("stat")) else { continue };
-					let Some(close) = stat.rfind(')') else { continue };
-					let f: Vec<&str> = stat[close + 2..].split_whitespace().collect();
-					if f.first() == Some(&"R") {
-						if let Some(c) = f.get(36).and_then(|v| v.parse().ok()) {
-							*seen.entry(c).or_default() += 1;
-						}
-					}
-				}
-				to.fetch_add(1, Ordering::Relaxed);
-				if seen.values().any(|&n| n > 1) {
-					st.fetch_add(1, Ordering::Relaxed);
-				}
-			}
+/// The timed call and the census, on one team token. `built`: when the pool was created, for
+/// `SPARE_WAIT`.
+fn timed(team: TeamExec<'_>, kernel: &mut Kernel, o: &Opts, built: Option<Instant>) -> Call {
+	let mut team = team;
+	let run_begin = run_all();
+	sample_begin();
+	let t0 = Instant::now();
+	kernel.call(Par::Team(team.reborrow()));
+	let ms = t0.elapsed().as_secs_f64() * 1e3;
+	let samples = sample_end();
+	let run_end = run_all();
+	let state_end = tids().into_iter().filter_map(|t| stat_of(t).map(|s| (t, s.0))).collect();
+	let mut parts = Vec::new();
+	if o.census {
+		let slots: Vec<(AtomicU32, AtomicI32)> = (0..o.width).map(|_| (AtomicU32::new(0), AtomicI32::new(-1))).collect();
+		team.run(|i, _| {
+			slots[i].0.store(my_tid(), Ordering::Relaxed);
+			slots[i].1.store(this_cpu(), Ordering::Relaxed);
 		});
-		rx.recv().unwrap();
-		Sampler { on, stacked, total }
+		parts = slots
+			.iter()
+			.map(|s| (s.0.load(Ordering::Relaxed), s.1.load(Ordering::Relaxed)))
+			.filter(|s| s.1 >= 0)
+			.collect();
 	}
-
-	fn begin(&self) {
-		self.stacked.store(0, Ordering::Relaxed);
-		self.total.store(0, Ordering::Relaxed);
-		self.on.store(true, Ordering::Release);
+	let mut call = Call { ms, parts, samples, run_begin, run_end, state_end, spare_sleep_ms: None };
+	if o.spare_wait {
+		if let Some(built) = built {
+			let spares = spares(&call, o);
+			let deadline = Instant::now() + Duration::from_secs(2);
+			while Instant::now() < deadline && spares.iter().any(|&t| !matches!(stat_of(t), Some(('S', _)) | None)) {
+				std::thread::yield_now();
+			}
+			call.spare_sleep_ms = Some(built.elapsed().as_secs_f64() * 1e3);
+		}
 	}
-
-	fn end(&self) -> (u64, u64) {
-		self.on.store(false, Ordering::Release);
-		(self.stacked.load(Ordering::Relaxed), self.total.load(Ordering::Relaxed))
-	}
+	call
 }
 
-fn my_tid() -> u32 {
-	std::fs::read_link("/proc/thread-self")
-		.ok()
-		.and_then(|l| l.file_name().and_then(|f| f.to_str()).and_then(|f| f.parse().ok()))
-		.unwrap_or(0)
+/// Threads that are neither the caller, the sampler nor a participant: the pool's spare workers.
+fn spares(c: &Call, o: &Opts) -> Vec<u32> {
+	let parts: BTreeSet<u32> = c.parts.iter().map(|p| p.0).collect();
+	c.run_end.keys().copied().filter(|t| *t != o.main_tid && *t != sampler_tid() && !parts.contains(t)).collect()
 }
 
-static SAMPLER: std::sync::OnceLock<Option<Sampler>> = std::sync::OnceLock::new();
-
-fn sample_begin() {
-	if let Some(Some(s)) = SAMPLER.get() {
-		s.begin()
-	}
-}
-
-fn sample_end() -> (u64, u64) {
-	match SAMPLER.get() {
-		Some(Some(s)) => s.end(),
-		_ => (0, 0),
-	}
-}
-
-/// One timed call on a team token, then the census on the same team (outside the timing).
-fn timed(exec: &mut Exec<'_>, kernel: &mut Kernel, width: usize, census_on: bool) -> Call {
-	let slots: Vec<AtomicI32> = (0..width).map(|_| AtomicI32::new(-1)).collect();
+fn one_scope(exec: &mut Exec<'_>, kernel: &mut Kernel, o: &Opts, built: Option<Instant>) -> Call {
 	kernel.reset();
-	let mut ms = 0.0;
-	let mut stack = (0, 0);
-	exec.team(|t| {
-		sample_begin();
-		let t0 = Instant::now();
-		kernel.call(Par::Team(t));
-		ms = t0.elapsed().as_secs_f64() * 1e3;
-		stack = sample_end();
-	})
-	.ok()
-	.expect("a team token");
-	if census_on {
-		exec.team(|t| census(t, &slots)).ok().expect("a team token");
-	}
-	Call { ms, cpus: slots.iter().map(|c| c.load(Ordering::Relaxed)).filter(|&c| c >= 0).collect(), stack }
+	exec.team(|t| timed(t, kernel, o, built)).ok().expect("a team token")
 }
+
+// ---------------------------------------------------------------- main
 
 fn main() {
 	let args: Vec<String> = std::env::args().collect();
@@ -232,12 +326,17 @@ fn main() {
 	let mut kernel = Kernel::new(&args[2]);
 	let width: usize = args[3].parse().unwrap();
 	let reps: usize = args[4].parse().unwrap();
-	let pin = std::env::var("PIN").map(|v| v == "1").unwrap_or(false);
-	let prime = Duration::from_millis(std::env::var("PRIME_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
-	let census_on = std::env::var("CENSUS").map(|v| v != "off").unwrap_or(true);
-	SAMPLER.get_or_init(|| std::env::var("SAMPLE_CPU").ok().and_then(|v| v.parse().ok()).map(Sampler::start));
+	let env = |k: &str| std::env::var(k).ok();
+	let pin = env("PIN").as_deref() == Some("1");
+	let prime = Duration::from_millis(env("PRIME_MS").and_then(|v| v.parse().ok()).unwrap_or(0));
+	let o = Opts {
+		width,
+		census: env("CENSUS").as_deref() != Some("off"),
+		spare_wait: env("SPARE_WAIT").as_deref() == Some("1"),
+		main_tid: my_tid(),
+	};
+	SAMPLER.get_or_init(|| env("SAMPLE_CPU").and_then(|v| v.parse().ok()).map(Sampler::start));
 
-	// the state a mode keeps across calls
 	let mut held_pool: Option<Pool> = None;
 	let mut held_team: Option<Team> = None;
 	match mode {
@@ -249,87 +348,92 @@ fn main() {
 
 	let mut one = |kernel: &mut Kernel| -> Call {
 		match mode {
-			"team_per_call" => {
-				let team = held_team.as_ref().unwrap();
-				timed(&mut team.exec(width), kernel, width, census_on)
-			},
-			"exec_team_per_call" => {
-				let p = held_pool.as_ref().unwrap();
-				timed(&mut Exec::new(p, width).unwrap(), kernel, width, census_on)
-			},
+			"team_per_call" => one_scope(&mut held_team.as_ref().unwrap().exec(width), kernel, &o, None),
+			"exec_team_per_call" => one_scope(&mut Exec::new(held_pool.as_ref().unwrap(), width).unwrap(), kernel, &o, None),
 			"into_team_per_call" => {
 				let team = held_pool.take().unwrap().into_team(width).ok().expect("an idle pool");
-				let call = timed(&mut team.exec(width), kernel, width, census_on);
+				let call = one_scope(&mut team.exec(width), kernel, &o, None);
 				held_pool = Some(team.into_pool());
 				call
 			},
 			"fresh_pool" => {
+				let built = Instant::now();
 				let team = pool(width, pin).into_team(width).ok().expect("an idle pool");
-				let call = timed(&mut team.exec(width), kernel, width, census_on);
+				let call = one_scope(&mut team.exec(width), kernel, &o, Some(built));
 				drop(team);
 				call
 			},
 			"with_team" => {
-				let slots: Vec<AtomicI32> = (0..width).map(|_| AtomicI32::new(-1)).collect();
 				kernel.reset();
-				let mut ms = 0.0;
-				let mut stack = (0, 0);
-				faer::team::with_team(width, |par| {
-					sample_begin();
-					let t0 = Instant::now();
-					kernel.call(par);
-					ms = t0.elapsed().as_secs_f64() * 1e3;
-					stack = sample_end();
-				});
-				// `with_team` gives the team back at the end, so its census needs a team of its own
-				if census_on {
-					faer::team::with_team(width, |par| {
-						if let Par::Team(t) = par {
-							census(t, &slots)
-						}
-					});
-				}
-				Call { ms, cpus: slots.iter().map(|c| c.load(Ordering::Relaxed)).filter(|&c| c >= 0).collect(), stack }
+				let built = Instant::now();
+				faer::team::with_team(width, |par| match par {
+					Par::Team(t) => timed(t, kernel, &o, Some(built)),
+					_ => panic!("with_team gave no team"),
+				})
 			},
 			_ => unreachable!(),
 		}
 	};
 
-	if mode == "held" {
+	let calls: Vec<Call> = if mode == "held" {
 		// one scope for the prime and every call, as the earlier probe did
 		let team = held_team.as_ref().unwrap();
 		let mut exec = team.exec(width);
+		exec.team(|mut t| {
+			let start = Instant::now();
+			let quiet = Opts { census: false, spare_wait: false, ..o };
+			while start.elapsed() < prime {
+				kernel.reset();
+				timed(t.reborrow(), &mut kernel, &quiet, None);
+			}
+			let o = Opts { ..quiet };
+			let o = Opts { census: env("CENSUS").as_deref() != Some("off"), ..o };
+			(0..reps)
+				.map(|_| {
+					kernel.reset();
+					timed(t.reborrow(), &mut kernel, &o, None)
+				})
+				.collect()
+		})
+		.ok()
+		.expect("a team token")
+	} else {
 		let start = Instant::now();
 		while start.elapsed() < prime {
-			timed(&mut exec, &mut kernel, width, false);
+			one(&mut kernel);
 		}
-		let calls: Vec<Call> = (0..reps).map(|_| timed(&mut exec, &mut kernel, width, census_on)).collect();
-		report(mode, &kernel.name, width, pin, &calls);
-		return;
-	}
-	let start = Instant::now();
-	while start.elapsed() < prime {
-		one(&mut kernel);
-	}
-	let calls: Vec<Call> = (0..reps).map(|_| one(&mut kernel)).collect();
-	report(mode, &kernel.name, width, pin, &calls);
+		(0..reps).map(|_| one(&mut kernel)).collect()
+	};
+	report(mode, &kernel.name, width, pin, &o, &calls);
 }
 
-fn report(mode: &str, kernel: &str, width: usize, pin: bool, calls: &[Call]) {
+fn report(mode: &str, kernel: &str, width: usize, pin: bool, o: &Opts, calls: &[Call]) {
 	let mut stacked = 0;
 	for (i, c) in calls.iter().enumerate() {
-		let mut cpus = c.cpus.clone();
-		cpus.sort_unstable();
-		cpus.dedup();
-		let is_stacked = !c.cpus.is_empty() && cpus.len() < c.cpus.len();
+		let cpus: BTreeSet<i32> = c.parts.iter().map(|p| p.1).collect();
+		let is_stacked = !c.parts.is_empty() && cpus.len() < c.parts.len();
 		stacked += is_stacked as usize;
+		let spare = if c.parts.is_empty() { Vec::new() } else { spares(c, o) };
+		let us = |m: &BTreeMap<u32, u64>| spare.iter().map(|t| m.get(t).copied().unwrap_or(0)).sum::<u64>() as f64 / 1e3;
+		let in_call = us(&c.run_end) - us(&c.run_begin);
+		let states: String = spare.iter().map(|t| c.state_end.get(t).copied().unwrap_or('?')).collect();
+		let sum = |m: &BTreeMap<u32, u64>| spare.iter().map(|t| m.get(t).copied().unwrap_or(0)).sum::<u64>();
 		println!(
-			"call mode={mode} kernel={kernel} width={width} pin={pin} i={i} ms={:.4} distinct_cpus={}/{} stacked={is_stacked} stacked_samples={}/{}",
+			"call mode={mode} kernel={kernel} width={width} pin={pin} i={i} ms={:.4} distinct_cpus={}/{} stacked={is_stacked} \
+			 stacked_samples={}/{} spares={} spare_state_end={} spare_run_us_call={:.1} spare_run_us_total={:.1} \
+			 spare_runnable_samples={} spare_stacked_samples={} spare_sleep_ms={}",
 			c.ms,
 			cpus.len(),
-			c.cpus.len(),
-			c.stack.0,
-			c.stack.1
+			c.parts.len(),
+			c.samples.stacked,
+			c.samples.total,
+			spare.len(),
+			if states.is_empty() { "-".into() } else { states },
+			in_call,
+			us(&c.run_end),
+			sum(&c.samples.runnable),
+			sum(&c.samples.stacked_with),
+			c.spare_sleep_ms.map(|v| format!("{v:.3}")).unwrap_or_else(|| "-".into()),
 		);
 	}
 	let mut ms: Vec<f64> = calls.iter().map(|c| c.ms).collect();
