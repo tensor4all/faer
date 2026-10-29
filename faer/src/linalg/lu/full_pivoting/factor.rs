@@ -62,14 +62,32 @@ fn reduce_2d<T: ComplexField, S: Simd>(
 	let best_val = simd.reduce_max_real(best_values);
 	let best_val_splat = simd.splat_real(&best_val);
 	let is_best = (**simd).ge(best_values, best_val_splat);
-	let idx = simd.first_true_mask(is_best);
-	let best_row = bytemuck::cast_slice::<T::SimdIndex<S>, T::Index>(
-		core::slice::from_ref(&best_row),
-	)[idx];
-	let best_col = bytemuck::cast_slice::<T::SimdIndex<S>, T::Index>(
-		core::slice::from_ref(&best_col),
-	)[idx];
-	(best_row.zx(), best_col.zx(), best_val)
+	// The lanes that hold the maximum tie with each other (a matrix of small integers ties a
+	// lot), and which lane comes first in the vector depends on the lane count: with 8 lanes an
+	// AVX-512 build picks another row than an AVX2 build for the same matrix, and the elimination
+	// then follows another path. Break the tie the way the scalar search does - the smallest
+	// column, then the smallest row - so the pivots do not depend on the vector width.
+	let sentinel = simd.isplat(T::Index::truncate(usize::MAX));
+	let rows_tied = simd.iselect(is_best, best_row, sentinel);
+	let cols_tied = simd.iselect(is_best, best_col, sentinel);
+	let row_lanes = bytemuck::cast_slice::<T::SimdIndex<S>, T::Index>(
+		core::slice::from_ref(&rows_tied),
+	);
+	let col_lanes = bytemuck::cast_slice::<T::SimdIndex<S>, T::Index>(
+		core::slice::from_ref(&cols_tied),
+	);
+	let mut best: Option<(usize, usize)> = None;
+	for lane in 0..row_lanes.len() {
+		let (row, col) = (row_lanes[lane].zx(), col_lanes[lane].zx());
+		if row == usize::MAX || col == usize::MAX {
+			continue;
+		}
+		if best.is_none_or(|(brow, bcol)| (col, row) < (bcol, brow)) {
+			best = Some((row, col));
+		}
+	}
+	let (best_row, best_col) = best.expect("the maximum is held by some lane");
+	(best_row, best_col, best_val)
 }
 #[inline(always)]
 fn best_in_col_simd<'M, T: ComplexField, S: Simd>(
@@ -687,6 +705,42 @@ mod tests {
 		run(Par::Seq);
 		crate::team::with_team(8, |par| run(par));
 	}
+	/// The pivot search breaks a tie the way the scalar search does: the smallest column, then the
+	/// smallest row. Without that, which lane wins depends on the lane count, so an AVX2 build and
+	/// an AVX-512 build eliminate in a different order for the same matrix (and on a singular
+	/// fixture one of the two ends on an exact zero pivot, which the solve turns into `NaN`).
+	#[test]
+	fn pivot_search_breaks_ties_by_column_then_row() {
+		// column 2 holds the maximum twice (rows 1 and 5): both routes must take row 1, and a
+		// maximum in column 2 must win over an equal one in a later column
+		let a = crate::Mat::<f64>::from_fn(8, 6, |i, j| match (j, i) {
+			(2, 1) | (2, 5) => 3.0,
+			(4, 0) | (4, 7) => 3.0,
+			(1, _) => 0.5,
+			_ => 0.0,
+		});
+		assert_eq!(best_in_matrix(a.as_ref()), (1, 2, 3.0));
+		assert_eq!(best_in_matrix_fallback(a.as_ref()), (1, 2, 3.0));
+
+		// a matrix of small integers, where every column ties: the whole search must agree with
+		// the scalar one, whatever the lane count is
+		let mut rng = core::num::Wrapping(7u64);
+		for (m, n) in [(8usize, 8usize), (27, 13), (16, 40), (1, 9), (9, 1)] {
+			let mut a = crate::Mat::<f64>::zeros(m, n);
+			for j in 0..n {
+				for i in 0..m {
+					rng += core::num::Wrapping(6364136223846793005u64);
+					a[(i, j)] = ((rng.0 >> 33) % 3) as f64;
+				}
+			}
+			assert_eq!(
+				best_in_matrix(a.as_ref()),
+				best_in_matrix_fallback(a.as_ref()),
+				"{m}x{n}"
+			);
+		}
+	}
+
 	#[test]
 	fn test_gh238() {
 		#[rustfmt::skip]
