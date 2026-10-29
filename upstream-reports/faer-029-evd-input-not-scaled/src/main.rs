@@ -39,7 +39,9 @@ fn main() {
             let u = Mat::<c64>::from_fn(n, n, |i, j| c64::new(eig.U()[(i, j)].re as f64, eig.U()[(i, j)].im as f64));
             (u, s, f32::EPSILON as f64)
         };
-        let ratio = get22(&dimless, &u, &s, eps);
+        // `f64::max` drops a NaN, so a nonfinite result counts as a failure on its own
+        let finite = s.iter().all(|s| s.is_finite()) && (0..n).all(|j| (0..n).all(|i| u[(i, j)].is_finite()));
+        let ratio = if finite { get22(&dimless, &u, &s, eps) } else { f64::NAN };
         println!("{ty:>5} | 2^{e:<4} | {:>10} | {ratio:>12.4e}", format!("< {threshold}"));
         failed |= !(ratio < threshold);
     }

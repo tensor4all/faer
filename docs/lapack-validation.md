@@ -139,9 +139,9 @@ fixtures and with the same residual formula:
   reduction, and faer did not. `evd_imp` now does the same, by a power of two, and scales the
   eigenvalues back; the c32 group passes and the known-failures entry is gone. A sweep over
   f32/f64/c32/c64, n = 16 to 257 and scales up to the range limits showed that the missing
-  scaling was far more serious below: every eigenvector digit was lost for entries under
-  about `2^-90` (32-bit) and `2^-960` (64-bit), GET22 ratios of `1e5` to `2e15` where LAPACK
-  gives 2 to 70. Regression test: `geev_scaling_tests`.
+  scaling was far more serious below: on random, Grcar and near-Jordan matrices the ratio grew
+  from about `2^-90` (32-bit), and at `2^-100` (32-bit) and `2^-960` (64-bit) and below it was
+  `1e4` to `2e15` where LAPACK gives 2 to 70. Regression test: `geev_scaling_tests`.
 
 ### Phase 4 — Balancing and back-transformation
 
