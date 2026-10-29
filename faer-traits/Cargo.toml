@@ -2,6 +2,7 @@
 name = "t4a-faer-traits"
 version = "0.24.1"
 edition = "2021"
+rust-version = "1.89.0"
 authors = ["sarah quiñones <sarah@veganb.tw>"]
 description = "Temporary tensor4all fork of faer-traits."
 readme = "../README.md"
