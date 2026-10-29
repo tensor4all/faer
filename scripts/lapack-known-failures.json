@@ -5,13 +5,5 @@
     "failure that is not listed here, or for an entry that has started passing (so a fix has to",
     "remove its entry in the same change). Never add a test without the issue that describes it."
   ],
-  "known": [
-    {
-      "issue": 112,
-      "note": "c32 only, after the size-dependent GET22 threshold: kinds 6 and 7 (scaled to sqrt(MAX)/16 and sqrt(MIN)*16) at n = 63-65 give ratios of 41.7-59.4 against 39.7-40.3; single-precision LAPACK cgeev gives 29-40 on the same matrices",
-      "tests": [
-        "linalg::evd::lapack::c32::lapack_nonsymmetric_evd_cases"
-      ]
-    }
-  ]
+  "known": []
 }
