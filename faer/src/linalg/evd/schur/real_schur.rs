@@ -1210,56 +1210,52 @@ fn aggressive_early_deflation<T: RealField>(
 		ns -= infqr;
 		return (ns, nd);
 	}
+	// Sort the undeflated eigenvalues `tw[infqr..ns]` by decreasing magnitude,
+	// as LAPACK `dlaqr3` does. Each pass ends at `kend`, one before where the
+	// previous pass stopped, so the window shrinks by at least one per pass and
+	// the sort ends even when a swap leaves a pair out of order.
+	let ev = |tw: &MatMut<'_, T>, i: usize, n: usize| -> T {
+		if n == 1 {
+			tw[(i, i)].abs()
+		} else {
+			tw[(i, i)].abs()
+				+ tw[(i + 1, i)].abs().sqrt() * tw[(i, i + 1)].abs().sqrt()
+		}
+	};
+	// Size of the block starting at `i` when the window ends at `kend`.
+	let block = |tw: &MatMut<'_, T>, i: usize, kend: usize| -> usize {
+		if i >= kend || tw[(i + 1, i)] == zero() { 1 } else { 2 }
+	};
 	let mut sorted = false;
-	let mut sorting_window_size = jw as isize;
-	while !sorted {
+	let mut i = ns;
+	while !sorted && i > infqr {
 		sorted = true;
-		let mut ilst = 0isize;
-		let mut i1 = ns;
-		while i1 as isize + 1 < sorting_window_size {
-			let mut n1 = 1;
-			if tw[(i1 + 1, i1)] != zero() {
-				n1 = 2;
-			}
-			if i1 + n1 == jw {
-				ilst -= n1 as isize;
-				break;
-			}
-			let i2 = i1 + n1;
-			let mut n2 = 1;
-			if i2 + 1 < jw && (tw[(i2 + 1, i2)] != zero()) {
-				n2 = 2;
-			}
-			let (ev1, ev2);
-			if n1 == 1 {
-				ev1 = tw[(i1, i1)].abs();
-			} else {
-				ev1 = tw[(i1, i1)].abs()
-					+ tw[(i1 + 1, i1)].abs().sqrt()
-						* tw[(i1, i1 + 1)].abs().sqrt();
-			}
-			if n2 == 1 {
-				ev2 = tw[(i2, i2)].abs();
-			} else {
-				ev2 = tw[(i2, i2)].abs()
-					+ tw[(i2 + 1, i2)].abs().sqrt()
-						* tw[(i2, i2 + 1)].abs().sqrt();
-			}
-			if ev1 >= ev2 {
-				i1 = i2;
+		let kend = i - 1;
+		i = infqr;
+		let mut k = i + block(&tw, i, kend);
+		while k <= kend {
+			let n1 = k - i;
+			let n2 = block(&tw, k, kend);
+			if ev(&tw, i, n1) >= ev(&tw, k, n2) {
+				i = k;
 			} else {
 				sorted = false;
-				let ierr =
-					schur_swap(tw.rb_mut(), Some(v.rb_mut()), i1, n1, n2);
+				let ierr = schur_swap_checked(
+					tw.rb_mut(),
+					Some(v.rb_mut()),
+					i,
+					n1,
+					n2,
+					true,
+				);
 				if ierr == 0 {
-					i1 += n2;
+					i += n2;
 				} else {
-					i1 = i2;
+					i = k;
 				}
-				ilst = i1 as isize;
 			}
+			k = i + block(&tw, i, kend);
 		}
-		sorting_window_size = ilst;
 	}
 	let mut i = 0;
 	while i < jw {
@@ -3270,6 +3266,109 @@ mod tests {
 					}
 				}
 				assert!(q == Mat::<f64>::identity(3, 3));
+			}
+		}
+	}
+	/// tensor4all/faer#144: the deflation-window sort must finish when a swap
+	/// is rejected. `J_n + 1e-6 G` (Jordan block with eigenvalue 1), divided by
+	/// its largest entry and scaled by `2^-100`, made the sort compare the same
+	/// pair forever in `f32` at n = 128 and 257. Each run is bounded by a
+	/// timeout and checked for a similarity: at `2^-100` the input is below
+	/// LAPACK's negligibility level `smlnum = safmin * n / eps`, so the residual
+	/// is held to that absolute level; the same matrix at `2^-80` is held to
+	/// the usual relative bound.
+	#[test]
+	fn aed_sort_terminates_when_a_swap_fails() {
+		use crate::linalg::evd::hessenberg::{
+			hessenberg_in_place, hessenberg_in_place_scratch,
+		};
+		use crate::linalg::evd::{
+			hessenberg_schur_real, hessenberg_schur_scratch,
+		};
+		use rand::prelude::*;
+		use rand_distr::StandardNormal;
+		use std::sync::mpsc;
+		use std::time::Duration;
+
+		/// Returns `max |h - q t q^T|`, `max |h|` and `max |q^T q - I|`.
+		fn run(n: usize, exponent: i32) -> (f32, f32, f32) {
+			let rng = &mut StdRng::seed_from_u64(112);
+			let mut a = Mat::<f32>::from_fn(n, n, |i, j| {
+				let g: f32 = rng.sample(StandardNormal);
+				let jordan = if i == j || i + 1 == j { 1.0 } else { 0.0 };
+				jordan + 1e-6 * g
+			});
+			let scale = 2.0f32.powi(exponent) / a.norm_max();
+			a *= Scale(scale);
+			let mut householder = Mat::<f32>::zeros(1, n - 1);
+			hessenberg_in_place(
+				a.as_mut(),
+				householder.as_mut(),
+				Par::Seq,
+				MemStack::new(&mut MemBuffer::new(
+					hessenberg_in_place_scratch::<f32>(
+						n,
+						1,
+						ParShape::Seq,
+						Default::default(),
+					),
+				)),
+				Default::default(),
+			);
+			let h = Mat::<f32>::from_fn(n, n, |i, j| {
+				if i > j + 1 { 0.0 } else { a[(i, j)] }
+			});
+			let mut t = h.clone();
+			let mut q = Mat::<f32>::identity(n, n);
+			let mut wr = Col::<f32>::zeros(n);
+			let mut wi = Col::<f32>::zeros(n);
+			hessenberg_schur_real(
+				t.as_mut(),
+				Some(q.as_mut()),
+				wr.as_mut(),
+				wi.as_mut(),
+				Par::Seq,
+				MemStack::new(&mut MemBuffer::new(
+					hessenberg_schur_scratch::<f32>(
+						n,
+						true,
+						ParShape::Seq,
+						Default::default(),
+					),
+				)),
+				Default::default(),
+			)
+			.unwrap();
+			assert!(t.is_all_finite() && q.is_all_finite());
+			let residual = (&h - &q * &t * q.transpose()).norm_max();
+			let orthogonality =
+				(q.transpose() * &q - Mat::<f32>::identity(n, n)).norm_max();
+			(residual, h.norm_max(), orthogonality)
+		}
+
+		for n in [128, 257] {
+			let n_eps = n as f32 * f32::EPSILON;
+			let smlnum = f32::MIN_POSITIVE * (n as f32 / f32::EPSILON);
+			for exponent in [-100, -80] {
+				let (send, recv) = mpsc::channel();
+				std::thread::spawn(move || {
+					send.send(run(n, exponent)).unwrap()
+				});
+				let (residual, norm, orthogonality) = recv
+					.recv_timeout(Duration::from_secs(120))
+					.unwrap_or_else(|_| {
+						panic!("n = {n}, 2^{exponent}: real Schur did not finish")
+					});
+				let bound = if exponent == -100 {
+					smlnum
+				} else {
+					10.0 * n_eps * norm
+				};
+				assert!(residual <= bound, "n = {n}, 2^{exponent}: residual {residual}, bound {bound}");
+				assert!(
+					orthogonality <= 10.0 * n_eps,
+					"n = {n}, 2^{exponent}: orthogonality {orthogonality}"
+				);
 			}
 		}
 	}

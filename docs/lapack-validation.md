@@ -130,11 +130,18 @@ fixtures and with the same residual formula:
   grows like an accumulated rounding error and still catches a residual that grows with n:
   the clamp defect fixed in #121 gave 62.5 at n = 63, which a linear `20 * n / 16` (78.75)
   would have let pass. With it the f32, f64 and c64 groups and every parallel group pass.
-  What remains is c32 only: kinds 6 and 7 (scaled to `sqrt(MAX) / 16` and
-  `sqrt(MIN) * 16`) at n = 63 to 65, ratios 41.7 to 59.4 against 39.7 to 40.3.
-  Single-precision LAPACK `cgeev` (through scipy, OpenBLAS) gives 29 to 40 on the same
-  matrices, itself 39.77 against 39.69 on kind 6 at n = 63 (left vectors). That test stays
-  in `scripts/lapack-known-failures.json` under #112.
+  What remained was c32 only: kinds 6 and 7 (scaled to `sqrt(MAX) / 16` and
+  `sqrt(MIN) * 16`) at n = 63 to 65, ratios 41.7 to 59.4 against 39.7 to 40.3, where
+  single-precision LAPACK `cgeev` (through scipy, OpenBLAS) gives 29 to 40. A stage-by-stage
+  comparison with `cgeev` placed the difference in the complex Schur iteration (backward
+  error 226 to 258 against 67 to 93 on the same matrix scaled to unit size): `?GEEV` scales
+  its input into `[smlnum, bignum]` (`smlnum = sqrt(safmin) / eps`) before the Hessenberg
+  reduction, and faer did not. `evd_imp` now does the same, by a power of two, and scales the
+  eigenvalues back; the c32 group passes and the known-failures entry is gone. A sweep over
+  f32/f64/c32/c64, n = 16 to 257 and scales up to the range limits showed that the missing
+  scaling was far more serious below: on random, Grcar and near-Jordan matrices the ratio grew
+  from about `2^-90` (32-bit), and at `2^-100` (32-bit) and `2^-960` (64-bit) and below it was
+  `1e4` to `2e15` where LAPACK gives 2 to 70. Regression test: `geev_scaling_tests`.
 
 ### Phase 4 — Balancing and back-transformation
 
