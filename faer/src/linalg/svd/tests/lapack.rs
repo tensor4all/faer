@@ -455,6 +455,31 @@ fn logarithmic_bidiagonal_seeded(n: usize, seed: u64) -> Mat<Scalar> {
 	})
 }
 
+/// #110: since the values-only route went to dqds (#52), DCHKBD type 16 (entries `eps^U(-2, 2)`)
+/// returned `NoConvergence`: its singular values span more than the range of their squares, so the
+/// zero-shift dqds sweep underflows. The rotation path now finishes it, as LAPACK's `DBDSQR`
+/// finishes when `DLASQ1` fails. Two cases of the opt-in `dchkbd_15_to_19`, all four `U`/`V`
+/// modes each, run with the regular tests: n = 128 at threshold 8 falls back to divide and conquer,
+/// n = 127 at threshold 128 to the QR iteration directly.
+#[test]
+fn dchkbd_type_16_values_only_finishes() {
+	let mut failures = Vec::new();
+	let mut attempted = 0;
+	for (n, threshold) in [(128, 8), (127, 128)] {
+		let b = logarithmic_bidiagonal(n);
+		run_bidiagonal_case(
+			&mut failures,
+			&mut attempted,
+			&format!("DCHKBD type 16 (#110), seed={BIDIAGONAL_SEED:#x}"),
+			b.as_ref(),
+			None,
+			threshold,
+		);
+	}
+	assert_eq!(attempted, 8);
+	assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// #75: the divide-and-conquer merge forms its boundary rotation from
 /// `alpha * lambda` and `beta * phi`. Both are subnormal for a deeply split
 /// bidiagonal, so their squares underflowed and the rotation stopped being
