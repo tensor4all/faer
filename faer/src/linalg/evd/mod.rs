@@ -1833,21 +1833,24 @@ pub fn eigenvectors_from_schur_cplx<T: ComplexField>(
 		Err(EvdError::NoConvergence)
 	}
 }
-/// `?GEEV`'s scaling of its input: when the largest entry modulus is below
+/// `?GEEV`'s scaling of its input: when the largest entry is below
 /// `smlnum = sqrt(min_positive) / eps` or above `bignum = 1 / smlnum`, the power of two that
 /// brings it to just inside that bound, else `None`. LAPACK scales by `smlnum / anrm` (or
-/// `bignum / anrm`); a power of two lands within a factor of two of the same bound and scales
-/// every entry exactly. Without it the Hessenberg reduction and the Schur iteration of a matrix
-/// whose entries are near the bottom of the range work in subnormals, and the eigenvectors lost
-/// every digit (a GET22 ratio of about `1 / eps` below `2^-90` for `f32` and `2^-960` for
-/// `f64`); near the top, the complex Schur iteration lost a factor of three against `cgeev`
-/// (#112).
+/// `bignum / anrm`); a power of two lands within a factor of two of the same bound and does not
+/// round (an entry far below the largest can still underflow when scaling down, as in LAPACK).
+/// The largest entry is the largest `|re|` or `|im|`, within a factor `sqrt(2)` of LAPACK's
+/// modulus: faer's complex modulus is itself inf for `2^1023 + 0i` and zero for `2^-1074 + 0i`,
+/// which would select a zero factor or none. Without the scaling, the Hessenberg reduction and
+/// the Schur iteration of a matrix whose entries are near the bottom of the range work in
+/// subnormals: on Grcar, random and near-Jordan matrices the GET22 ratio grew from about `2^-90`
+/// (32-bit) and reached `1 / eps` by `2^-100` (32-bit) and `2^-960` (64-bit); near the top, the
+/// complex Schur iteration lost a factor of three against `cgeev` (#112).
 fn geev_scaling<T: ComplexField>(A: MatRef<'_, T>) -> Option<T::Real> {
 	let n = A.nrows();
 	let mut anrm = zero::<T::Real>();
 	for j in 0..n {
 		for i in 0..n {
-			anrm = anrm.fmax(A[(i, j)].abs());
+			anrm = anrm.fmax(A[(i, j)].real().abs()).fmax(A[(i, j)].imag().abs());
 		}
 	}
 	let smlnum = min_positive::<T::Real>().sqrt() / eps::<T::Real>();
@@ -3158,7 +3161,9 @@ mod geev_scaling_tests {
 	//! in subnormals: a Grcar or random matrix scaled by `2^-120` (`f32`, `c32`) or `2^-1010`
 	//! (`f64`, `c64`) had a GET22 ratio of about `1 / eps` (`4e6` and `2e15`). Near the top the
 	//! complex Schur iteration lost a factor of three against `cgeev`. Residuals are measured in
-	//! `f64` on the dimensionless matrix `a / scale`, exact for a power of two.
+	//! `f64` on the dimensionless matrix `a / scale`, exact for a power of two. The left side is
+	//! checked as the right eigenvectors of `a^H`; the `u_left` branch of `evd_imp` itself is
+	//! exercised by the LAPACK nonsymmetric EVD tests.
 	use crate::{assert, c32, c64, Mat, Par};
 	use num_complex::Complex64 as Z;
 
@@ -3224,12 +3229,48 @@ mod geev_scaling_tests {
 						let evd = m.eigen(Par::Seq).unwrap();
 						let w: Vec<Z> = (0..n).map(|i| Z::new(evd.S()[i].re as f64, evd.S()[i].im as f64) / scale).collect();
 						let u: Vec<Vec<Z>> = (0..n).map(|i| (0..n).map(|j| Z::new(evd.U()[(i, j)].re as f64, evd.U()[(i, j)].im as f64)).collect()).collect();
+						// `f64::max` drops a NaN, so a nonfinite result is rejected first
+						assert!(w.iter().all(|w| w.is_finite()) && u.iter().flatten().all(|u| u.is_finite()));
 						let r = get22(&dimless, &u, &w, $eps);
 						assert!(r <= thresh, "{} scale 2^{e} {side}: GET22 {r}", stringify!($t));
 					}
 				}
 			}
 		}};
+	}
+
+	/// The ends of the range for a complex matrix, where faer's complex modulus overflows
+	/// (`2^1023 + 0i`, `2^127 + 0i`) or underflows (`2^-1074`, `2^-149`): the eigenvalues come
+	/// back exactly.
+	#[test]
+	fn evd_scaling_at_the_complex_range_ends() {
+		let top = c64::new(2.0f64.powi(1023), 0.0);
+		let evd = Mat::from_fn(1, 1, |_, _| top).eigen(Par::Seq).unwrap();
+		assert!(evd.S()[0] == top);
+		let top = c32::new(2.0f32.powi(127), 0.0);
+		let evd = Mat::from_fn(1, 1, |_, _| top).eigen(Par::Seq).unwrap();
+		assert!(evd.S()[0] == top);
+		// a rotation by the smallest subnormal: eigenvalues `+-i m`
+		let m = f64::from_bits(1);
+		let a = Mat::from_fn(2, 2, |i, j| match (i, j) {
+			(0, 1) => c64::new(-m, 0.0),
+			(1, 0) => c64::new(m, 0.0),
+			_ => c64::new(0.0, 0.0),
+		});
+		let evd = a.eigen(Par::Seq).unwrap();
+		let mut w = [evd.S()[0], evd.S()[1]];
+		w.sort_by(|a, b| a.im.partial_cmp(&b.im).unwrap());
+		assert!(w == [c64::new(0.0, -m), c64::new(0.0, m)]);
+		let m = f32::from_bits(1);
+		let a = Mat::from_fn(2, 2, |i, j| match (i, j) {
+			(0, 1) => c32::new(-m, 0.0),
+			(1, 0) => c32::new(m, 0.0),
+			_ => c32::new(0.0, 0.0),
+		});
+		let evd = a.eigen(Par::Seq).unwrap();
+		let mut w = [evd.S()[0], evd.S()[1]];
+		w.sort_by(|a, b| a.im.partial_cmp(&b.im).unwrap());
+		assert!(w == [c32::new(0.0, -m), c32::new(0.0, m)]);
 	}
 
 	#[test]
