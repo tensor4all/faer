@@ -641,40 +641,92 @@ fn eigenvectors_ok<T: ComplexField>(u: MatRef<'_, T>) -> bool {
 	u.is_all_finite()
 		&& (0..u.ncols()).all(|j| u.col(j).norm_l2() > zero::<T::Real>())
 }
-/// The shift clamp `eps * sum |a_ij|` of the back substitution, summed over the
-/// upper triangle and the `subdiag` subdiagonals below it (`1` for a real
-/// Schur form, `0` for a triangular one).
-///
-/// The plain sum overflows to infinity for a finite matrix whose entries are
-/// near the top of the range, which would clamp every shift to infinity and
-/// return a wrong direction with `Ok`. `eps * |a_ij|` does not overflow there,
-/// so the sum is then recomputed term by term. It is only used in that case,
-/// because summing the scaled terms rounds them to zero for subnormal entries
-/// where the plain sum still gives a nonzero clamp.
-fn eps_norm<T: ComplexField>(A: MatRef<'_, T>, subdiag: usize) -> T::Real {
-	let n = A.nrows();
+/// `eps * (|re| + |im|)`, summed after the scaling so that it does not overflow for an entry
+/// near the top of the range.
+fn eps_abs1<T: ComplexField>(x: &T) -> T::Real {
 	let eps = eps::<T::Real>();
+	&eps * &x.real().abs() + &eps * &x.imag().abs()
+}
+/// The shift clamp of the back substitution for an eigenvalue `lambda` of a Schur form `A`:
+/// a shift `A[i, i] - lambda` smaller than this is replaced by it.
+///
+/// It is `eps * max(|lambda|, max |a_ij|)` (`|re| + |im|` for complex values, scaled by `eps`
+/// first so that it does not overflow), over the upper triangle and the `subdiag` subdiagonals
+/// below it (`1` for a real Schur form, `0` for a triangular one). It is relative to the
+/// eigenvalue and the largest entry and not to the size of the matrix. LAPACK's `?TREVC` uses
+/// `max(ulp * (|wr| + |wi|), safmin * n / ulp)`, on a matrix that `?GEEV` has scaled into range
+/// first. faer does not scale, so the floor follows the entries instead; it is at least
+/// `min_positive * eps`, the smallest positive subnormal, so a Schur form of subnormal entries
+/// still has a nonzero clamp.
+///
+/// This was `eps * sum |a_ij|` over the whole Schur form. That grows with `n`, and a clamped row
+/// leaves a residual of the size of the clamp in the eigenvector, so the GET22 residual ratio grew
+/// with `n` too: `(2n - 1) / 2` on a Jordan block, against LAPACK's 0.5 (#112). A clamp this small
+/// is only range safe on a Schur form whose entries are near one, which [`scaled_into_range`]
+/// provides, as `?GEEV`'s scaling does for `?TREVC`.
+fn entry_floor<T: ComplexField>(A: MatRef<'_, T>, subdiag: usize) -> T::Real {
+	let n = A.nrows();
+	let mut m = min_positive::<T::Real>() * eps::<T::Real>();
+	for j in 0..n {
+		for i in 0..Ord::min(j + 1 + subdiag, n) {
+			m = m.fmax(eps_abs1(&A[(i, j)]));
+		}
+	}
+	m
+}
+/// A Schur form whose largest entry is far from one (outside `[2^-20, 2^20]`), scaled by a power
+/// of two so that its largest entry is in `[1, 2)`; `None` when it is already in range. The
+/// eigenvectors do not change. The back substitution's clamp ([`entry_floor`]) is relative to the
+/// entries, so without this a Schur form near the top of the range overflowed in the products
+/// with the back-substituted entries (about `1 / eps`) before the solvers' rescaling ran, and one
+/// near the bottom had a clamp whose complex reciprocal overflows (#112). `?GEEV` scales its
+/// input for `?TREVC` the same way. The power is applied as two factors, so neither overflows.
+fn scaled_into_range<T: ComplexField>(A: MatRef<'_, T>, subdiag: usize) -> Option<Mat<T>> {
+	let n = A.nrows();
 	let rows = |j: usize| Ord::min(j + 1 + subdiag, n);
-	let mut norm = zero::<T::Real>();
+	let mut m = zero::<T::Real>();
 	for j in 0..n {
 		for i in 0..rows(j) {
-			norm += A[(i, j)].abs1();
+			m = m.fmax(A[(i, j)].real().abs()).fmax(A[(i, j)].imag().abs());
 		}
 	}
-	let mut eps_norm = &eps * &norm;
-	if !eps_norm.is_finite() {
-		let mut acc = zero::<T::Real>();
-		for j in 0..n {
-			for i in 0..rows(j) {
-				let a = &A[(i, j)];
-				// `abs1` is `|re| + |im|`, which overflows on its own for a
-				// complex entry with both parts large, so scale them apart
-				acc += &eps * &a.real().abs() + &eps * &a.imag().abs();
-			}
-		}
-		eps_norm = acc;
+	let one = one::<T::Real>();
+	let two = from_f64::<T::Real>(2.0);
+	let half = from_f64::<T::Real>(0.5);
+	if m == zero::<T::Real>()
+		|| !m.is_finite()
+		// 2^-20 and 2^20, written out: `f64::powi` needs `std`
+		|| (m >= from_f64::<T::Real>(9.5367431640625e-7) && m <= from_f64::<T::Real>(1048576.0))
+	{
+		return None;
 	}
-	eps_norm
+	// `m * 2^k` in `[1, 2)`
+	let mut k = 0i32;
+	let mut mm = m;
+	while mm >= two {
+		mm = mm * &half;
+		k -= 1;
+	}
+	while mm < one {
+		mm = mm * &two;
+		k += 1;
+	}
+	let pow = |e: i32| {
+		let base = if e >= 0 { two.copy() } else { half.copy() };
+		let mut f = one.copy();
+		for _ in 0..e.unsigned_abs() {
+			f = f * &base;
+		}
+		f
+	};
+	let (fa, fb) = (pow(k / 2), pow(k - k / 2));
+	Some(Mat::from_fn(n, n, |i, j| {
+		if i < rows(j) {
+			A[(i, j)].mul_real(&fa).mul_real(&fb)
+		} else {
+			zero::<T>()
+		}
+	}))
 }
 pub(crate) fn evd_from_real_schur_imp<T: RealField>(
 	A: MatRef<'_, T>,
@@ -686,7 +738,9 @@ pub(crate) fn evd_from_real_schur_imp<T: RealField>(
 	let zero = zero::<T>;
 	let mut V = V;
 	let n = A.nrows();
-	let eps_norm = eps_norm(A, 1);
+	let scaled = scaled_into_range(A, 1);
+	let A = scaled.as_ref().map_or(A, |s| s.as_ref());
+	let floor = entry_floor(A, 1);
 	let mut k = n;
 	loop {
 		if k == 0 {
@@ -703,7 +757,7 @@ pub(crate) fn evd_from_real_schur_imp<T: RealField>(
 				A.submatrix(0, 0, k, k),
 				p.copy(),
 				V.rb_mut().subrows_mut(0, k).col_mut(k),
-				eps_norm.copy(),
+				eps_abs1(p).fmax(floor.copy()),
 				par.reborrow(),
 				params,
 			);
@@ -732,7 +786,7 @@ pub(crate) fn evd_from_real_schur_imp<T: RealField>(
 				p.copy(),
 				q.copy(),
 				V.rb_mut().submatrix_mut(0, k - 1, k - 1, 2),
-				eps_norm.copy(),
+				(eps_abs1(p) + eps_abs1(q)).fmax(floor.copy()),
 				par.reborrow(),
 				params,
 			);
@@ -752,7 +806,9 @@ pub(crate) fn evd_from_cplx_schur_imp<T: ComplexField>(
 	let one = one::<T>;
 	let mut V = V;
 	let n = A.nrows();
-	let eps_norm = eps_norm(A, 0);
+	let scaled = scaled_into_range(A, 0);
+	let A = scaled.as_ref().map_or(A, |s| s.as_ref());
+	let floor = entry_floor(A, 0);
 	let mut k = n;
 	loop {
 		if k == 0 {
@@ -779,7 +835,7 @@ pub(crate) fn evd_from_cplx_schur_imp<T: ComplexField>(
 			conj_A,
 			p.copy(),
 			V.rb_mut().subrows_mut(0, k).col_mut(k),
-			eps_norm.copy(),
+			eps_abs1(p).fmax(floor.copy()),
 			par.reborrow(),
 			params,
 		);
@@ -2713,6 +2769,37 @@ mod range_limit_vector_tests {
 		let lambda = Complex::new(0.5, 0.0);
 		let v = real_column(x.as_ref(), 2);
 		assert_eigenvector(unit.as_ref(), &v, &lambda, &1e-12);
+	}
+
+	/// #112's relative clamp is small next to a Schur form near the top of the range, so the
+	/// back-substituted entries (about `1 / eps`) times the next row's entries overflowed before
+	/// the rescaling could run; a Schur form near the bottom of the range had a clamp whose complex
+	/// reciprocal overflowed. Both are scaled into range before the substitution now.
+	#[test]
+	fn jordan_chains_at_both_ends_of_the_range() {
+		const CHAIN_3X3: [[f64; 3]; 3] = [[1.0, 1.0, 0.0], [0.0, 1.0, 1.0], [0.0, 0.0, 1.0]];
+		fn real<T: RealField>(scale: T, tol: T) {
+			let unit = unit::<T, 3>(&CHAIN_3X3);
+			let x = real_vectors::<T>(scaled_real(unit.as_ref(), &scale).as_ref());
+			let lambda = Complex::new(one::<T>(), zero::<T>());
+			for j in 0..3 {
+				let v = real_column(x.as_ref(), j);
+				assert_eigenvector(unit.as_ref(), &v, &lambda, &tol);
+			}
+		}
+		fn cplx<T: RealField>(scale: T, tol: T) {
+			let unit = unit::<T, 2>(&JORDAN_2X2);
+			let x = cplx_vectors(scaled_cplx(unit.as_ref(), &scale).as_ref());
+			let lambda = Complex::new(one::<T>(), zero::<T>());
+			for j in 0..2 {
+				let v = cplx_column(x.as_ref(), j);
+				assert_eigenvector(unit.as_ref(), &v, &lambda, &tol);
+			}
+		}
+		real::<f64>(2.0f64.powi(972), 1e-12);
+		real::<f32>(2.0f32.powi(105), 1e-4);
+		cplx::<f64>(2.0f64.powi(-972), 1e-12);
+		cplx::<f32>(2.0f32.powi(-105), 1e-4);
 	}
 
 	/// A subnormal Schur form must keep the clamp the plain norm gives: summing
