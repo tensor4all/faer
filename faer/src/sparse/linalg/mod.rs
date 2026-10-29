@@ -77,6 +77,12 @@ pub enum LuError {
 		/// iteration at which a pivot could not be found
 		index: usize,
 	},
+	/// rank deficient numeric values: every candidate pivot of a column is
+	/// exactly zero
+	NumericSingular {
+		/// iteration at which the pivot is zero
+		index: usize,
+	},
 	/// non algorithmic error
 	Generic(FaerError),
 }

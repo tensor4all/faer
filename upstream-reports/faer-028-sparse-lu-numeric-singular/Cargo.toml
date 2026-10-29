@@ -1,0 +1,12 @@
+[package]
+name = "faer-028-sparse-lu-numeric-singular"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# A standalone project: it reproduces the published crate on its own.
+[workspace]
+
+[dependencies]
+faer = { version = "=0.24.4", default-features = false, features = ["std", "linalg", "sparse"] }
+dyn-stack = "0.13"
