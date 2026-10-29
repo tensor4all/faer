@@ -3,6 +3,7 @@
 **What happens:** `full_piv_lu` chooses a different pivot for the same matrix when the SIMD vector holds a different number of elements.
 **Which input:** a matrix where two or more entries tie for the largest magnitude (common with small integer entries).
 **Which version:** `faer` 0.24.4, seen on an AVX2 machine by comparing `f64` (4 elements per vector) with `f32` (8 elements per vector).
+**Added to this list:** 2026-10-29.
 
 ## Reproduce
 
@@ -48,6 +49,7 @@ It checks that the SIMD search and the scalar search pick the same pivot on tied
 ## Affected versions
 
 Confirmed by running this program: `faer` 0.24.4.
+Not fixed upstream: the same code is in upstream `main` at `0ecd846` (2026-10-22).
 
 ## References
 

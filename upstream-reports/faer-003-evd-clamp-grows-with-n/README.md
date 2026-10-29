@@ -3,6 +3,7 @@
 **What happens:** `Mat::eigen` returns eigenvectors whose residual `|A U - U S|` grows in proportion to `n`, instead of staying a few `eps` of `|A| |U|`.
 **Which input:** a matrix with a defective or tightly clustered spectrum, for example a Jordan block (ones on the diagonal and on the subdiagonal).
 **Which version:** `faer` 0.24.4.
+**Added to this list:** 2026-10-29.
 
 ## Reproduce
 
@@ -46,6 +47,7 @@ Fork regression tests, in `faer/src/linalg/evd/`:
 ## Affected versions
 
 Confirmed by running this program: `faer` 0.24.4.
+Not fixed upstream: the same code is in upstream `main` at `0ecd846` (2026-10-22).
 
 ## References
 
