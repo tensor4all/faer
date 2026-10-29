@@ -151,8 +151,9 @@ a region runs in parallel when `estimate >= PAYS * sections * dispatch_cost(widt
   measurement replaces its alias. **A row's rates and its dispatch costs must come from the same machine and
   clock state:** the boost moves both by about 1.66 times with a stable ratio (within a few percent,
   `tables-*-exec3-boost.md`), so mixing a boosted rate with an unboosted cost shifts every floor. The Rayon
-  table of a build without the feature is the model of threadteam (linear between the anchors at widths 2, 4,
-  6, flat above) with the same values. Region constants of the `x86_64-avx512` row: the block apply streaming
+  table of a build without the feature was the model of threadteam at the time (linear between the anchors at
+  widths 2, 4, 6, flat above) with the same values; threadteam 0.1.1 grows the cost linearly above a row's largest
+  anchor, and faer reads the team cost from threadteam only (`docs/worklogs/2026-10-29-team-cost-from-threadteam.md`). Region constants of the `x86_64-avx512` row: the block apply streaming
   per multiply-add, the divide and conquer solves (median over `m` 64 to 512; per `m^2` 152.9 and 97.4 ns, size
   dependent, 145 to 178 and 88 to 102), the sparse product (median of the measured densities) and the
   triangular inverse (median over `m`; 0.047 per `m^3` at 64 falling to 0.0145 at 512, as on the M5 row).
