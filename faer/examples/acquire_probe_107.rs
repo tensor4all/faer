@@ -26,9 +26,8 @@
 //!
 //! Environment:
 //! * `PIN=1`: `PoolBuilder::pin_participants(true)` (every mode except `with_team`)
-//! * `PROBE_SPIN_POLLS`, `PROBE_PREEMPT_GAP_US`, `PROBE_WARM_MS`, `PROBE_PRESSURE_EVENTS`: the wait
-//!   settings of threadteam-rs#14 (every mode except `with_team`, which builds its pool inside
-//!   faer with the defaults)
+//! * `PROBE_SPIN_POLLS`: the pool's spin budget (every mode except `with_team`, which builds its
+//!   pool inside faer with the defaults)
 //! * `PRIME_MS=<ms>`: before the measured calls, run the same mode for this long (unmeasured)
 //! * `CENSUS=off`: skip the census section (one extra short section per call, after the timing)
 //! * `SAMPLE_CPU=<cpu>`: a sampler thread pinned to `<cpu>` (keep it outside the measured set) reads
@@ -245,15 +244,6 @@ fn pool(width: usize, pin: bool) -> Pool {
 	// Wait settings of threadteam-rs#14 (hidden builder methods of that branch).
 	if let Some(n) = env("PROBE_SPIN_POLLS") {
 		b = b.spin_polls(n as u32);
-	}
-	if let Some(us) = env("PROBE_PREEMPT_GAP_US") {
-		b = b.preempt_gap(Duration::from_micros(us));
-	}
-	if let Some(ms) = env("PROBE_WARM_MS") {
-		b = b.warm_up(Duration::from_millis(ms));
-	}
-	if let Some(n) = env("PROBE_PRESSURE_EVENTS") {
-		b = b.wait_tuning(100, Duration::from_millis(100), n as u32, Duration::ZERO);
 	}
 	b.build().expect("a pool")
 }
