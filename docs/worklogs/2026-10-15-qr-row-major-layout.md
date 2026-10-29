@@ -172,3 +172,26 @@ one thread and 7.1x at eight. Consumer: `tlinalg-rs#46`.
   column-major matrix. Found row-major matrix." So the row-major QR penalty is a
   stated stance upstream, not an unnoticed bug -- which is also why the fork's change
   removes the warning's premise rather than keeping it.
+
+## 2026-10-29: the split and the first touch (tensor4all/faer#92, part 1)
+
+Unmeasured here. The timings above are the 2026-10-15 ones. The evidence for this change comes from the
+monitor's broccoli (1-64T) and evo runs, not from these numbers.
+
+- **The split follows the destination.** The column split above was right for the copy *into* the
+  column-major buffer. It was wrong for the copy back into a row-major matrix: there each thread got a
+  few elements of every row. On a narrow matrix several threads then wrote the same cache line (1024x64
+  on 64 threads: one column each, eight threads per line). The copy now splits along the destination's
+  major dimension, rows on the way back, in whole 16-element tiles. Each thread writes whole lines of its
+  own, so two threads can meet only at the edges of their shares (the base is not aligned). That also
+  caps the task count at the number of tiles. The old count was `min(p, ncols)`, so this change only
+  narrows.
+- **The buffer is initialised by the threads that fill it.** `vec![zero; m * n]` was a serial pass on the
+  caller and placed every page on the caller's node. `linalg::column_major_copy` allocates uninitialised
+  memory. Each task writes zeros over its own columns with `ptr::write` and then copies over them. The
+  zeros are needed because the tile kernel assigns through references, and `ComplexField` is only
+  `Clone`, so nothing may be read or dropped uninitialised. The vector keeps length zero until every task
+  has finished (threadteam joins before it propagates a panic). A panic therefore leaks the written
+  elements and drops none.
+- **Not yet:** a cost gate for the copy (it needs a copy rate and #91's dispatch rows), `par` for
+  `MatRef::to_owned` from the solver constructors, and the full-pivoting LU ledger row.
