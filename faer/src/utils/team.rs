@@ -41,10 +41,13 @@ use threadteam::TeamExec;
 /// pool or a team should borrow from it directly instead, because two pools do not share their
 /// members.
 ///
-/// `with_team` is for a one-off call: every call builds a new pool, so it spawns its worker threads
-/// and joins them again when the closure ends. A caller that runs parallel work repeatedly should
-/// own the [`threadteam::Pool`] and [`threadteam::Team`] itself, build them once, and lend a `Par`
-/// from the team to each call:
+/// `with_team` is for a one-off call: every call builds a new pool and acquires its members again.
+/// The threads themselves are not new: a pool with threadteam's default thread settings returns
+/// its threads to a process-wide cache when it is dropped, and the next pool of the same width
+/// takes them (threadteam 0.2), so repeated calls at one width reuse running threads instead of
+/// spawning and joining them. A caller that runs parallel work repeatedly should still own the
+/// [`threadteam::Pool`] and [`threadteam::Team`] itself, build them once, and lend a `Par` from
+/// the team to each call:
 ///
 /// ```
 /// use faer::{Accum, Mat, Par};
@@ -2105,5 +2108,34 @@ mod tests {
 			qr.solve(b.as_ref(), par)
 		});
 		assert!(max_diff(want.as_ref(), got.as_ref()) < 1e-8);
+	}
+
+	/// Two `with_team` calls of one width run on the threads of one pool: the second pool takes the
+	/// first one's threads from threadteam's cache instead of spawning new ones (tensor4all/faer#107).
+	/// A pool of 5 threads reserves 4 members, which need not be the same 4 each time.
+	#[test]
+	fn with_team_calls_of_one_width_reuse_the_threads() {
+		use std::collections::HashSet;
+		use std::sync::Mutex;
+		let _turn = team_turn();
+		let me = std::thread::current().id();
+		// the threads of the members, without the calling thread
+		let workers = || {
+			with_team(5, |par| {
+				let Par::Team(mut team) = par else { panic!("a width of 5 is a team") };
+				let ids = Mutex::new(HashSet::new());
+				team.reborrow().run(|_, _| {
+					ids.lock().unwrap().insert(std::thread::current().id());
+				});
+				let mut ids = ids.into_inner().unwrap();
+				ids.remove(&me);
+				ids
+			})
+		};
+		let first = workers();
+		let second = workers();
+		assert_eq!((first.len(), second.len()), (4, 4));
+		let all = first.union(&second).count();
+		assert!(all <= 5, "two calls ran on {all} threads: the second pool spawned new ones");
 	}
 }
