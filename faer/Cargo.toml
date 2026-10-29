@@ -8,7 +8,7 @@ readme = "../README.md"
 repository = "https://github.com/tensor4all/faer"
 license = "MIT AND BSD-3-Clause"
 keywords = ["math", "linear-algebra"]
-rust-version = "1.84.0"
+rust-version = "1.89.0"
 
 # The dependency key stays `faer`, so downstream `use faer::...` is unchanged.
 [lib]
@@ -66,11 +66,17 @@ std = [
   "libm/arch",
   "dep:t4a-private-gemm-x86",
 ]
-nightly = [
+# AVX-512 kernels at run time. The target features are stable from Rust 1.89, so this does not need
+# the nightly compiler any more - but it is not a default feature yet: with `pulp/x86-v4` the
+# library returns non-finite factors on this host (full-pivot LU `test_gh238`, QZ, matrix-free SVD,
+# single-threaded), which is tensor4all/faer#86's open question. A build without it selects AVX2.
+x86-v4 = [
   "pulp/x86-v4",
   "gemm/x86-v4",
   "nano-gemm/x86-v4",
 ]
+# the name the feature had while AVX-512 needed the nightly compiler
+nightly = ["x86-v4"]
 linalg = []
 sparse = []
 sparse-linalg = [

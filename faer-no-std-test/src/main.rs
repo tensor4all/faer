@@ -52,9 +52,10 @@ fn my_allocator_error(_layout: Layout) -> ! {
 	panic!("out of memory");
 }
 
+// The personality routine is a language item: rustc mangles it itself, and from the 1.89
+// toolchain on it rejects a `#[no_mangle]` on an internal language item.
 #[lang = "eh_personality"]
-#[no_mangle]
-pub extern "C" fn rust_eh_personality() {}
+extern "C" fn rust_eh_personality() {}
 
 /// The static global allocator.
 #[global_allocator]

@@ -328,7 +328,7 @@ fn lapack_self_adjoint_evd_range() {
 // thresholds and both compute-eigenvectors modes answer to the same CHKST
 // bound of 60 epsilons.
 #[test]
-fn dense_self_adjoint_qr_spectrum_accuracy() {
+fn lapack_self_adjoint_evd_qr_spectrum_accuracy() {
 	let n = 127;
 	let (a, mut known) = hermitian(n, 2);
 	known.sort_by(|x, y| x.partial_cmp(y).unwrap());

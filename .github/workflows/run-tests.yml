@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         toolchain:
-          - 1.84.0
+          - 1.89.0
         os:
           - ubuntu-latest
           - windows-latest
@@ -32,13 +32,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: MSRV 1.84.0
+      - name: MSRV 1.89.0
         run:
           cd ./faer-traits &&
           cargo check &&
           cd ../faer &&
           cargo check
 
+  # The nightly pin is the oldest one that carries the Rust 1.89 stabilisations (`rust-version` in
+  # the manifests is 1.89, and the AVX-512 target features the `x86-v4` feature needs are stable
+  # there); 2025-08-07 is the 1.89 release date.
   nostd:
     name: nostd-${{ matrix.toolchain }}-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -46,7 +49,7 @@ jobs:
       fail-fast: false
       matrix:
         toolchain:
-          - nightly-2025-01-08
+          - nightly-2025-08-07
         os:
           - ubuntu-latest
           - windows-latest
