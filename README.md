@@ -56,15 +56,34 @@ There is no process wide parallelism setting. Every operation that can run in pa
 
 ```rust
 faer::team::with_team(8, |par| {
-    // every faer call in here with `par` runs its regions on the eight reserved members
+    // every faer call in here with `par` runs its regions on 8 participants: the calling thread
+    // and 7 reserved workers
     qr_in_place(a.as_mut(), h.as_mut(), par, stack, params);
 });
 ```
 
 A caller that already owns a team lends a sub-team to each call with `par.reborrow()`; a width of one
-is `Par::Seq`. `with_team` reserves a team for the duration of the closure, so a caller that keeps a
-budget across many calls should own a team itself. See the *parallelism* section of the crate
-documentation for the full picture.
+is `Par::Seq`.
+
+`with_team` is for a one-off call: every call builds a new pool, so it spawns its worker threads and
+joins them again when the closure ends. Code that runs parallel work repeatedly should own the
+`threadteam` `Pool` and `Team` itself, build them once, and lend a `Par` from the team to each call:
+
+```rust
+// once: 8 participants, the calling thread and 7 reserved workers
+let pool = threadteam::Pool::builder().threads(8).build()?;
+let team = pool.into_team(8).ok().expect("an idle pool");
+
+// per call: lend the team to faer for the duration of the closure
+for (a, h) in work {
+    let mut exec = team.exec(8);
+    exec.team(|t| qr_in_place(a.as_mut(), h.as_mut(), Par::Team(t), stack, params))
+        .ok()
+        .expect("a team token for an idle team");
+}
+```
+
+See the *parallelism* section of the crate documentation for the full picture.
 
 # minimum supported rust version
 
