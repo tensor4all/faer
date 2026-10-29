@@ -177,6 +177,25 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 			if nrows == 0 || ncols == 0 {
 				return;
 			}
+			// The kernel turns a negative depth stride of its left operand around by reversing
+			// that operand's columns and the right operand's rows, but not the diagonal `D`
+			// between them (t4a-private-gemm-x86 0.1.26, `lib.rs:1408`), so each depth index met
+			// the wrong `D` entry (#113: the unpivoted LDL of a matrix stored with reversed rows
+			// and columns). Its left operand is `A`, or `B` transposed when the destination's
+			// rows are further apart than its columns (it swaps the two first). Reverse the depth
+			// of all three here when that operand's depth stride is negative, which leaves the
+			// sum unchanged, so the kernel never takes that branch with a diagonal.
+			let mut D = D;
+			let kernel_lhs_depth_stride = if C.row_stride().unsigned_abs() > C.col_stride().unsigned_abs() {
+				B.row_stride()
+			} else {
+				A.col_stride()
+			};
+			if D.is_some() && kernel_lhs_depth_stride < 0 {
+				A = A.reverse_cols();
+				B = B.reverse_rows();
+				D = D.map(|D| D.column_vector().reverse_rows().as_diagonal());
+			}
 			macro_rules! go {
 				($call:path, $last:expr) => {
 					$call(
@@ -660,6 +679,69 @@ mod tests {
 		);
 		for j in 0..4 {
 			std::assert_eq!(c[(3, j)], 7.0);
+		}
+	}
+}
+#[cfg(test)]
+mod reversed_depth_tests {
+	use super::*;
+	use crate::{Col, Mat};
+
+	/// `C += A D B` with `A`'s columns and `B`'s rows stored in either direction, into a
+	/// column-major and a row-major `C`, against the plain sum: the x86 kernel reversed a negative
+	/// depth stride without reversing `D` (#113).
+	#[test]
+	fn a_diagonal_product_reads_the_depth_in_any_direction() {
+		let (m, k) = (61usize, 5usize);
+		let a = Mat::<f64>::from_fn(m, k, |i, j| ((i * 7 + j * 3) % 11) as f64 - 5.0);
+		let b = Mat::<f64>::from_fn(k, m, |i, j| ((i * 5 + j * 2) % 13) as f64 - 6.0);
+		let d = Col::<f64>::from_fn(k, |i| 1.0 + i as f64);
+		let mut want = Mat::<f64>::zeros(m, m);
+		for i in 0..m {
+			for j in 0..m {
+				want[(i, j)] = (0..k).map(|t| a[(i, t)] * d[t] * b[(t, j)]).sum::<f64>();
+			}
+		}
+		// the operands stored with their depth reversed: `view` turns them back, so the logical
+		// matrices are `a` and `b`, read through a negative depth stride
+		let a_rev = Mat::<f64>::from_fn(m, k, |i, j| a[(i, k - 1 - j)]);
+		let b_rev = Mat::<f64>::from_fn(k, m, |i, j| b[(k - 1 - i, j)]);
+		for a_reversed in [false, true] {
+			for b_reversed in [false, true] {
+				for row_major in [false, true] {
+					let av = if a_reversed { a_rev.as_ref().reverse_cols() } else { a.as_ref() };
+					let bv = if b_reversed { b_rev.as_ref().reverse_rows() } else { b.as_ref() };
+					let mut buf = Mat::<f64>::zeros(m, m);
+					let c = if row_major { buf.as_mut().transpose_mut() } else { buf.as_mut() };
+					spicy_matmul::<usize, f64>(
+						c,
+						BlockStructure::Rectangular,
+						None,
+						None,
+						crate::Accum::Add,
+						av,
+						Conj::No,
+						bv,
+						Conj::No,
+						Some(d.as_ref().as_diagonal()),
+						1.0,
+						Par::Seq,
+						MemStack::new(&mut dyn_stack::MemBuffer::new(spicy_matmul_scratch::<f64>(m, m, k, false, true))),
+					);
+					let got = if row_major { buf.transpose().to_owned() } else { buf };
+					// integer-valued operands: exact, and a NaN fails the comparison
+					for i in 0..m {
+						for j in 0..m {
+							core::assert!(
+								got[(i, j)] == want[(i, j)],
+								"a reversed {a_reversed}, b reversed {b_reversed}, row major {row_major}: ({i}, {j}) {} against {}",
+								got[(i, j)],
+								want[(i, j)],
+							);
+						}
+					}
+				}
+			}
 		}
 	}
 }

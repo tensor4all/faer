@@ -32,7 +32,7 @@ and safe-minimum handling. Complex-modulus adaptations are identified explicitly
 
 | Filter suffix (`lapack_...`) | Port status | Source checks/helpers | Threshold | Owning test module | Deliberate adaptation/omission |
 | --- | --- | --- | --- | --- | --- |
-| svd | adapted; known failure on `main` since #52 (DCHKBD type 16, `dchkbd_15_to_19` and `bidiagonal_family`, #110) | S/D/C/ZCHKBD; D/S/C/ZDRVBD; BDT03, ORT01/UNT01 | 50 | svd::tests | Existing four-type pilot; see linked record |
+| svd | adapted; passing (#110, the DCHKBD type 16 regression since #52, fixed by #114) | S/D/C/ZCHKBD; D/S/C/ZDRVBD; BDT03, ORT01/UNT01 | 50 | svd::tests | Existing four-type pilot; see linked record |
 | hessenberg | adapted; passing | CHKHS 1–2, HST01, ORT01/UNT01 | 20 | evd::lapack | Packed reflectors extracted to logical H |
 | schur | adapted; passing | CHKHS 3–8; HST01 | 20 | evd::lapack | Equivalent Schur forms; compare invariant/residual/spectra |
 | nonsymmetric_evd | adapted; residual failures recorded | CHKHS right/left residuals; GET22 | 20 | evd::lapack | Full EVD exposes both sides; Schur-vector helper exposes right only |
@@ -42,7 +42,7 @@ and safe-minimum handling. Complex-modulus adaptations are identified explicitly
 | self_adjoint_evd | implemented; passing (spectrum accuracy fixed by #76) | CHKST reduction/full interface; SYT21/HET21 | 60 | evd::lapack | Lower-triangle ownership; no packed/banded interfaces |
 | lu | implemented; passing | CHKGE, GET01/02/03 | 30 | lu::lapack | Full-pivoting labeled extension; omit RFS/CON |
 | cholesky | implemented; passing | CHKPO/DRVPO/CHKPS, POT01/02/03 | 30 | cholesky::lapack | LLT/pivoted LLT; omit RFS/CON |
-| indefinite | implemented; failures recorded | S/DCHKSY, C/ZCHKHE, SYT01/HET01 | 30 | cholesky::lapack | Separate D; unpivoted LDL extension; no complex-symmetric contract |
+| indefinite | implemented; passing (#113, fixed by #117) | S/DCHKSY, C/ZCHKHE, SYT01/HET01 | 30 | cholesky::lapack | Separate D; unpivoted LDL extension; no complex-symmetric contract |
 | qr | implemented; passing | CHKQR/CHKQ3, QRT01/02/03 | 30 | qr::lapack | Free column pivoting; no fixed-column JPVT flags or QL/RQ/LQ |
 | triangular | implemented; passing | CHKTR, TRT02 | 30 | triangular_solve::lapack | TRS contract; no overflow-scaled LATRS/RFS/CON |
 | lstsq | implemented; passing | DRVLS, QRT14/16/17 | 30 | solvers::lapack | Tall QR, supported SVD minimum-norm; no new driver algorithms |
@@ -187,10 +187,15 @@ diagnostics/type). Packed/banded storage, regularization and RFS/CON are omitted
 Indefinite LDL attempts all 3,376 principal calls plus 7,840 dependent calls
 (25.06s). Initialized metadata, 1×1/2×2 D blocks, independent LDLH reconstruction,
 separate-D reconstruction, nonsingular solves/inverses and parallel groups pass.
-The retained prefilled subdiagonal cases each dtype have 178 invalid-metadata
-diagnostics. A minimal reproduction is n=1, A=[1], subdiagonal prefilled nonzero:
-the factorization leaves the value unchanged. The affected no-update branch is
-also exercised on larger diagonal matrices and reused buffers. Once metadata is
+Later evidence (2026-10-29, x86_64, not the run above): the prefilled-subdiagonal metadata failure recorded here earlier (stale nonzero
+subdiagonal on no-update 1×1 pivots) was fixed by the `lblt` stale-subdiagonal fix
+(#67). What remained, and what #113 tracked, was the unpivoted LDL at n >= 65 in the
+two layouts that reverse rows and columns: reconstruction, solve and inverse ratios
+of 1e9 to 1e15, kind 1 (positive definite) included. The blocked update multiplies
+`L10 D0 L10^H` through `spicy_matmul` with a diagonal, and the x86 kernel turned a
+negative depth stride around without turning `D` with it, so each column met the
+wrong `D` entry. `spicy_matmul` now reverses the depth of both operands and `D`
+before such a call. The family passes in all four dtypes. Once metadata is
 invalid, dependent routines are not called. The unpivoted LDL path is an adaptation;
 complex fixtures are Hermitian, not complex symmetric. Alternate pivot strategies,
 singular solves, packed IPIV comparison and error estimates are omitted.
@@ -325,8 +330,9 @@ The failing families of that run, and the status of their findings:
 - Pivoted LLT: the first pivot is not compared with the rank tolerance; the n=1
   zero matrix reports rank one (four diagnostics/type) and larger zero matrices
   return NonPositivePivot instead of rank 0 (22 diagnostics/type).
-- Pivoted LDL: stale nonzero subdiagonal metadata on no-update 1×1 pivots
-  (178 diagnostics/type); initialized-buffer and parallel checks pass.
+- Pivoted LDL: the stale-subdiagonal metadata failure is fixed (#67); the unpivoted
+  LDL failure in the reversed layouts is fixed (#113, a diagonal product in the x86
+  kernel read the depth backwards). The family passes.
 - Triangular solves: complex subnormal scalar pivots yield nonfinite answers
   (48 diagnostics/complex type). Minimal input is a 1×1 purely imaginary pivot
   i*MIN_POSITIVE/2 with identical RHS, whose exact solution is 1. Real cases pass.
