@@ -3,6 +3,7 @@
 **What happens:** `gemm` returns a wrong value for `A * diag(d) * B`.
 **Which input:** the left matrix `A` has a negative column stride (its columns are stored in reverse order).
 **Which version:** `private-gemm-x86` 0.1.22, the latest release on crates.io, with AVX2.
+**Added to this list:** 2026-10-29.
 
 ## Reproduce
 
@@ -48,6 +49,7 @@ It checks every sign of the depth strides of `A`, `B` and `d`, both destination 
 ## Affected versions
 
 Confirmed by running this program: `private-gemm-x86` 0.1.22.
+Not fixed upstream: 0.1.22 is also the head of the upstream repository (`71872b9`).
 
 ## References
 

@@ -1,0 +1,11 @@
+[package]
+name = "faer-022-svd-scratch-too-small"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# A standalone project: it reproduces the published crate on its own.
+[workspace]
+
+[dependencies]
+faer = { version = "=0.24.4", default-features = false, features = ["std", "linalg"] }

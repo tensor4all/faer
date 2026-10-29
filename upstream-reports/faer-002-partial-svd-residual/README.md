@@ -3,6 +3,7 @@
 **What happens:** `partial_svd` returns a singular pair that it counts as converged, but the pair is far from a true singular pair.
 **Which input:** any matrix where the algorithm restarts and keeps an unconverged pair in a lower slot. The program below uses a random 200 x 120 matrix.
 **Which version:** `faer` 0.24.4.
+**Added to this list:** 2026-10-29.
 
 ## Reproduce
 
@@ -46,6 +47,7 @@ Fork regression test: `matrix_free::svd::tests::test_small_cplx` (a 768 x 512 co
 ## Affected versions
 
 Confirmed by running this program: `faer` 0.24.4.
+Not fixed upstream: the same code is in upstream `main` at `0ecd846` (2026-10-22).
 
 ## Note
 
