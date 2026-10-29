@@ -166,10 +166,12 @@ fn bidiag_real_svd_scratch<T: RealField>(
 	par: ParShape,
 	params: SvdParams,
 ) -> StackReq {
+	// the values-only route runs dqds first, and falls through to the paths below when it fails
+	let dqds = if compute_u || compute_v { StackReq::EMPTY } else { dqds::singular_values_scratch::<T>(n) };
 	if n < params.recursion_threshold {
-		StackReq::EMPTY
+		dqds
 	} else {
-		StackReq::all_of(&[
+		StackReq::any_of(&[dqds, StackReq::all_of(&[
 			temp_mat_scratch::<T>(2, if compute_u { 0 } else { n + 1 }),
 			bidiag_svd::divide_and_conquer_scratch::<T>(
 				n,
@@ -178,7 +180,7 @@ fn bidiag_real_svd_scratch<T: RealField>(
 				compute_v,
 				par,
 			),
-		])
+		])])
 	}
 }
 fn compute_bidiag_cplx_svd<T: ComplexField>(
@@ -341,7 +343,7 @@ fn compute_bidiag_real_svd<T: RealField>(
 		// units at all (#110). `dqds::singular_values` writes `diag` only on success and never
 		// writes `subdiag`, so the rotation path starts from the caller's bidiagonal.
 		if !diag.rb().iter().any(|x| *x == zero())
-			&& dqds::singular_values(diag.rb_mut().as_slice_mut(), subdiag.rb_mut().as_slice_mut()).is_ok()
+			&& dqds::singular_values(diag.rb_mut().as_slice_mut(), subdiag.rb_mut().as_slice_mut(), stack).is_ok()
 		{
 			return Ok(());
 		}
