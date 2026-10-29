@@ -18,6 +18,10 @@ class Runner(unittest.TestCase):
         self.assertEqual(v.classify('linalg::evd::lapack::f64::lapack_schur_reorder_cases'), 'schur_reorder')
         self.assertEqual(v.classify('linalg::qr::lapack::c64::lapack_qr_reflector_checkers'), 'qr')
         self.assertEqual(v.classify('linalg::svd::tests::lapack_svd_f32::lapack::diagonal_families'), 'svd')
+        # a self-adjoint accuracy test beside the case suite (tensor4all/faer#100): classified, not a case record
+        name = 'linalg::evd::lapack::c32::lapack_self_adjoint_evd_qr_spectrum_accuracy'
+        self.assertEqual(v.classify(name), 'self_adjoint_evd')
+        self.assertEqual(v.expected_records({'svd': [], 'self_adjoint_evd': [name]}), 0)
         with self.assertRaisesRegex(ValueError, 'empty'):
             v.selected_tests('')
         with self.assertRaisesRegex(ValueError, 'unclassified'):
