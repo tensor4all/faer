@@ -269,9 +269,8 @@ fn qr_in_place_adapted<T: ComplexField>(
 	params: Spec<QrParams, T>,
 ) -> QrInfo {
 	let (m, n) = A.shape();
-	let mut work = alloc::vec![zero::<T>(); m * n];
+	let mut work = linalg::column_major_copy(A.rb(), par.reborrow());
 	let mut work = MatMut::from_column_major_slice_mut(&mut work, m, n);
-	linalg::copy_across_layouts(work.rb_mut(), A.rb(), par.reborrow());
 	let info = qr_in_place(work.rb_mut(), Q_coeff, par.reborrow(), stack, params);
 	linalg::copy_across_layouts(A, work.rb(), par);
 	info

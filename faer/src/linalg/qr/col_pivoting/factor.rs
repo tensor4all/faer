@@ -383,9 +383,8 @@ pub fn qr_in_place<'out, I: Index, T: ComplexField>(
 		&& linalg::row_major_copy_pays(A.nrows(), A.ncols())
 	{
 		let (m, n) = A.shape();
-		let mut work = alloc::vec![zero::<T>(); m * n];
+		let mut work = linalg::column_major_copy(A.rb(), par.reborrow());
 		let mut work = MatMut::from_column_major_slice_mut(&mut work, m, n);
-		linalg::copy_across_layouts(work.rb_mut(), A.rb(), par.reborrow());
 		let ret = qr_in_place(
 			work.rb_mut(),
 			Q_coeff,

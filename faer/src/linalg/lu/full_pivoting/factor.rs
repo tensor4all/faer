@@ -519,9 +519,8 @@ pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 		&& N > 1
 		&& linalg::row_major_copy_pays(M, N)
 	{
-		let mut work = alloc::vec![zero::<T>(); M * N];
+		let mut work = linalg::column_major_copy(mat.rb(), par.reborrow());
 		let mut work = MatMut::from_column_major_slice_mut(&mut work, M, N);
-		linalg::copy_across_layouts(work.rb_mut(), mat.rb(), par.reborrow());
 		let ret = lu_in_place(
 			work.rb_mut(),
 			row_perm,
