@@ -34,3 +34,10 @@
 - `lapack_indefinite_*` with `--include-ignored` passes all 12 tests: cases and parallel, in four dtypes.
 - Only the x86 kernel route takes a diagonal this way. Other targets go through the generic route, which reads
   `D` by index.
+
+## Follow-up: workaround removed (#119)
+- The kernel fix landed in t4a-private-gemm-x86 0.1.27 (tensor4all/t4a-private-gemm-x86#5): its `lhs_cs < 0`
+  branch now also moves the diagonal to its last depth entry and negates its stride. faer requires 0.1.27 and
+  `spicy_matmul` no longer reverses the depth itself.
+- The regression test above stays and passes against 0.1.27 without the workaround, as does
+  `lapack_indefinite_*` with `--include-ignored`.

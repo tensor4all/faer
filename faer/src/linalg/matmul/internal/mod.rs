@@ -168,25 +168,6 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 			if nrows == 0 || ncols == 0 {
 				return;
 			}
-			// The kernel turns a negative depth stride of its left operand around by reversing
-			// that operand's columns and the right operand's rows, but not the diagonal `D`
-			// between them (t4a-private-gemm-x86 0.1.26, `lib.rs:1408`), so each depth index met
-			// the wrong `D` entry (#113: the unpivoted LDL of a matrix stored with reversed rows
-			// and columns). Its left operand is `A`, or `B` transposed when the destination's
-			// rows are further apart than its columns (it swaps the two first). Reverse the depth
-			// of all three here when that operand's depth stride is negative, which leaves the
-			// sum unchanged, so the kernel never takes that branch with a diagonal.
-			let mut D = D;
-			let kernel_lhs_depth_stride = if C.row_stride().unsigned_abs() > C.col_stride().unsigned_abs() {
-				B.row_stride()
-			} else {
-				A.col_stride()
-			};
-			if D.is_some() && kernel_lhs_depth_stride < 0 {
-				A = A.reverse_cols();
-				B = B.reverse_rows();
-				D = D.map(|D| D.column_vector().reverse_rows().as_diagonal());
-			}
 			macro_rules! go {
 				($call:path, $last:expr) => {
 					$call(
