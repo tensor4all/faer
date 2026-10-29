@@ -901,14 +901,19 @@ fn solve_real_shifted_upper_quasi_triangular_system<T: RealField>(
 				);
 				x[i - 1] -= dot0;
 				x[i] -= dot1;
-				let ref a = &A[(i, i)] - p;
-				let ref b = A[(i - 1, i)];
-				let ref c = A[(i, i - 1)];
-				let ref r0 = x[i - 1];
-				let ref r1 = x[i];
-				let ref inv_det = (a.abs2() - b * c).recip();
-				(x[i - 1], x[i]) =
-					((a * r0 - b * r1) * inv_det, (a * r1 - c * r0) * inv_det);
+				// The same `?LALN2` solve as for a complex shift, with a zero
+				// imaginary part. The inverse through `a^2 - b c` underflowed to a
+				// zero determinant for a block whose entries are below the square
+				// root of the smallest positive number, and returned `inf`.
+				let ((y0, _), (y1, _)) = solve_shifted_2x2_cplx(
+					(&A[(i, i)] - p, zero()),
+					A[(i - 1, i)].copy(),
+					A[(i, i - 1)].copy(),
+					(x[i - 1].copy(), zero()),
+					(x[i].copy(), zero()),
+					&eps_norm,
+				);
+				(x[i - 1], x[i]) = (y0, y1);
 				let a0 = x[i - 1].abs();
 				let a1 = x[i].abs();
 				let m = if a0 > a1 { a0 } else { a1 };
@@ -965,6 +970,70 @@ fn solve_real_shifted_upper_quasi_triangular_system<T: RealField>(
 		}
 		f0 * f1
 	}
+}
+/// Solves `[[a, b], [c, a]] [x0, x1]^T = [r0, r1]^T` for complex `a` (as `(re, im)`), real
+/// `b`, `c` and complex right-hand sides, as LAPACK's `?LALN2` does for a complex shift of a
+/// 2 x 2 block: when every entry is below `smin` in `|re| + |im|`, the block is taken as
+/// `smin * I`; otherwise Gaussian elimination with complete pivoting, with the second pivot
+/// raised to `smin` when it is smaller. The caller rescales a large solution.
+fn solve_shifted_2x2_cplx<T: RealField>(
+	a: (T, T),
+	b: T,
+	c: T,
+	r0: (T, T),
+	r1: (T, T),
+	smin: &T,
+) -> ((T, T), (T, T)) {
+	type C<T> = (T, T);
+	fn abs1<T: RealField>(z: &C<T>) -> T {
+		z.0.abs() + z.1.abs()
+	}
+	fn mul<T: RealField>(x: &C<T>, y: &C<T>) -> C<T> {
+		(&x.0 * &y.0 - &x.1 * &y.1, &x.0 * &y.1 + &x.1 * &y.0)
+	}
+	fn sub<T: RealField>(x: &C<T>, y: &C<T>) -> C<T> {
+		(&x.0 - &y.0, &x.1 - &y.1)
+	}
+	fn div<T: RealField>(x: &C<T>, y: &C<T>) -> C<T> {
+		// scaled by the larger component of `y`, so `|y|^2` neither overflows nor underflows
+		let s = y.0.abs().fmax(y.1.abs());
+		let (yr, yi) = (&y.0 / &s, &y.1 / &s);
+		let (xr, xi) = (&x.0 / &s, &x.1 / &s);
+		let d = &yr * &yr + &yi * &yi;
+		((&xr * &yr + &xi * &yi) / &d, (&xi * &yr - &xr * &yi) / &d)
+	}
+	let zero = zero::<T>;
+	let m = [[(a.0.copy(), a.1.copy()), (b, zero())], [(c, zero()), a]];
+	let (mut p, mut q) = (0usize, 0usize);
+	let mut cmax = abs1(&m[0][0]);
+	for (i, j) in [(0, 1), (1, 0)] {
+		let v = abs1(&m[i][j]);
+		if v > cmax {
+			cmax = v;
+			(p, q) = (i, j);
+		}
+	}
+	if cmax < *smin {
+		let inv = smin.recip();
+		return (
+			(&r0.0 * &inv, &r0.1 * &inv),
+			(&r1.0 * &inv, &r1.1 * &inv),
+		);
+	}
+	// pivot row `p`, pivot column `q`; the other row and column are `1 - p`, `1 - q`
+	let (rp, ro) = if p == 0 { (r0, r1) } else { (r1, r0) };
+	let u11 = (m[p][q].0.copy(), m[p][q].1.copy());
+	let u12 = (m[p][1 - q].0.copy(), m[p][1 - q].1.copy());
+	let l21 = div(&m[1 - p][q], &u11);
+	let mut u22 = sub(&m[1 - p][1 - q], &mul(&l21, &u12));
+	if abs1(&u22) < *smin {
+		u22 = (smin.copy(), zero());
+	}
+	let y2 = sub(&ro, &mul(&l21, &rp));
+	let x2 = div(&y2, &u22);
+	let x1 = div(&sub(&rp, &mul(&u12, &x2)), &u11);
+	// unknown `q` is `x1`, the other is `x2`
+	if q == 0 { (x1, x2) } else { (x2, x1) }
 }
 fn solve_cplx_shifted_upper_quasi_triangular_system<T: RealField>(
 	A: MatRef<'_, T>,
@@ -1043,25 +1112,24 @@ fn solve_cplx_shifted_upper_quasi_triangular_system<T: RealField>(
 				let ref r0_im = x[(i - 1, 1)];
 				let ref r1_re = x[(i, 0)];
 				let ref r1_im = x[(i, 1)];
-				let mut z_re = a_re.abs2() - a_im.abs2() - b * c;
-				let mut z_im = (a_re * a_im).mul_pow2(from_f64::<T>(2.0));
-				let mut z = z_re.hypot(&z_im);
-				if z < eps_norm {
-					z_re = eps_norm.copy();
-					z_im = zero();
-					z = z_re.copy();
-				}
-				let ref z = z;
-				let ref z_re = (z_re / z) / z;
-				let ref z_im = (-z_im / z) / z;
-				let ref x0_re = (a_re * r0_re - a_im * r0_im) - b * r1_re;
-				let ref x0_im = (a_re * r0_im + a_im * r0_re) - b * r1_im;
-				let ref x1_re = (a_re * r1_re - a_im * r1_im) - c * r0_re;
-				let ref x1_im = (a_re * r1_im + a_im * r1_re) - c * r0_im;
-				x[(i - 1, 0)] = x0_re * z_re - x0_im * z_im;
-				x[(i - 1, 1)] = x0_re * z_im + x0_im * z_re;
-				x[(i, 0)] = x1_re * z_re - x1_im * z_im;
-				x[(i, 1)] = x1_re * z_im + x1_im * z_re;
+				// `?LALN2`'s complex 2 x 2 solve (#145): complete pivoting, the
+				// second pivot kept at least `eps_norm`, and `eps_norm * I` for a
+				// block whose entries are all below it. Inverting the block through
+				// its determinant compared that determinant (a product of two
+				// entries) with the entry-sized `eps_norm`, and clamping only the
+				// determinant does not give a perturbed system that is solved.
+				let ((y0_re, y0_im), (y1_re, y1_im)) = solve_shifted_2x2_cplx(
+					(a_re.copy(), a_im.copy()),
+					b.copy(),
+					c.copy(),
+					(r0_re.copy(), r0_im.copy()),
+					(r1_re.copy(), r1_im.copy()),
+					&eps_norm,
+				);
+				x[(i - 1, 0)] = y0_re;
+				x[(i - 1, 1)] = y0_im;
+				x[(i, 0)] = y1_re;
+				x[(i, 1)] = y1_im;
 				let mut m = x[(i - 1, 0)].abs();
 				let v = x[(i - 1, 1)].abs();
 				if v > m {

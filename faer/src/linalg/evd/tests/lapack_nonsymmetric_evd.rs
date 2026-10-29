@@ -577,3 +577,134 @@ fn lapack_nonsymmetric_evd_clustered_residuals_do_not_grow_with_n() {
 		}
 	}
 }
+/// A strongly graded matrix `D A D^-1`, `D = diag(10^linspace(-6, 6, n))` (#145). Its Schur form
+/// spans many orders of magnitude, so after `scaled_into_range` the 2 x 2 blocks of the
+/// complex pairs have entries far below one. The back substitution compared the determinant of
+/// such a block with the entry-sized clamp, replaced the determinant of every block and returned
+/// a wrong vector for each complex pair: a GET22 ratio of `5.9e8` here at `f64` n = 16. On the `f64` n = 64 Schur form,
+/// LAPACK's `dtrevc3` gives `2.2e-4` and the fixed back substitution `3.1e-4`.
+///
+/// The second matrix also fails upstream: two complex pairs `+-1e-5 i` and `+-2e-5 i` coupled
+/// by `1e8`, so the shifted block's determinant (about `1e-10`) is below an entry-sized clamp
+/// although its entries are not. Before the fix: `1.5e12` (`f64`); `dgeev` gives `9.6e-14`.
+#[test]
+fn lapack_nonsymmetric_evd_graded_pairs_keep_their_residual() {
+	let coupled = Mat::from_fn(4, 4, |i, j| {
+		scalar(
+			match (i, j) {
+				(0, 1) => 1e-5,
+				(1, 0) => -1e-5,
+				(2, 3) => 2e-5,
+				(3, 2) => -2e-5,
+				(0 | 1, 2 | 3) => 1e8,
+				_ => 0.0,
+			},
+			0.0,
+		)
+	});
+	let graded = |n: usize| {
+		let d = |i: usize| (10.0 as Real).powf(-6.0 + 12.0 * i as Real / (n - 1) as Real);
+		Mat::from_fn(n, n, |i, j| sample(i, j) * scalar(d(i) / d(j), 0.0))
+	};
+	for a in [coupled, graded(16), graded(64), graded(128)] {
+		let n = a.nrows();
+		let mut l = Mat::<Scalar>::zeros(n, n);
+		let mut r = Mat::<Scalar>::zeros(n, n);
+		let mut wr = Col::<Real>::zeros(n);
+		let mut wi = Col::<Real>::zeros(n);
+		let p = Spec::new(EvdParams { ..auto!(Scalar) });
+		let mut mem = MemBuffer::new(evd_scratch::<Scalar>(
+			n,
+			ComputeEigenvectors::Yes,
+			ComputeEigenvectors::Yes,
+			Par::Seq.shape(),
+			p,
+		));
+		evd_call(
+			a.as_ref(),
+			wr.as_mut(),
+			wi.as_mut(),
+			Some(l.as_mut()),
+			Some(r.as_mut()),
+			Par::Seq,
+			MemStack::new(&mut mem),
+			p,
+		)
+		.unwrap();
+		let wr: Vec<_> = wr.iter().copied().collect();
+		let wi: Vec<_> = wi.iter().copied().collect();
+		for (x, left) in [(l.as_ref(), true), (r.as_ref(), false)] {
+			let (res, _) = eigenvector_ratios(a.as_ref(), x, &wr, &wi, left);
+			crate::assert!(
+				res < get22_threshold(n),
+				"n {n}, left {left}: residual ratio {res}"
+			);
+		}
+	}
+}
+/// A standardized real Schur form whose upper 2 x 2 block, shifted by the lower pair's
+/// eigenvalue `i q`, has a small determinant (about `-2^-29`) next to large entries (`2^19`).
+/// Raising only the determinant to a floor while keeping the block's adjugate gives a residual of
+/// about `1e14`; `?LALN2` instead raises the second pivot of its elimination and solves that
+/// perturbed system (#145 review). Real types only: the complex adapters take a triangular form.
+#[test]
+fn lapack_nonsymmetric_evd_pair_solve_with_a_small_determinant() {
+	if !<Scalar as ComplexField>::IS_REAL {
+		return;
+	}
+	let m = (2.0 as Real).powi(19);
+	let q = 1.0 + (2.0 as Real).powi(-30);
+	let t = Mat::from_fn(4, 4, |i, j| {
+		scalar(
+			match (i, j) {
+				(0, 1) | (0, 2) => m,
+				(1, 0) => -1.0 / m,
+				(1, 3) => -1.0,
+				(2, 3) => q,
+				(3, 2) => -q,
+				_ => 0.0,
+			},
+			0.0,
+		)
+	});
+	let mut x = Mat::<Scalar>::zeros(4, 4);
+	let p = Spec::new(EvdFromSchurParams { ..auto!(Scalar) });
+	let mut mem = MemBuffer::new(eigenvectors_from_schur_scratch::<Scalar>(4));
+	vectors_call(t.as_ref(), None, x.as_mut(), Par::Seq, MemStack::new(&mut mem), p).unwrap();
+	let wr = [0.0 as Real; 4];
+	let wi = [1.0, -1.0, q, -q];
+	let (res, _) = eigenvector_ratios(t.as_ref(), x.as_ref(), &wr, &wi, false);
+	crate::assert!(res < get22_threshold(4), "residual ratio {res}");
+}
+/// A 2 x 2 block `[[0, t], [-t, 0]]` above a real eigenvalue 0, with `t` below the square root of
+/// the smallest positive number. Inverting the shifted block through `t^2` underflowed and gave
+/// a nonfinite eigenvector (`NoConvergence`); `?LALN2`'s elimination never forms `t^2` (#145
+/// review). Real types only, as above.
+#[test]
+fn lapack_nonsymmetric_evd_real_shift_block_below_the_square_root_of_min_positive() {
+	if !<Scalar as ComplexField>::IS_REAL {
+		return;
+	}
+	let t = if core::mem::size_of::<Real>() == 8 {
+		(2.0 as Real).powi(-600)
+	} else {
+		(2.0 as Real).powi(-80)
+	};
+	let a = Mat::from_fn(3, 3, |i, j| {
+		scalar(
+			match (i, j) {
+				(0, 1) => t,
+				(1, 0) => -t,
+				(0, 2) => 1.0,
+				_ => 0.0,
+			},
+			0.0,
+		)
+	});
+	let mut x = Mat::<Scalar>::zeros(3, 3);
+	let p = Spec::new(EvdFromSchurParams { ..auto!(Scalar) });
+	let mut mem = MemBuffer::new(eigenvectors_from_schur_scratch::<Scalar>(3));
+	vectors_call(a.as_ref(), None, x.as_mut(), Par::Seq, MemStack::new(&mut mem), p).unwrap();
+	let (res, _) = eigenvector_ratios(a.as_ref(), x.as_ref(), &[0.0; 3], &[t, -t, 0.0], false);
+	crate::assert!(res < get22_threshold(3), "residual ratio {res}");
+}
