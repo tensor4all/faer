@@ -44,7 +44,7 @@ Issue: [tensor4all/faer#76](https://github.com/tensor4all/faer/issues/76).
 
 ## Verification conclusions and constraints
 
-- `dense_self_adjoint_qr_spectrum_accuracy` (`linalg::evd::tests`) runs the kind 2 `n = 127`
+- `lapack_self_adjoint_evd_qr_spectrum_accuracy` (`linalg::evd::tests`) runs the kind 2 `n = 127`
   fixture through `self_adjoint_evd` at thresholds 8 and 128 with and without eigenvectors for
   f32, f64, c32 and c64, and requires the CHKST bound of 60 epsilons on both the spectrum and the
   residual. It fails on the parent commit for f32 (1.68e2), c32 (1.5e2) and f64 (6.55e1) and
