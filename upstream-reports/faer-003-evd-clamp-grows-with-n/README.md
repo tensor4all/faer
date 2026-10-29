@@ -40,7 +40,7 @@ So a Schur form whose largest entry is outside `[2^-20, 2^20]` is first scaled b
 With that change this program prints 0.50 at every `n`.
 
 Fork regression tests, in `faer/src/linalg/evd/`:
-* `clustered_eigenvector_residuals_do_not_grow_with_n`, in `tests/lapack_nonsymmetric_evd.rs`;
+* `lapack_nonsymmetric_evd_clustered_residuals_do_not_grow_with_n`, in `tests/lapack_nonsymmetric_evd.rs` (named `clustered_eigenvector_residuals_do_not_grow_with_n` at `0c806f1`);
 * `jordan_chains_at_both_ends_of_the_range`, in `mod.rs`, for the scaled Schur forms.
 
 ## Affected versions

@@ -42,7 +42,7 @@
     `20 * n / 16` would not have caught it.
 
 ## Verification conclusions and constraints
-- **Regression test:** `clustered_eigenvector_residuals_do_not_grow_with_n` covers kinds 3 and 5 at n = 63
+- **Regression test:** `lapack_nonsymmetric_evd_clustered_residuals_do_not_grow_with_n` covers kinds 3 and 5 at n = 63
   and 65, both eigenvector sides, residual < 20, every dtype. It runs with the regular tests and gives 62.5
   without the change.
 - **Opt-in family:** `lapack_nonsymmetric_evd_cases` diagnostics drop from 306 / 282 / 220 / 216 to

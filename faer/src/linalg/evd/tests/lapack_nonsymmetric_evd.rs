@@ -99,6 +99,28 @@ fn eigenvector_ratios(
 	};
 	(residual, normerr / (n.max(1) as Real * Real::EPSILON))
 }
+/// The threshold of the GET22 residual ratio at size `n` (#112, maintainer decision 2026-10-29):
+/// `20 * max(1, sqrt(n / 16))`.
+///
+/// CHKHS holds the ratio to 20 only at `n <= 16` (LAPACK 3.12.0 `nep.in`: N = 0, 1, 2, 3, 5, 10,
+/// 16), and GET22's ratio has no dimension factor, so 20 carried to n = 63..129 also fails
+/// LAPACK's own `dgeev` (17.5 to 34.4 on these fixtures). At `n <= 16` this is LAPACK's 20. The
+/// square root grows like an accumulated rounding error and still catches a residual that grows
+/// with `n`: the clamp defect fixed in #121 gave `(2n - 1) / 2`, 62.5 at n = 63 against 39.7 here,
+/// where a linear `20 * n / 16` (78.75) would have let it pass.
+fn get22_threshold(n: usize) -> Real {
+	20.0 * (n as Real / 16.0).sqrt().max(1.0)
+}
+#[test]
+fn lapack_nonsymmetric_evd_threshold_keeps_a_residual_growing_with_n_visible() {
+	crate::assert!(get22_threshold(0) == 20.0 && get22_threshold(16) == 20.0);
+	// the #121 clamp defect at n = 63 fails, LAPACK's dgeev on the same fixtures passes
+	let t63 = get22_threshold(63);
+	crate::assert!(62.5 > t63 && 28.6 < t63);
+	crate::assert!(34.4 < get22_threshold(129));
+	// a linear scaling would not have caught it
+	crate::assert!(62.5 < 20.0 * 63.0 / 16.0);
+}
 // Each output mode is an independently rounded spectrum, and the CHKHS
 // budget holds each one to 20 epsilons of the exact spectrum (scaled by
 // `||A||_1`). Two such spectra can then differ by the sum of their budgets,
@@ -293,7 +315,7 @@ fn full_evd_case(
 								"right residual"
 							},
 							res,
-							20.0,
+							get22_threshold(input.nrows()),
 						);
 						run.ratio(&ctx, "vector unit 2-norm", norm, 20.0);
 					}
@@ -390,7 +412,7 @@ fn from_schur_case(
 				wi,
 				false,
 			);
-			run.ratio(&ctx, "right residual", res, 20.0);
+			run.ratio(&ctx, "right residual", res, get22_threshold(x.nrows()));
 			run.ratio(&ctx, "unit 2-norm", norm, 20.0);
 		}
 	}
@@ -519,7 +541,7 @@ fn lapack_nonsymmetric_evd_checkers_require_left_adjoint() {
 /// The clamp is now relative to the eigenvalue and the largest entry. Run with the regular tests,
 /// at the sizes of the opt-in family that failed, both eigenvector sides, CHKHS's threshold.
 #[test]
-fn clustered_eigenvector_residuals_do_not_grow_with_n() {
+fn lapack_nonsymmetric_evd_clustered_residuals_do_not_grow_with_n() {
 	for n in [63, 65] {
 		for kind in [3, 5] {
 			let a = general_case(n, kind);

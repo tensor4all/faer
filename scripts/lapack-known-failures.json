@@ -8,16 +8,9 @@
   "known": [
     {
       "issue": 112,
-      "note": "GET22-style residual violations on the nonsymmetric EVD fixtures",
+      "note": "c32 only, after the size-dependent GET22 threshold: kinds 6 and 7 (scaled to sqrt(MAX)/16 and sqrt(MIN)*16) at n = 63-65 give ratios of 41.7-59.4 against 39.7-40.3; single-precision LAPACK cgeev gives 29-40 on the same matrices",
       "tests": [
-        "linalg::evd::lapack::f32::lapack_nonsymmetric_evd_cases",
-        "linalg::evd::lapack::f32::lapack_nonsymmetric_evd_parallel",
-        "linalg::evd::lapack::f64::lapack_nonsymmetric_evd_cases",
-        "linalg::evd::lapack::f64::lapack_nonsymmetric_evd_parallel",
-        "linalg::evd::lapack::c32::lapack_nonsymmetric_evd_cases",
-        "linalg::evd::lapack::c32::lapack_nonsymmetric_evd_parallel",
-        "linalg::evd::lapack::c64::lapack_nonsymmetric_evd_cases",
-        "linalg::evd::lapack::c64::lapack_nonsymmetric_evd_parallel"
+        "linalg::evd::lapack::c32::lapack_nonsymmetric_evd_cases"
       ]
     }
   ]
