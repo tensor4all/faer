@@ -109,6 +109,25 @@ reference accumulation. It is a finding on this checkout, not a claim about
 current upstream. No production change or tolerance adjustment was made.
 The four-type numerical run takes 5.85s locally; diagnostics retain all failures.
 
+Later evidence (2026-10-29, x86_64, #112; not the run above), checked against LAPACK
+3.12.0's GET22 and CHKHS and against OpenBLAS 0.3.34 `dgeev` through numpy, on the same
+fixtures and with the same residual formula:
+
+- The Jordan block (kind 3) and the tightly clustered triangle (kind 5) failed with ratios
+  that grew like n: 62.5 / 63.5 / 64.5 at n = 63 / 64 / 65, which is `(2n - 1) / 2`.
+  LAPACK gives 0.50 on the same Jordan block at every n. The cause was faer's
+  back-substitution clamp, `eps * sum |t_ij|` over the whole Schur form. It is now
+  `eps * max(|lambda|, max |t_ij|)`, against `?TREVC`'s `ulp * (|wr| + |wi|)`, on a Schur
+  form scaled into range first (as `?GEEV` scales for `?TREVC`), and these kinds pass.
+- The remaining diagnostics are kinds 2, 4, 6 and 7 at n = 63 to 65 (ratios 20 to 29)
+  and kind 4 at n = 129 (37 to 38). LAPACK's own `dgeev` exceeds 20 on the same
+  matrices: 17.5 to 28.5 at n = 63 and 34.4 at n = 129. CHKHS calibrates its threshold
+  of 20 at n <= 16 (`nep.in`: N = 0, 1, 2, 3, 5, 10, 16), and the GET22 ratio has no
+  dimension factor. The comparison does not show a faer-specific defect on these
+  fixtures, but it covers the compared fixtures only, not every side and precision.
+  Whether the threshold should grow with n is the maintainer's decision (#112); it is
+  unchanged here.
+
 ### Phase 4 — Balancing and back-transformation
 
 All 1,624 configured calls and four literal calibrations pass (0.02s execution);
