@@ -43,6 +43,21 @@ test('cancellation reports and success stays quiet', async () => {
   await report({...args, result: 'cancelled'});
   assert.equal(calls.at(-1)[0], 'create');
 });
+test('a new failure is named in the issue body', async () => {
+  const {calls, args} = fixture({missing: true});
+  await report({...args, unexpected: 'svd: linalg::svd::tests::lapack_svd_f64::lapack::new_case'});
+  const body = calls.at(-1)[1].body;
+  assert.match(body, /New failures/);
+  assert.match(body, /lapack_svd_f64::lapack::new_case/);
+  assert.doesNotMatch(body, /remove it from/);
+});
+test('a listed test that passes now is called out for removal', async () => {
+  const {calls, args} = fixture({missing: true});
+  await report({...args, stale: '#110 linalg::svd::tests::lapack_svd_f64::lapack::dchkbd_15_to_19'});
+  const body = calls.at(-1)[1].body;
+  assert.match(body, /remove it from/);
+  assert.match(body, /#110/);
+});
 test('propagate permission/network failures', async () => {
   const {calls, args} = fixture({error: 403});
   await assert.rejects(report(args), error => error.status === 403);

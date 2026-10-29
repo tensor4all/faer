@@ -1,0 +1,52 @@
+{
+  "_comment": [
+    "LAPACK validation tests that are known to fail on main, each with the issue that tracks the",
+    "defect. scripts/run-lapack-validation.py reports these as known and fails a run only for a",
+    "failure that is not listed here, or for an entry that has started passing (so a fix has to",
+    "remove its entry in the same change). Never add a test without the issue that describes it."
+  ],
+  "known": [
+    {
+      "issue": 110,
+      "note": "DCHKBD type 16, n = 127..129, values only, returns NoConvergence since the dqds path (#52)",
+      "tests": [
+        "linalg::svd::tests::lapack_svd_f32::lapack::bidiagonal_family",
+        "linalg::svd::tests::lapack_svd_f32::lapack::dchkbd_15_to_19",
+        "linalg::svd::tests::lapack_svd_f64::lapack::bidiagonal_family",
+        "linalg::svd::tests::lapack_svd_f64::lapack::dchkbd_15_to_19",
+        "linalg::svd::tests::lapack_svd_c32::lapack::bidiagonal_family",
+        "linalg::svd::tests::lapack_svd_c32::lapack::dchkbd_15_to_19",
+        "linalg::svd::tests::lapack_svd_c64::lapack::bidiagonal_family",
+        "linalg::svd::tests::lapack_svd_c64::lapack::dchkbd_15_to_19"
+      ]
+    },
+    {
+      "issue": 112,
+      "note": "GET22-style residual violations on the nonsymmetric EVD fixtures",
+      "tests": [
+        "linalg::evd::lapack::f32::lapack_nonsymmetric_evd_cases",
+        "linalg::evd::lapack::f32::lapack_nonsymmetric_evd_parallel",
+        "linalg::evd::lapack::f64::lapack_nonsymmetric_evd_cases",
+        "linalg::evd::lapack::f64::lapack_nonsymmetric_evd_parallel",
+        "linalg::evd::lapack::c32::lapack_nonsymmetric_evd_cases",
+        "linalg::evd::lapack::c32::lapack_nonsymmetric_evd_parallel",
+        "linalg::evd::lapack::c64::lapack_nonsymmetric_evd_cases",
+        "linalg::evd::lapack::c64::lapack_nonsymmetric_evd_parallel"
+      ]
+    },
+    {
+      "issue": 113,
+      "note": "pivoted LDL leaves invalid metadata on the prefilled-subdiagonal fixtures",
+      "tests": [
+        "linalg::cholesky::lapack::f32::lapack_indefinite_cases",
+        "linalg::cholesky::lapack::f32::lapack_indefinite_parallel",
+        "linalg::cholesky::lapack::f64::lapack_indefinite_cases",
+        "linalg::cholesky::lapack::f64::lapack_indefinite_parallel",
+        "linalg::cholesky::lapack::c32::lapack_indefinite_cases",
+        "linalg::cholesky::lapack::c32::lapack_indefinite_parallel",
+        "linalg::cholesky::lapack::c64::lapack_indefinite_cases",
+        "linalg::cholesky::lapack::c64::lapack_indefinite_parallel"
+      ]
+    }
+  ]
+}

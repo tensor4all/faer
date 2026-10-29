@@ -8,6 +8,7 @@ import re
 import subprocess
 import time
 
+KNOWN_FILE = 'lapack-known-failures.json'
 FAMILIES = (
     'common', 'svd', 'hessenberg', 'schur', 'nonsymmetric_evd',
     'schur_reorder', 'balance', 'tridiagonal_evd', 'self_adjoint_evd',
@@ -87,6 +88,69 @@ def run_families(binary, groups, output, command=run_command):
     return rows
 
 
+def load_known(root):
+    """The known-failing tests and the issue that tracks each one.
+
+    A test listed here is reported as known rather than as a new failure; a listed test that
+    passes fails the run, so a fix has to drop its entry in the same change.
+    """
+    path = Path(root) / 'scripts' / KNOWN_FILE
+    document = json.loads(path.read_text())
+    known = {}
+    for entry in document['known']:
+        issue = entry['issue']
+        if not isinstance(issue, int):
+            raise ValueError(f'known failure without an issue number: {entry}')
+        for test in entry['tests']:
+            if test in known:
+                raise ValueError(f'test listed twice in the known failures: {test}')
+            known[test] = issue
+    return known
+
+
+def failed_tests(contents):
+    """The test names libtest lists in the final `failures:` block.
+
+    The output carries two such blocks when a test fails - one before the per-test stdout
+    sections and the list itself at the end - so the last one before `test result:` is the
+    list of failing names.
+    """
+    lines = contents.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.strip() == 'failures:']
+    for start in reversed(starts):
+        names = []
+        for line in lines[start + 1:]:
+            if not line.strip():
+                if names:
+                    break
+                continue
+            if line.startswith('test result:'):
+                break
+            names.append(line.strip())
+        if names:
+            return names
+    return []
+
+
+def classify_failures(rows, groups, known, output):
+    """Split the failing tests into known (with their issue) and unexpected ones."""
+    known_failing, unexpected, stale = [], [], []
+    failing = {}
+    for row in rows:
+        names = failed_tests((output / row['log']).read_text())
+        failing[row['family']] = names
+        for name in names:
+            if name in known:
+                known_failing.append(dict(test=name, issue=known[name], family=row['family']))
+            else:
+                unexpected.append(dict(test=name, family=row['family']))
+    listed = {test for names in groups.values() for test in names}
+    for test in sorted(set(known) & listed):
+        if not any(test in names for names in failing.values()):
+            stale.append(dict(test=test, issue=known[test]))
+    return known_failing, unexpected, stale
+
+
 def case_records(contents):
     records = []
     for family, dtype, *numbers in CASE.findall(contents):
@@ -145,6 +209,9 @@ def main():
         (output / 'selection.log').write_text(listing)
         groups = selected_tests(listing)
         report['families'] = run_families(binary, groups, output)
+        known = load_known(Path(__file__).resolve().parent.parent)
+        report['known_failing'], report['unexpected'], report['stale'] = classify_failures(
+            report['families'], groups, known, output)
         for row in report['families']:
             report['cases'].extend(case_records((output / row['log']).read_text()))
         report['execution_seconds'] = round(sum(row['seconds'] for row in report['families']), 3)
@@ -154,12 +221,35 @@ def main():
             raise ValueError(f'case records missing: expected {expected}, got {len(report["cases"])}')
         if any(row['planned'] != row['attempted'] for row in report['cases']):
             raise ValueError('incomplete configured case loop')
+        for row in report['families']:
+            if row['exit_code'] != 0 and not row['complete']:
+                raise ValueError(f"{row['family']}: the family did not complete ({row['executed']} of {row['selected']})")
     except (ValueError, subprocess.SubprocessError, OSError) as error:
         report['error'] = str(error)
         print(error, flush=True)
     (output / 'summary.json').write_text(json.dumps(report, indent=2) + '\n')
-    return int(bool(report.get('error')) or any(
-        row['exit_code'] != 0 or not row['complete'] for row in report['families']))
+    unexpected = report.get('unexpected') or []
+    stale = report.get('stale') or []
+    known = report.get('known_failing') or []
+    if known:
+        print(f'known failures: {len(known)} (issues ' +
+              ', '.join(f"#{issue}" for issue in sorted({entry["issue"] for entry in known})) + ')', flush=True)
+    for entry in unexpected:
+        print(f'UNEXPECTED FAILURE {entry["family"]}: {entry["test"]}', flush=True)
+    for entry in stale:
+        print(f'KNOWN FAILURE NOW PASSES (remove it from scripts/{KNOWN_FILE}): '
+              f'#{entry["issue"]} {entry["test"]}', flush=True)
+    # A known failure keeps the run green; a new failure, a listed test that now passes, an
+    # incomplete family or a broken case loop does not. A family that failed without a listed
+    # failing test (a crash, a timeout, a harness error) has no known explanation and fails too.
+    known_families = {entry['family'] for entry in known}
+    unexplained = [row['family'] for row in report['families']
+                   if row['exit_code'] != 0 and row['family'] not in known_families]
+    for family in unexplained:
+        print(f'FAILED WITHOUT A LISTED TEST {family}: see its log', flush=True)
+    report['unexplained'] = unexplained
+    (output / 'summary.json').write_text(json.dumps(report, indent=2) + '\n')
+    return int(bool(report.get('error')) or bool(unexpected) or bool(stale) or bool(unexplained))
 
 
 if __name__ == '__main__':

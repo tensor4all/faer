@@ -32,19 +32,19 @@ and safe-minimum handling. Complex-modulus adaptations are identified explicitly
 
 | Filter suffix (`lapack_...`) | Port status | Source checks/helpers | Threshold | Owning test module | Deliberate adaptation/omission |
 | --- | --- | --- | --- | --- | --- |
-| svd | adapted; passing (f32 V orthogonality fixed by #75, rank-one scratch by #73) | S/D/C/ZCHKBD; D/S/C/ZDRVBD; BDT03, ORT01/UNT01 | 50 | svd::tests | Existing four-type pilot; see linked record |
+| svd | adapted; known failure on `main` since #52 (DCHKBD type 16, `dchkbd_15_to_19` and `bidiagonal_family`, #110) | S/D/C/ZCHKBD; D/S/C/ZDRVBD; BDT03, ORT01/UNT01 | 50 | svd::tests | Existing four-type pilot; see linked record |
 | hessenberg | adapted; passing | CHKHS 1–2, HST01, ORT01/UNT01 | 20 | evd::lapack | Packed reflectors extracted to logical H |
 | schur | adapted; passing | CHKHS 3–8; HST01 | 20 | evd::lapack | Equivalent Schur forms; compare invariant/residual/spectra |
 | nonsymmetric_evd | adapted; residual failures recorded | CHKHS right/left residuals; GET22 | 20 | evd::lapack | Full EVD exposes both sides; Schur-vector helper exposes right only |
 | schur_reorder | implemented; passing | S/DGET34, S/D/C/ZGET36; *ec.in selected records | 20 | evd::lapack | Real 1×1/2×2; complex 1×1; rejection contract |
 | balance | implemented; passing | CHKBL/CHKBK; *bal.in/*bak.in | source checker | evd::lapack | Combined balance; right-vector back-transform; metadata adaptation |
-| tridiagonal_evd | implemented; failures recorded | CHKST 9–12/22–26 where applicable | 60 | evd::lapack | QR/DC properties; no MRRR/range selection/Sturm certification |
+| tridiagonal_evd | implemented; passing | CHKST 9–12/22–26 where applicable | 60 | evd::lapack | QR/DC properties; no MRRR/range selection/Sturm certification |
 | self_adjoint_evd | implemented; passing (spectrum accuracy fixed by #76) | CHKST reduction/full interface; SYT21/HET21 | 60 | evd::lapack | Lower-triangle ownership; no packed/banded interfaces |
 | lu | implemented; passing | CHKGE, GET01/02/03 | 30 | lu::lapack | Full-pivoting labeled extension; omit RFS/CON |
-| cholesky | implemented; failures recorded | CHKPO/DRVPO/CHKPS, POT01/02/03 | 30 | cholesky::lapack | LLT/pivoted LLT; omit RFS/CON |
+| cholesky | implemented; passing | CHKPO/DRVPO/CHKPS, POT01/02/03 | 30 | cholesky::lapack | LLT/pivoted LLT; omit RFS/CON |
 | indefinite | implemented; failures recorded | S/DCHKSY, C/ZCHKHE, SYT01/HET01 | 30 | cholesky::lapack | Separate D; unpivoted LDL extension; no complex-symmetric contract |
 | qr | implemented; passing | CHKQR/CHKQ3, QRT01/02/03 | 30 | qr::lapack | Free column pivoting; no fixed-column JPVT flags or QL/RQ/LQ |
-| triangular | implemented; failures recorded | CHKTR, TRT02 | 30 | triangular_solve::lapack | TRS contract; no overflow-scaled LATRS/RFS/CON |
+| triangular | implemented; passing | CHKTR, TRT02 | 30 | triangular_solve::lapack | TRS contract; no overflow-scaled LATRS/RFS/CON |
 | lstsq | implemented; passing | DRVLS, QRT14/16/17 | 30 | solvers::lapack | Tall QR, supported SVD minimum-norm; no new driver algorithms |
 
 ## Original twelve reports
@@ -252,7 +252,11 @@ heavy numerical groups stay ignored there. SVD's existing suite only gains expli
 attempt counters and call-failure diagnostics; its matrices, thresholds and calls
 are preserved.
 
-The replacement workflow runs weekly Monday 03:23 UTC / 12:23 JST and manually.
+The workflow runs nightly at 03:23 UTC / 12:23 JST and manually. A night that only reproduces a
+*known* failure is green: `scripts/lapack-known-failures.json` lists the failing tests with the issue
+that tracks each one, the runner reports them with their issue numbers, and the failure issue is
+fired only for a failure that is not listed - or for a listed test that starts passing, which has to
+lose its entry in the same change. Adding an entry without an issue is a bug in the entry.
 It caches dependencies on failure and uploads environment, build timing, exact
 selection, family logs and summary for 14 days. Per-family timeouts sum to
 20 minutes; the build limit is 20 minutes, the combined step 44 minutes and the
