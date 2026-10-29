@@ -1,0 +1,11 @@
+[package]
+name = "faer-031-real-evd-pair-clamp"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Not part of the t4a-faer workspace: this reproduces the published crate on its own.
+[workspace]
+
+[dependencies]
+faer = { version = "=0.24.4", default-features = false, features = ["std", "linalg"] }
