@@ -1,28 +1,24 @@
-> **A tensor4all fork used as an AI-driven, high-speed experiment bench.**
+> **The linear algebra foundation of the tensor4all stack.**
 >
-> This is a tensor4all fork of [faer](https://codeberg.org/sarah-quinones/faer)
-> (the GitHub `sarah-ek/faer-rs` repository is a mirror). The `t4a-faer*` crates
-> published from here are experiment builds for `tenferro-rs`, `tlinalg-rs` and
-> `tprims-rs`.
+> `t4a-faer` is a tensor4all fork of [faer](https://codeberg.org/sarah-quinones/faer). The crates are
+> published on [crates.io](https://crates.io/crates/t4a-faer) and `tenferro` and the other tensor4all
+> libraries depend on them. The crate body stays `MIT`, keeping the upstream copyright and
+> attribution, and code ported from other projects keeps its own `COPYING` terms (see
+> [`NOTICE`](NOTICE)).
 >
-> ### Stance
+> ### What differs from upstream
 >
-> - **An AI-driven, high-speed experiment bench.** Coding agents iterate here at
->   full speed. Commits, tests and reviews are optimized for fast iteration, not
->   for matching upstream's review standards.
-> - **A place for destructive experiments.** Features shaped for the tensor4all /
->   tenferro workload — strided and batched entry points, typed uninitialized
->   overwrite destinations, caller-owned workspaces, an explicit thread policy —
->   get tried and broken without ceremony. API churn and removal are expected,
->   and compatibility is not promised.
-> - **The experiments are recorded.** What was tried, kept, or dropped is
->   tracked in
->   [`PATCHSET.md`](https://github.com/tensor4all/faer/blob/main/PATCHSET.md).
+> - **Parallelism runs on `threadteam`.** Every parallel region runs on a `Par::Team` token that the
+>   caller owns, and `faer::team::with_team(width, |par| ..)` is the helper for a scoped call.
+>   `Par::Rayon` and the spindle route are gone.
+> - **Correctness fixes** that upstream has not taken yet, each with its own worklog.
+> - **A nightly LAPACK numerical validation**, whose known failures are listed with the issue that
+>   tracks them.
+> - **MSRV 1.89**, and the AVX-512 kernels (`x86-v4`) are an opt-in feature.
 >
-> The crate body stays `MIT`, keeping the upstream copyright and attribution.
-> Code ported from other projects keeps its own `COPYING` terms (see
-> [`NOTICE`](https://github.com/tensor4all/faer/blob/main/NOTICE)). Use this fork
-> only through a pinned git revision or the published `t4a-faer*` versions.
+> Every change is recorded in [`PATCHSET.md`](PATCHSET.md), one row per experiment, and defects that
+> also reproduce on the published upstream crates are written up in
+> [`upstream-reports/`](upstream-reports/). Published versions follow semver.
 
 <p align="center">
   <img src="https://faer.veganb.tw/faer-logo-color.png" alt="faer logo"/ width="25%">
@@ -30,39 +26,53 @@
 
 # faer
 
-[![documentation](https://docs.rs/faer/badge.svg)](https://docs.rs/faer)
-[![crate](https://img.shields.io/crates/v/faer.svg)](https://crates.io/crates/faer)
+[![documentation](https://docs.rs/t4a-faer/badge.svg)](https://docs.rs/t4a-faer)
+[![crate](https://img.shields.io/crates/v/t4a-faer.svg)](https://crates.io/crates/t4a-faer)
 
-`faer` is a rust crate that implements low level linear algebra routines and a high level wrapper for ease of use, in pure rust.
-the aim is to provide a fully featured library for linear algebra with focus on portability, correctness, and performance.
+`faer` is a rust crate that implements low level linear algebra routines and a high level wrapper
+for ease of use, in pure rust, with a focus on portability, correctness and performance. This fork
+keeps upstream's API where it can and changes it where the tensor4all workload needs another shape;
+[`PATCHSET.md`](PATCHSET.md) lists every difference.
 
-see the [official website](https://faer.veganb.tw) and the [docs.rs](https://docs.rs/faer/latest/faer) documentation for code examples and usage instructions.
-
-questions about using the library, contributing, and future directions can be discussed in the [zulip server](https://faer.zulipchat.com).
+Upstream documentation, for the same crate with an API that differs in places: the
+[upstream website](https://faer.veganb.tw),
+[docs.rs/faer](https://docs.rs/faer/latest/faer), and the upstream
+[zulip server](https://faer.zulipchat.com).
 
 # parallelism
 
-operations take a `Par`; with `Par::rayon(n)` the parallel regions run on the global rayon pool. a
-caller with a thread budget should hold the worker group around its calls,
-`faer::spindle::with_lock(n, || { ... })`: without it every region is a plain rayon fork/join that
-wakes the workers and partitions the work afresh, and an algorithm made of many short regions (the
-bidiagonalization behind the SVD, two vector products per step) runs a third slower. see the
-*parallelism* section of the crate documentation.
+There is no process wide parallelism setting. Every operation that can run in parallel takes a
+`Par`: `Par::Seq` runs it on the calling thread, and `Par::Team` runs its regions on the members of a
+`threadteam` team that the caller owns. A caller with a thread budget scopes its work once:
 
-# contributing
+```rust
+faer::team::with_team(8, |par| {
+    // every faer call in here with `par` runs its regions on the eight reserved members
+    qr_in_place(a.as_mut(), h.as_mut(), par, stack, params);
+});
+```
 
-if you'd like to contribute to `faer`, check out the list of "good first issue"
-issues. these are all (or should be) issues that are suitable for getting
-started, and they generally include a detailed set of instructions for what to
-do. please ask questions on the zulip server or the issue itself if anything
-is unclear!
+A caller that already owns a team lends a sub-team to each call with `par.reborrow()`; a width of one
+is `Par::Seq`. `with_team` reserves a team for the duration of the closure, so a caller that keeps a
+budget across many calls should own a team itself. See the *parallelism* section of the crate
+documentation for the full picture.
 
 # minimum supported rust version
 
-the current msrv is rust 1.89.0 (`rust-version` in `faer/Cargo.toml`). Rust 1.89 is the first
-release with the AVX-512 target features stable, which the default `x86-v4` feature uses.
+1.89.0, declared as `rust-version` in `faer/Cargo.toml`. Rust 1.89 is the first release where the
+AVX-512 target features are stable, which is what lets the `x86-v4` kernels build without the nightly
+compiler. They stay opt in until that path is settled.
+
+# contributing
+
+Upstream's contribution guide applies to this fork as well: start with the issues labelled "good
+first issue", and ask on the [upstream zulip server](https://faer.zulipchat.com) or in the issue
+itself. Fork specific reports belong in this repository's issues, and a defect that also reproduces on
+the published upstream crates belongs in
+[`upstream-reports/`](upstream-reports/README.md).
 
 # benchmarks
 
-see [the benchmark page](https://faer.veganb.tw/benchmarks/) on the main website.
-
+The fork's own results are the published campaign pages, and the upstream benchmark page is at
+[faer.veganb.tw/benchmarks](https://faer.veganb.tw/benchmarks/). Performance lessons that carry over
+between changes are in [`PERFORMANCE_TIPS.md`](PERFORMANCE_TIPS.md).
