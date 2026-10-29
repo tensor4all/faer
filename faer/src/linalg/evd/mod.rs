@@ -1833,6 +1833,44 @@ pub fn eigenvectors_from_schur_cplx<T: ComplexField>(
 		Err(EvdError::NoConvergence)
 	}
 }
+/// `?GEEV`'s scaling of its input: when the largest entry modulus is below
+/// `smlnum = sqrt(min_positive) / eps` or above `bignum = 1 / smlnum`, the power of two that
+/// brings it to just inside that bound, else `None`. LAPACK scales by `smlnum / anrm` (or
+/// `bignum / anrm`); a power of two lands within a factor of two of the same bound and scales
+/// every entry exactly. Without it the Hessenberg reduction and the Schur iteration of a matrix
+/// whose entries are near the bottom of the range work in subnormals, and the eigenvectors lost
+/// every digit (a GET22 ratio of about `1 / eps` below `2^-90` for `f32` and `2^-960` for
+/// `f64`); near the top, the complex Schur iteration lost a factor of three against `cgeev`
+/// (#112).
+fn geev_scaling<T: ComplexField>(A: MatRef<'_, T>) -> Option<T::Real> {
+	let n = A.nrows();
+	let mut anrm = zero::<T::Real>();
+	for j in 0..n {
+		for i in 0..n {
+			anrm = anrm.fmax(A[(i, j)].abs());
+		}
+	}
+	let smlnum = min_positive::<T::Real>().sqrt() / eps::<T::Real>();
+	let bignum = smlnum.recip();
+	let two = from_f64::<T::Real>(2.0);
+	let half = from_f64::<T::Real>(0.5);
+	if anrm == zero::<T::Real>() || (anrm >= smlnum && anrm <= bignum) {
+		return None;
+	}
+	let mut f = one::<T::Real>();
+	if anrm < smlnum {
+		// `anrm * f` in `[smlnum, 2 smlnum)`
+		while &anrm * &f < smlnum {
+			f = f * &two;
+		}
+	} else {
+		// `anrm * f` in `(bignum / 2, bignum]`
+		while &anrm * &f > bignum {
+			f = f * &half;
+		}
+	}
+	Some(f)
+}
 fn evd_imp<T: ComplexField>(
 	A: MatRef<'_, T>,
 	s: ColMut<'_, T>,
@@ -1879,6 +1917,11 @@ fn evd_imp<T: ComplexField>(
 		None
 	};
 	H.copy_from(A);
+	// the eigenvectors of `f A` are those of `A`; its eigenvalues are scaled back at the end
+	let scaling = geev_scaling(A);
+	if let Some(f) = &scaling {
+		z!(H.rb_mut()).for_each(|uz!(h)| *h = h.mul_real(f));
+	}
 	{
 		let (mut householder, stack) =
 			unsafe { temp_mat_uninit::<T, _, _>(bs, n - 1, stack) };
@@ -2011,6 +2054,13 @@ fn evd_imp<T: ComplexField>(
 		normalize_eigenvectors(u.rb_mut(), H);
 		if !eigenvectors_ok(u.rb()) {
 			return Err(EvdError::NoConvergence);
+		}
+	}
+	if let Some(f) = &scaling {
+		let f = f.recip();
+		z!(s.rb_mut()).for_each(|uz!(x)| *x = x.mul_real(&f));
+		if let Some(s_im) = s_im.rb_mut() {
+			z!(s_im).for_each(|uz!(x)| *x = x.mul_real(&f));
 		}
 	}
 	Ok(())
@@ -3098,6 +3148,96 @@ mod tridiagonal_range_tests {
 				}
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod geev_scaling_tests {
+	//! Regression tests for the input scaling of `evd_imp` (#112). A matrix whose largest entry is
+	//! near the bottom of the range went through the Hessenberg reduction and the Schur iteration
+	//! in subnormals: a Grcar or random matrix scaled by `2^-120` (`f32`, `c32`) or `2^-1010`
+	//! (`f64`, `c64`) had a GET22 ratio of about `1 / eps` (`4e6` and `2e15`). Near the top the
+	//! complex Schur iteration lost a factor of three against `cgeev`. Residuals are measured in
+	//! `f64` on the dimensionless matrix `a / scale`, exact for a power of two.
+	use crate::{assert, c32, c64, Mat, Par};
+	use num_complex::Complex64 as Z;
+
+	/// GET22's `||a u - u diag(w)||_1 / (||a||_1 ||u||_1 eps)` for one side
+	fn get22(a: &[Vec<Z>], u: &[Vec<Z>], w: &[Z], eps: f64) -> f64 {
+		let n = a.len();
+		let (mut an, mut un, mut err) = (0.0f64, 0.0f64, 0.0f64);
+		for j in 0..n {
+			let (mut ac, mut uc, mut ec) = (0.0, 0.0, 0.0);
+			for i in 0..n {
+				ac += a[i][j].norm();
+				uc += u[i][j].norm();
+				let mut r = -u[i][j] * w[j];
+				for k in 0..n {
+					r += a[i][k] * u[k][j];
+				}
+				ec += r.norm();
+			}
+			an = an.max(ac);
+			un = un.max(uc);
+			err = err.max(ec);
+		}
+		err / an / un / eps
+	}
+
+	/// the Grcar matrix (ones on the diagonal and the three superdiagonals, minus one on the
+	/// subdiagonal) and a pseudo-random matrix, both with largest entry one
+	fn unit(n: usize, cplx: bool) -> [Vec<Vec<Z>>; 2] {
+		let grcar = (0..n)
+			.map(|i| {
+				(0..n)
+					.map(|j| match j as isize - i as isize {
+						-1 => Z::new(-1.0, 0.0),
+						0..=3 => Z::new(1.0, 0.0),
+						_ => Z::new(0.0, 0.0),
+					})
+					.collect()
+			})
+			.collect();
+		let mut state = 0x2545_f491_4f6c_dd1du64;
+		let mut next = move || {
+			state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+			// a multiple of `2^-10` in `[-1, 1)`, exact in every precision
+			((state >> 54) as f64 - 512.0) / 512.0
+		};
+		let rand = (0..n)
+			.map(|_| (0..n).map(|_| Z::new(next(), if cplx { next() } else { 0.0 })).collect())
+			.collect();
+		[grcar, rand]
+	}
+
+	macro_rules! check {
+		($t:ty, $mk:expr, $z:expr, $eps:expr, $scales:expr, $cplx:expr) => {{
+			let n = 32;
+			// the GET22 threshold of the LAPACK nonsymmetric EVD tests
+			let thresh = 20.0 * f64::max(1.0, (n as f64 / 16.0).sqrt());
+			for unit in unit(n, $cplx) {
+				for e in $scales {
+					let scale = 2.0f64.powi(e);
+					let a = Mat::<$t>::from_fn(n, n, |i, j| $mk(unit[i][j] * scale));
+					for (side, m) in [("right", a.clone()), ("left", a.adjoint().to_owned())] {
+						let dimless: Vec<Vec<Z>> = (0..n).map(|i| (0..n).map(|j| $z(m[(i, j)]) / scale).collect()).collect();
+						let evd = m.eigen(Par::Seq).unwrap();
+						let w: Vec<Z> = (0..n).map(|i| Z::new(evd.S()[i].re as f64, evd.S()[i].im as f64) / scale).collect();
+						let u: Vec<Vec<Z>> = (0..n).map(|i| (0..n).map(|j| Z::new(evd.U()[(i, j)].re as f64, evd.U()[(i, j)].im as f64)).collect()).collect();
+						let r = get22(&dimless, &u, &w, $eps);
+						assert!(r <= thresh, "{} scale 2^{e} {side}: GET22 {r}", stringify!($t));
+					}
+				}
+			}
+		}};
+	}
+
+	#[test]
+	fn evd_scales_its_input_into_range() {
+		check!(f32, |z: Z| z.re as f32, |x: f32| Z::new(x as f64, 0.0), f32::EPSILON as f64, [-120, -100, 0, 100, 120], false);
+		check!(c32, |z: Z| c32::new(z.re as f32, z.im as f32), |x: c32| Z::new(x.re as f64, x.im as f64), f32::EPSILON as f64, [-120, -100, 0, 100, 120], true);
+		check!(f64, |z: Z| z.re, |x: f64| Z::new(x, 0.0), f64::EPSILON, [-1010, -1000, -960, 0, 960, 1015], false);
+		check!(c64, |z: Z| c64::new(z.re, z.im), |x: c64| Z::new(x.re, x.im), f64::EPSILON, [-1010, -1000, -960, 0, 960, 1015], true);
 	}
 }
 
