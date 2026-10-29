@@ -945,6 +945,13 @@ pub mod supernodal {
 				par.reborrow(),
 				params,
 			);
+			for i in 0..s_size {
+				if s_L[(i, i)].abs1() == zero::<T::Real>() {
+					return Err(LuError::NumericSingular {
+						index: s_begin + i,
+					});
+				}
+			}
 			for (idx, t) in transpositions.iter().enumerate() {
 				let i_t = s_row_idx[idx + t.zx()].zx();
 				let kk = row_perm_inv[i_t].zx();
@@ -1749,6 +1756,11 @@ pub mod simplicial {
 				return Err(LuError::SymbolicSingular { index: j });
 			}
 			let x_piv = x[pivot_idx].copy();
+			// the pivot itself, not `pivot_val`: a complex modulus can
+			// underflow to zero for a nonzero subnormal entry
+			if x_piv.abs1() == zero::<T::Real>() {
+				return Err(LuError::NumericSingular { index: j });
+			}
 			let ref x_piv_inv = x_piv.recip();
 			row_perm_inv[pivot_idx] = I(j);
 			lu.u_row_idx[u_pos] = I(j);
@@ -2763,6 +2775,121 @@ mod tests {
 				let linsolve_diff = A.adjoint() * &x - &rhs;
 				assert!(linsolve_diff.norm_max() <= 1e-10);
 			}
+		}
+	}
+	fn factorize_lu_error<T: ComplexField>(
+		A: SparseColMatRef<'_, usize, T>,
+		supernodal_flop_ratio_threshold: SupernodalThreshold,
+	) -> Result<(), LuError> {
+		let symbolic = factorize_symbolic_lu(
+			A.symbolic(),
+			LuSymbolicParams {
+				supernodal_flop_ratio_threshold,
+				..Default::default()
+			},
+		)
+		.unwrap();
+		let mut numeric = NumericLu::<usize, T>::new();
+		symbolic
+			.factorize_numeric_lu(
+				&mut numeric,
+				A,
+				Par::Seq,
+				MemStack::new(&mut MemBuffer::new(
+					symbolic.factorize_numeric_lu_scratch::<T>(
+						ParShape::Seq,
+						Default::default(),
+					),
+				)),
+				Default::default(),
+			)
+			.map(|_| ())
+	}
+	fn numeric_singular_index<T: ComplexField>(
+		n: usize,
+		entries: &[(usize, usize, f64)],
+		supernodal_flop_ratio_threshold: SupernodalThreshold,
+	) -> Option<usize> {
+		let triplets = entries
+			.iter()
+			.map(|&(i, j, v)| Triplet::new(i, j, from_f64::<T>(v)))
+			.collect::<alloc::vec::Vec<_>>();
+		let A =
+			SparseColMat::<usize, T>::try_new_from_triplets(n, n, &triplets)
+				.unwrap();
+		match factorize_lu_error(A.as_ref(), supernodal_flop_ratio_threshold) {
+			Err(LuError::NumericSingular { index }) => Some(index),
+			Ok(()) => None,
+			Err(e) => panic!("unexpected error {e:?}"),
+		}
+	}
+	#[test]
+	fn codeberg_339() {
+		// upstream sarah-quinones/faer#339: `[[1, 1], [1, 1]]` factored as `Ok`
+		// and the solve returned NaN; both backends must report the zero pivot,
+		// which only the second step can meet
+		let A = [(0, 0, 1.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 1.0)];
+		for threshold in [
+			SupernodalThreshold::FORCE_SIMPLICIAL,
+			SupernodalThreshold::FORCE_SUPERNODAL,
+		] {
+			assert!(numeric_singular_index::<f64>(2, &A, threshold) == Some(1));
+			assert!(numeric_singular_index::<f32>(2, &A, threshold) == Some(1));
+			assert!(numeric_singular_index::<c64>(2, &A, threshold) == Some(1));
+			assert!(numeric_singular_index::<c32>(2, &A, threshold) == Some(1));
+		}
+	}
+	#[test]
+	fn numeric_singular_after_an_elimination_step() {
+		// the second column is a multiple of the first, so one elimination step
+		// meets a zero pivot. `index` counts steps in the fill-reducing column
+		// order, as `SymbolicSingular`'s does, so only its range is checked
+		let A = [
+			(0, 0, 2.0),
+			(1, 0, 4.0),
+			(0, 1, 1.0),
+			(1, 1, 2.0),
+			(2, 2, 1.0),
+			(0, 3, 1.0),
+			(3, 3, 1.0),
+			(2, 3, 1.0),
+		];
+		// a structurally full matrix that is nonsingular still factors
+		let B = [
+			(0, 0, 2.0),
+			(1, 0, 4.0),
+			(0, 1, 1.0),
+			(1, 1, 3.0),
+			(2, 2, 1.0),
+			(0, 3, 1.0),
+			(3, 3, 1.0),
+			(2, 3, 1.0),
+		];
+		for threshold in [
+			SupernodalThreshold::FORCE_SIMPLICIAL,
+			SupernodalThreshold::FORCE_SUPERNODAL,
+		] {
+			assert!(matches!(
+				numeric_singular_index::<f64>(4, &A, threshold),
+				Some(index) if index < 4
+			));
+			assert!(numeric_singular_index::<f64>(4, &B, threshold) == None);
+		}
+	}
+	#[test]
+	fn nonzero_subnormal_pivot_is_not_singular() {
+		// the modulus of `c64(2^-1074, 0)` underflows to zero, the entry
+		// itself is not zero
+		let tiny = f64::from_bits(1);
+		let triplets = [Triplet::new(0, 0, c64::new(tiny, 0.0))];
+		let A =
+			SparseColMat::<usize, c64>::try_new_from_triplets(1, 1, &triplets)
+				.unwrap();
+		for threshold in [
+			SupernodalThreshold::FORCE_SIMPLICIAL,
+			SupernodalThreshold::FORCE_SUPERNODAL,
+		] {
+			assert!(factorize_lu_error(A.as_ref(), threshold).is_ok());
 		}
 	}
 }

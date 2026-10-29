@@ -4,6 +4,7 @@ This list is updated over time. Last updated: 2026-10-29.
 
 This directory lists defects that we found while working on a port of `faer` and that also occur in the published upstream crates.
 Each entry was reproduced by running its program against the upstream release named in the table.
+faer-028 was first reported upstream (sarah-quinones/faer#339, simplicial backend only). It is listed because the supernodal backend has the same defect.
 Defects that exist only in this fork are not listed here.
 
 Each subdirectory is a standalone Cargo project.
@@ -40,6 +41,7 @@ The program prints the expected and the actual value, and exits with status 1 wh
 | [faer-025](faer-025-evd-norm-sum-overflow/) | Nonsymmetric EVD returns a wrong eigenvector when the Schur norm sum overflows | `faer` 0.24.4 | wrong value | tensor4all/faer#121 (`0c806f1`) | not yet | 2026-10-29 |
 | [faer-026](faer-026-svd-qr-two-by-two-no-convergence/) | The SVD returns `NoConvergence` on a 12 x 10 complex matrix | `faer` 0.24.4 | no convergence | tensor4all/faer#84 (`f83ffb0`) | not yet | 2026-10-29 |
 | [faer-027](faer-027-qr-near-dependent-column-skip/) | Unpivoted QR skips a nearly dependent column of a tall matrix | `faer` 0.24.4 | inaccurate value | tensor4all/faer#1 (`2e6ea52`, `d16929b`) | not yet | 2026-10-29 |
+| [faer-028](faer-028-sparse-lu-numeric-singular/) | Sparse LU factors a numerically singular matrix without an error | `faer` 0.24.4 | NaN | tensor4all/faer#132 | not yet | 2026-10-29 |
 | [gemm-x86-001](gemm-x86-001-diag-negative-stride/) | A product with a diagonal gives a wrong value when the left matrix is stored backwards | `private-gemm-x86` 0.1.22 | wrong value | tensor4all/t4a-private-gemm-x86#5 (`84ca6db`) | not yet | 2026-10-29 |
 
 "Fixed upstream" was checked against upstream `main`: `faer` at `0ecd846` (2026-10-22) and `private-gemm-x86` at `71872b9` (its 0.1.22 release).
