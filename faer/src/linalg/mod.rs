@@ -52,9 +52,6 @@ pub fn temp_mat_scratch<T: ComplexField>(
 	let len = col_stride.checked_mul(ncols).unwrap();
 	StackReq::new_aligned::<T>(len, align)
 }
-/// Copies `src` into `dst` elementwise, where the two have transposed strides:
-/// one is column-major, the other row-major, over the same shape, in tiles that
-/// are column-partitioned between threads when the caller asked for them.
 /// Whether adapting a row-major input to a column-major copy pays for this shape.
 ///
 /// The adaptation moves `nrows * ncols` elements contiguously twice and buys a
@@ -74,6 +71,30 @@ pub fn temp_mat_scratch<T: ComplexField>(
 pub(crate) fn row_major_copy_pays(nrows: usize, ncols: usize) -> bool {
 	nrows.saturating_mul(ncols) >= 64 * 64
 }
+/// The side of the tiles the layout copies move, and the unit a thread's share
+/// of a copy is rounded to: 16 elements is a cache line or more for every
+/// scalar the adaptation takes (`f32` is 64 bytes).
+const COPY_TILE: usize = 16;
+/// How a copy over `lines` lines of the destination's major dimension is shared
+/// between at most `degree` threads: `(lines per task, tasks)`, each share a
+/// whole number of tiles except the last.
+fn copy_tasks(lines: usize, degree: usize) -> (usize, usize) {
+	let tiles = lines.div_ceil(COPY_TILE);
+	let n_tasks = Ord::min(degree, tiles).max(1);
+	let chunk = tiles.div_ceil(n_tasks) * COPY_TILE;
+	(chunk, lines.div_ceil(chunk.max(1)))
+}
+/// Copies `src` into `dst` elementwise, where the two have transposed strides:
+/// one is column-major, the other row-major, over the same shape, in tiles.
+///
+/// With a parallel `par` the copy is split along the destination's major
+/// dimension -- rows when `dst` is row-major, columns when it is column-major --
+/// in whole tiles, so each thread writes whole contiguous lines of its own and
+/// two threads meet in a cache line only at the edge of their shares (the
+/// destination's base need not be aligned). A split along the other dimension
+/// gives a thread a few elements of every line, and on a narrow matrix several
+/// threads write the same line (`1024 x 64` on 64 threads: one column each,
+/// eight threads per line of the row-major side).
 pub(crate) fn copy_across_layouts<T: ComplexField>(
 	mut dst: MatMut<'_, T>,
 	src: MatRef<'_, T>,
@@ -82,25 +103,104 @@ pub(crate) fn copy_across_layouts<T: ComplexField>(
 	#[cfg(feature = "rayon")]
 	{
 		use rayon::prelude::*;
-		let n_tasks = Ord::min(
-			crate::utils::thread::parallelism_degree(&par),
-			dst.ncols(),
-		)
-		.max(1);
+		let dst_row_major = dst.row_stride().unsigned_abs() != 1;
+		let lines = if dst_row_major { dst.nrows() } else { dst.ncols() };
+		let (chunk, n_tasks) =
+			copy_tasks(lines, crate::utils::thread::parallelism_degree(&par));
 		if n_tasks > 1 {
-			crate::utils::thread::for_each(
-				par,
-				n_tasks,
-				dst.rb_mut()
-					.par_col_partition_mut(n_tasks)
-					.zip_eq(src.par_col_partition(n_tasks)),
-				|(mut d, s)| copy_across_layouts_block(d.rb_mut(), s),
-			);
+			if dst_row_major {
+				crate::utils::thread::for_each(
+					par,
+					n_tasks,
+					dst.rb_mut()
+						.par_row_chunks_mut(chunk)
+						.zip_eq(src.par_row_chunks(chunk)),
+					|(mut d, s)| copy_across_layouts_block(d.rb_mut(), s),
+				);
+			} else {
+				crate::utils::thread::for_each(
+					par,
+					n_tasks,
+					dst.rb_mut()
+						.par_col_chunks_mut(chunk)
+						.zip_eq(src.par_col_chunks(chunk)),
+					|(mut d, s)| copy_across_layouts_block(d.rb_mut(), s),
+				);
+			}
 			return;
 		}
 	}
 	let _ = par;
 	copy_across_layouts_block(dst.rb_mut(), src);
+}
+/// A column-major copy of the row-major `src`, in a new buffer of
+/// `nrows * ncols` elements (column stride `nrows`): the work matrix of the
+/// row-major adaptations.
+///
+/// The buffer is allocated uninitialised and each thread initialises its own
+/// columns -- zeros, then the copy over them -- so the pages are first touched
+/// by the threads that copy into them rather than all by the caller, and the
+/// initialisation runs in parallel instead of as a serial pass before the copy.
+/// The split is [`copy_across_layouts`]'s, over the buffer's columns.
+pub(crate) fn column_major_copy<T: ComplexField>(
+	src: MatRef<'_, T>,
+	par: Par,
+) -> alloc::vec::Vec<T> {
+	let (m, n) = src.shape();
+	let len = m.checked_mul(n).unwrap();
+	let mut buf = alloc::vec::Vec::<T>::with_capacity(len);
+	let base = SendPtr(buf.as_mut_ptr());
+	// Initialises columns `j0..j1` of the buffer. Every task touches a disjoint
+	// range of the allocation; nothing reads an element before this writes it,
+	// and the view over the range is formed only once it is initialised. A
+	// panic leaves `buf` at length zero, which leaks the elements written so far
+	// and drops none.
+	let fill = |j0: usize, j1: usize| unsafe {
+		let ptr = base.get().add(j0 * m);
+		for k in 0..(j1 - j0) * m {
+			ptr.add(k).write(zero::<T>());
+		}
+		copy_across_layouts_block(
+			MatMut::from_raw_parts_mut(ptr, m, j1 - j0, 1, m as isize),
+			src.subcols(j0, j1 - j0),
+		);
+	};
+	#[cfg(feature = "rayon")]
+	{
+		let (chunk, n_tasks) =
+			copy_tasks(n, crate::utils::thread::parallelism_degree(&par));
+		if n_tasks > 1 {
+			crate::utils::thread::for_each(
+				par,
+				n_tasks,
+				rayon::iter::IntoParallelIterator::into_par_iter(0..n_tasks),
+				|t| fill(t * chunk, Ord::min((t + 1) * chunk, n)),
+			);
+			unsafe { buf.set_len(len) };
+			return buf;
+		}
+	}
+	let _ = par;
+	fill(0, n);
+	unsafe { buf.set_len(len) };
+	buf
+}
+/// The base of [`column_major_copy`]'s buffer, handed to the threads that
+/// initialise disjoint ranges of it.
+struct SendPtr<T>(*mut T);
+impl<T> Clone for SendPtr<T> {
+	fn clone(&self) -> Self {
+		*self
+	}
+}
+impl<T> Copy for SendPtr<T> {}
+unsafe impl<T: Send> Send for SendPtr<T> {}
+unsafe impl<T: Send> Sync for SendPtr<T> {}
+impl<T> SendPtr<T> {
+	// a method, so the closures capture the wrapper and not the raw field
+	fn get(self) -> *mut T {
+		self.0
+	}
 }
 /// One `16 x 16` tile of the copy, on one thread: read the tile along whichever
 /// side is row-major and write it along whichever is column-major, so neither
@@ -111,7 +211,7 @@ fn copy_across_layouts_block<T: Clone>(
 	mut dst: MatMut<'_, T>,
 	src: MatRef<'_, T>,
 ) {
-	const B: usize = 16;
+	const B: usize = COPY_TILE;
 	let (m, n) = dst.shape();
 	// `src` row-major means `dst` is the column-major one, and the other way
 	// round; exactly one of the two holds.
@@ -717,6 +817,89 @@ mod tests {
 				};
 				run(Par::Seq);
 				crate::team::with_team(8, |par| run(par));
+			}
+		}
+	}
+
+	/// Each share of a layout copy is a whole number of tiles except the last,
+	/// the shares cover the lines exactly, and there are never more than the
+	/// threads or the tiles.
+	#[test]
+	fn test_copy_tasks_cover_the_lines_in_whole_tiles() {
+		for lines in [0usize, 1, 15, 16, 17, 64, 100, 256, 1000, 4096] {
+			for degree in [1usize, 2, 3, 8, 64, 1000] {
+				let (chunk, n_tasks) = copy_tasks(lines, degree);
+				core::assert!(n_tasks <= Ord::max(degree, 1));
+				core::assert!(n_tasks <= lines.div_ceil(COPY_TILE));
+				assert_eq!(chunk % COPY_TILE, 0, "{lines} lines on {degree}");
+				if lines > 0 {
+					core::assert!(chunk * n_tasks >= lines);
+					core::assert!(chunk * (n_tasks - 1) < lines);
+				}
+			}
+		}
+	}
+
+	/// The copy in both directions, on every split the teams below give it
+	/// (shares of whole tiles over odd shapes, more threads than tiles, a single
+	/// line), with a reversed row-major view: every entry lands where it
+	/// belongs. `column_major_copy` is the same check on a buffer it allocates
+	/// and initialises itself.
+	#[test]
+	fn test_layout_copies_on_a_team() {
+		fn check<T: Entry>(m: usize, n: usize, flipped: bool, mut par: Par) {
+			let (cm, rm) = fixture::<T>(m, n, flipped);
+			let (base, rs, cs) = rm_strides(m, n, flipped);
+			let row_major = unsafe {
+				MatRef::from_raw_parts(rm.as_ptr().add(base), m, n, rs, cs)
+			};
+			let col_major = MatRef::from_column_major_slice(&cm, m, n);
+
+			let work = column_major_copy(row_major, par.reborrow());
+			same_exact("column_major_copy", &cm, &work);
+
+			let mut cm_out = vec![T::zero(); m * n];
+			copy_across_layouts(
+				MatMut::from_column_major_slice_mut(&mut cm_out, m, n),
+				row_major,
+				par.reborrow(),
+			);
+			same_exact("to column-major", &cm, &cm_out);
+
+			let mut rm_out = vec![T::zero(); m * n];
+			let rm_view = unsafe {
+				MatMut::from_raw_parts_mut(
+					rm_out.as_mut_ptr().add(base),
+					m,
+					n,
+					rs,
+					cs,
+				)
+			};
+			copy_across_layouts(rm_view, col_major, par);
+			same_exact("to row-major", &rm, &rm_out);
+		}
+		for (m, n) in [
+			(0, 0),
+			(0, 5),
+			(5, 0),
+			(1, 1),
+			(1, 70),
+			(70, 1),
+			(17, 15),
+			(33, 100),
+			(100, 33),
+			(300, 17),
+		] {
+			for flipped in [false, true] {
+				let run = |mut par: Par<'_>| {
+					check::<f64>(m, n, flipped, par.reborrow());
+					check::<crate::c64>(m, n, flipped, par);
+				};
+				run(Par::Seq);
+				for threads in [2, 3, 8] {
+					crate::team::with_team(threads, |par| run(par));
+				}
 			}
 		}
 	}
