@@ -333,8 +333,17 @@ fn compute_bidiag_real_svd<T: RealField>(
 		// (`docs/worklogs/2026-10-23-dqds-shift.md`: 6.6 ms against 13.3 ms at n = 512 on eight
 		// threads, 25 against 43 at 1024). A rank-deficient bidiagonal keeps the rotation path
 		// below, because the qd transform divides by the factors.
-		if !diag.rb().iter().any(|x| *x == zero()) {
-			return dqds::singular_values(diag.as_slice_mut(), subdiag.as_slice_mut());
+		//
+		// When dqds does not finish, the rotation path below does, as in LAPACK's `DBDSQR`, which
+		// falls through to its implicit QR when `DLASQ1` reports that dqds failed. A bidiagonal
+		// whose singular values span more than the range of their squares (DCHKBD type 16, entries
+		// `eps^U(-2, 2)`: the zero-shift sweep's running pivot underflows) cannot finish in squared
+		// units at all (#110). `dqds::singular_values` writes `diag` only on success and never
+		// writes `subdiag`, so the rotation path starts from the caller's bidiagonal.
+		if !diag.rb().iter().any(|x| *x == zero())
+			&& dqds::singular_values(diag.rb_mut().as_slice_mut(), subdiag.rb_mut().as_slice_mut()).is_ok()
+		{
+			return Ok(());
 		}
 	}
 	if n < params.recursion_threshold {

@@ -49,9 +49,10 @@ const SWEEPS_PER_ENTRY: usize = 200;
 
 /// Singular values of the bidiagonal with diagonal `d` and off-diagonal `e`, in place.
 ///
-/// On return `d` holds the singular values in **descending** order and `e` is destroyed. `d` may
-/// hold negative entries on entry, since flipping the sign of a diagonal entry is an orthogonal
-/// transform.
+/// On success `d` holds the singular values in **descending** order. `e` is never written, and on
+/// an error `d` is unchanged too, so a caller can finish on another path from the same bidiagonal
+/// (#110). `d` may hold negative entries on entry, since flipping the sign of a diagonal entry is
+/// an orthogonal transform.
 ///
 /// `d` must not contain a zero: the transform divides by the factors, and a rank-deficient
 /// bidiagonal has a cheaper answer than this loop. The caller checks that and keeps its own
