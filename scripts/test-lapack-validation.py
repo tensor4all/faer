@@ -54,6 +54,41 @@ class Runner(unittest.TestCase):
             'lu': ['linalg::lu::lapack::f32::lapack_lu_cases']}
         self.assertEqual(v.expected_records(groups), 2)
 
+    def test_known_failures_keep_the_run_green_and_new_ones_do_not(self):
+        known = {'linalg::svd::tests::x': 110}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / 'svd.log').write_text('failures:\n    linalg::svd::tests::x\n\ntest result: FAILED. 0 passed; 1 failed;\n')
+            (path / 'lu.log').write_text('test result: ok. 1 passed; 0 failed;\n')
+            rows = [dict(family='svd', log='svd.log'), dict(family='lu', log='lu.log')]
+            groups = {'svd': ['linalg::svd::tests::x'], 'lu': ['linalg::lu::tests::y']}
+            known_failing, unexpected, stale = v.classify_failures(rows, groups, known, path)
+        self.assertEqual([entry['issue'] for entry in known_failing], [110])
+        self.assertEqual((unexpected, stale), ([], []))
+
+    def test_an_unlisted_failure_and_a_fixed_listed_one_are_reported(self):
+        known = {'linalg::svd::tests::x': 110, 'linalg::lu::tests::y': 112}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / 'svd.log').write_text('failures:\n    linalg::svd::tests::new\n\ntest result: FAILED.\n')
+            (path / 'lu.log').write_text('test result: ok. 1 passed; 0 failed;\n')
+            rows = [dict(family='svd', log='svd.log'), dict(family='lu', log='lu.log')]
+            groups = {'svd': ['linalg::svd::tests::new'], 'lu': ['linalg::lu::tests::y']}
+            known_failing, unexpected, stale = v.classify_failures(rows, groups, known, path)
+        self.assertEqual(unexpected, [dict(test='linalg::svd::tests::new', family='svd')])
+        self.assertEqual([entry['test'] for entry in stale], ['linalg::lu::tests::y'])
+        self.assertEqual(known_failing, [])
+
+    def test_failed_tests_reads_the_summary_section_only(self):
+        log = ('test linalg::a ... FAILED\n\nfailures:\n\n---- linalg::a stdout ----\n'
+               'some text\n\nfailures:\n    linalg::a\n\ntest result: FAILED.\n')
+        self.assertEqual(v.failed_tests(log), ['linalg::a'])
+
+    def test_the_ledger_names_an_issue_for_every_test(self):
+        known = v.load_known(Path(__file__).resolve().parent.parent)
+        self.assertTrue(known)
+        self.assertTrue(all(isinstance(issue, int) for issue in known.values()))
+
     def test_case_counts(self):
         row, = v.case_records('LAPACK_CASES family=lu dtype=f32 planned=2 attempted=2 call_failures=1 diagnostics=1 auxiliary_attempted=4')
         self.assertEqual((row['planned'], row['attempted'], row['auxiliary_attempted']), (2, 2, 4))

@@ -2,7 +2,7 @@ name: Scheduled LAPACK numerical validation
 
 on:
   schedule:
-    - cron: '23 3 * * 1' # Mondays, 03:23 UTC / 12:23 JST
+    - cron: '23 3 * * *' # nightly, 03:23 UTC / 12:23 JST
   workflow_dispatch:
 
 permissions:
@@ -16,6 +16,9 @@ jobs:
   validation:
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    outputs:
+      unexpected: ${{ steps.summary.outputs.unexpected }}
+      stale: ${{ steps.summary.outputs.stale }}
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
@@ -35,6 +38,10 @@ jobs:
       - name: Build once and run all numerical families
         timeout-minutes: 44 # build <=20m; family limits sum to 20m; setup/headroom
         run: scripts/run-lapack-validation.sh
+      - name: Summarize known and new failures
+        id: summary
+        if: always()
+        run: python3 scripts/summarize-lapack-failures.py --output target/lapack-validation >> "$GITHUB_OUTPUT"
       - name: Preserve validation evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -57,7 +64,14 @@ jobs:
         uses: actions/github-script@v9
         env:
           VALIDATION_RESULT: ${{ needs.validation.result }}
+          UNEXPECTED: ${{ needs.validation.outputs.unexpected }}
+          STALE: ${{ needs.validation.outputs.stale }}
         with:
           script: |
             const report = require(`${process.env.GITHUB_WORKSPACE}/scripts/report-lapack-failure.cjs`);
-            await report({github, context, result: process.env.VALIDATION_RESULT, server: process.env.GITHUB_SERVER_URL});
+            await report({
+              github, context, server: process.env.GITHUB_SERVER_URL,
+              result: process.env.VALIDATION_RESULT,
+              unexpected: process.env.UNEXPECTED || '',
+              stale: process.env.STALE || '',
+            });
