@@ -139,6 +139,11 @@ pub fn conjugate_gradient<T: ComplexField>(
 				non_exhaustive: NonExhaustive(()),
 			});
 		}
+		if params.initial_guess == InitialGuessStatus::Zero {
+			// every exit returns `x`, so an implicit zero is written out once
+			// here
+			x.fill(zero());
+		}
 		let rel_threshold = params.rel_tolerance * b_norm;
 		let abs_threshold = params.abs_tolerance;
 		let threshold = if abs_threshold > rel_threshold {
@@ -161,7 +166,7 @@ pub fn conjugate_gradient<T: ComplexField>(
 		let (perm, mut stack) = unsafe { stack.rb_mut().make_raw::<usize>(k) };
 		let (perm_inv, mut stack) =
 			unsafe { stack.rb_mut().make_raw::<usize>(k) };
-		let abs_residual =
+		let mut abs_residual =
 			if params.initial_guess == InitialGuessStatus::MaybeNonZero {
 				A.apply(r.rb_mut(), x.rb(), par.reborrow(), stack.rb_mut());
 				z!(&mut r, &b).for_each(|uz!(res, rhs)| *res = rhs - &*res);
@@ -281,7 +286,9 @@ pub fn conjugate_gradient<T: ComplexField>(
 				);
 				callback(x.rb());
 			}
-			let abs_residual = r.norm_l2();
+			// the residual of the current iterate: `NoConvergence` reports this
+			// one, not `|b|`
+			abs_residual = r.norm_l2();
 			if abs_residual < threshold {
 				return Ok(CgInfo {
 					rel_residual: &abs_residual / b_norm,
@@ -513,5 +520,73 @@ mod tests {
 			let _info = result.unwrap();
 			assert!((out[(0, 0)] - 1.0).abs() < 1e-10);
 		}
+	}
+	#[test]
+	fn codeberg_328() {
+		// one step does not converge: the error carries the residual of the
+		// returned `x`
+		let ref A = mat![[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]];
+		let ref rhs = mat![[1.0], [1.0], [1.0]];
+		let precond = IdentityPrecond { dim: 3 };
+		let params = CgParams {
+			max_iters: 1,
+			..CgParams::default()
+		};
+		let ref mut out = Mat::<f64>::zeros(3, 1);
+		let result = conjugate_gradient(
+			out.as_mut(),
+			precond,
+			A.as_ref(),
+			rhs.as_ref(),
+			params,
+			|_| {},
+			Par::Seq,
+			MemStack::new(&mut MemBuffer::new(conjugate_gradient_scratch(
+				precond,
+				A.as_ref(),
+				1,
+				ParShape::Seq,
+			))),
+		);
+		let Err(CgError::NoConvergence {
+			abs_residual,
+			rel_residual,
+		}) = result
+		else {
+			panic!("expected NoConvergence, got {result:?}");
+		};
+		let true_residual = (rhs - A * &*out).norm_l2();
+		assert!((abs_residual - true_residual).abs() < 1e-12);
+		assert!((rel_residual - true_residual / rhs.norm_l2()).abs() < 1e-12);
+		assert!(abs_residual < 1.0);
+	}
+	#[test]
+	fn zero_guess_is_written_out_without_an_iteration() {
+		let ref A = mat![[1.0]];
+		let ref rhs = mat![[1.0]];
+		let precond = IdentityPrecond { dim: 1 };
+		let params = CgParams {
+			initial_guess: InitialGuessStatus::Zero,
+			max_iters: 0,
+			..CgParams::default()
+		};
+		let ref mut out = Mat::<f64>::full(1, 1, 7.0);
+		let result = conjugate_gradient(
+			out.as_mut(),
+			precond,
+			A.as_ref(),
+			rhs.as_ref(),
+			params,
+			|_| {},
+			Par::Seq,
+			MemStack::new(&mut MemBuffer::new(conjugate_gradient_scratch(
+				precond,
+				A.as_ref(),
+				1,
+				ParShape::Seq,
+			))),
+		);
+		assert!(matches!(result, Err(CgError::NoConvergence { .. })));
+		assert!(out[(0, 0)] == 0.0);
 	}
 }

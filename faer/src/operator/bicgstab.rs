@@ -149,6 +149,11 @@ pub fn bicgstab<T: ComplexField>(
 				non_exhaustive: NonExhaustive(()),
 			});
 		}
+		if params.initial_guess == InitialGuessStatus::Zero {
+			// every exit returns `x`, so an implicit zero is written out once
+			// here
+			x.fill(zero());
+		}
 		let rel_threshold = params.rel_tolerance * b_norm;
 		let abs_threshold = params.abs_tolerance;
 		let threshold = if abs_threshold > rel_threshold {
@@ -170,7 +175,7 @@ pub fn bicgstab<T: ComplexField>(
 		let (mut r_tilde, stack) =
 			unsafe { temp_mat_uninit::<T, _, _>(n, k, stack) };
 		let mut r_tilde = r_tilde.as_mat_mut();
-		let abs_residual =
+		let mut abs_residual =
 			if params.initial_guess == InitialGuessStatus::MaybeNonZero {
 				A.apply(r.rb_mut(), x.rb(), par.reborrow(), stack);
 				z!(&mut r, &b).for_each(|uz!(r, b)| *r = b - &*r);
@@ -223,16 +228,36 @@ pub fn bicgstab<T: ComplexField>(
 					stack,
 					Default::default(),
 				);
+			// the tolerance is relative to what an entry of `r̃ᵀ v` could be,
+			// not to its own largest pivot: otherwise a zero first pivot
+			// passes and the step divides by zero
+			let max_col_norm = |m: MatRef<'_, T>| {
+				let mut max = zero::<T::Real>();
+				for j in 0..k {
+					let norm = m.col(j).norm_l2();
+					if norm > max {
+						max = norm;
+					}
+				}
+				max
+			};
 			let mut rank = k;
 			let tol = eps::<T::Real>()
 				* from_f64::<T::Real>(k as f64)
-				* rtv[(0, 0)].abs();
+				* max_col_norm(r_tilde.rb())
+				* max_col_norm(v.rb());
 			for i in 0..k {
-				if rtv[(i, i)].abs() < tol {
+				if !(rtv[(i, i)].abs() > tol) {
 					rank = i;
 					break;
 				}
 			}
+			if rank == 0 {
+				// breakdown: no direction left; `x` is the last iterate and `r`
+				// its residual
+				break;
+			}
+			let s_norm;
 			let (mut s, stack) =
 				unsafe { temp_mat_uninit::<T, _, _>(n, k, stack) };
 			let mut s = s.as_mat_mut();
@@ -278,6 +303,11 @@ pub fn bicgstab<T: ComplexField>(
 					-one::<T>(),
 					par.reborrow(),
 				);
+				s_norm = s.norm_l2();
+				if !s_norm.is_finite() {
+					// the step is not usable: keep `x` and `r` as they are
+					break;
+				}
 				crate::linalg::matmul::matmul(
 					x.rb_mut(),
 					if iter == 0
@@ -293,11 +323,10 @@ pub fn bicgstab<T: ComplexField>(
 					par.reborrow(),
 				);
 			}
-			let norm = s.norm_l2();
-			if norm < threshold {
+			if s_norm < threshold {
 				return Ok(BicgInfo {
-					rel_residual: &norm / b_norm,
-					abs_residual: norm,
+					rel_residual: &s_norm / b_norm,
+					abs_residual: s_norm,
 					iter_count: iter + 1,
 					non_exhaustive: NonExhaustive(()),
 				});
@@ -337,10 +366,16 @@ pub fn bicgstab<T: ComplexField>(
 				compute_w(kt.rb(), ks.rb())
 			};
 			z!(&mut r, &s, &t).for_each(|uz!(r, s, t)| *r = s - w * t);
+			let norm = r.norm_l2();
+			if !norm.is_finite() {
+				// `x` keeps the first half step, whose residual is `s`
+				abs_residual = s_norm;
+				break;
+			}
 			z!(&mut x, &z).for_each(|uz!(x, z)| *x += w * z);
 			z!(&mut p, &v).for_each(|uz!(p, v)| *p -= w * v);
 			callback(x.rb());
-			let norm = r.norm_l2();
+			abs_residual = norm.copy();
 			if norm < threshold {
 				return Ok(BicgInfo {
 					rel_residual: &norm / b_norm,
@@ -486,5 +521,247 @@ mod tests {
 			let _info = result.unwrap();
 			assert!((out[(0, 0)] - 1.0).abs() < 1e-10);
 		}
+	}
+	#[test]
+	fn codeberg_328() {
+		// one step does not converge: the error carries the residual of the
+		// returned `x`
+		let ref A = mat![[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]];
+		let ref rhs = mat![[1.0], [1.0], [1.0]];
+		let precond = IdentityPrecond { dim: 3 };
+		let params = BicgParams {
+			max_iters: 1,
+			..BicgParams::default()
+		};
+		let ref mut out = Mat::<f64>::zeros(3, 1);
+		let result = bicgstab(
+			out.as_mut(),
+			precond,
+			precond,
+			A.as_ref(),
+			rhs.as_ref(),
+			params,
+			|_| {},
+			Par::Seq,
+			MemStack::new(&mut MemBuffer::new(bicgstab_scratch(
+				precond,
+				precond,
+				A.as_ref(),
+				1,
+				ParShape::Seq,
+			))),
+		);
+		let BicgError::NoConvergence {
+			abs_residual,
+			rel_residual,
+		} = result.unwrap_err();
+		let true_residual = (rhs - A * &*out).norm_l2();
+		assert!((abs_residual - true_residual).abs() < 1e-12);
+		assert!((rel_residual - true_residual / rhs.norm_l2()).abs() < 1e-12);
+		assert!(abs_residual < 0.5);
+	}
+	#[test]
+	fn codeberg_327() {
+		// after one step `r̃ᵀ r = 0`, so the next `r̃ᵀ v` is zero: a breakdown
+		let ref A = mat![[1.0, 0.0, 0.0], [-1.0, 1.0, 0.0], [0.0, -1.0, 1.0]];
+		let ref rhs = mat![[1.0], [0.0], [0.0]];
+		let precond = IdentityPrecond { dim: 3 };
+		for initial_guess in
+			[InitialGuessStatus::MaybeNonZero, InitialGuessStatus::Zero]
+		{
+			let params = BicgParams {
+				initial_guess,
+				max_iters: 10,
+				..BicgParams::default()
+			};
+			let ref mut out = Mat::<f64>::zeros(3, 1);
+			let result = bicgstab(
+				out.as_mut(),
+				precond,
+				precond,
+				A.as_ref(),
+				rhs.as_ref(),
+				params,
+				|_| {},
+				Par::Seq,
+				MemStack::new(&mut MemBuffer::new(bicgstab_scratch(
+					precond,
+					precond,
+					A.as_ref(),
+					1,
+					ParShape::Seq,
+				))),
+			);
+			let BicgError::NoConvergence { abs_residual, .. } =
+				result.unwrap_err();
+			assert!(out.norm_l2().is_finite());
+			let true_residual = (rhs - A * &*out).norm_l2();
+			assert!((abs_residual - true_residual).abs() < 1e-12);
+		}
+	}
+	#[test]
+	fn breakdown_when_the_operator_maps_the_direction_to_zero() {
+		// `A r̃ = 0`, so `v = 0` and the tolerance is zero: still a breakdown
+		let ref A = mat![[0.0, 0.0], [0.0, 1.0]];
+		let ref rhs = mat![[1.0], [0.0]];
+		let precond = IdentityPrecond { dim: 2 };
+		let params = BicgParams {
+			max_iters: 10,
+			..BicgParams::default()
+		};
+		let ref mut out = Mat::<f64>::zeros(2, 1);
+		let result = bicgstab(
+			out.as_mut(),
+			precond,
+			precond,
+			A.as_ref(),
+			rhs.as_ref(),
+			params,
+			|_| {},
+			Par::Seq,
+			MemStack::new(&mut MemBuffer::new(bicgstab_scratch(
+				precond,
+				precond,
+				A.as_ref(),
+				1,
+				ParShape::Seq,
+			))),
+		);
+		let BicgError::NoConvergence { abs_residual, .. } = result.unwrap_err();
+		assert!(out.norm_l2() == 0.0);
+		assert!(abs_residual == 1.0);
+	}
+	#[test]
+	fn breakdown_on_the_first_step_with_a_zero_guess() {
+		// `r̃ᵀ A r̃ = 0` at once; a zero initial guess must come back as zeros,
+		// not as the caller's buffer
+		let ref A = mat![[0.0, 1.0], [-1.0, 0.0]];
+		let ref rhs = mat![[1.0], [0.0]];
+		let precond = IdentityPrecond { dim: 2 };
+		let params = BicgParams {
+			initial_guess: InitialGuessStatus::Zero,
+			max_iters: 10,
+			..BicgParams::default()
+		};
+		let ref mut out = Mat::<f64>::full(2, 1, f64::NAN);
+		let result = bicgstab(
+			out.as_mut(),
+			precond,
+			precond,
+			A.as_ref(),
+			rhs.as_ref(),
+			params,
+			|_| {},
+			Par::Seq,
+			MemStack::new(&mut MemBuffer::new(bicgstab_scratch(
+				precond,
+				precond,
+				A.as_ref(),
+				1,
+				ParShape::Seq,
+			))),
+		);
+		let BicgError::NoConvergence { abs_residual, .. } = result.unwrap_err();
+		assert!(out.norm_l2() == 0.0);
+		assert!(abs_residual == 1.0);
+	}
+	#[test]
+	fn nonfinite_second_half_step_keeps_the_first() {
+		// `A s = 0`, so `w` is 0 / 0: `x` keeps the alpha step, whose residual
+		// is `s`
+		let ref A = mat![[2.0, 0.0], [1.0, 0.0]];
+		let ref rhs = mat![[1.0], [0.0]];
+		let precond = IdentityPrecond { dim: 2 };
+		let params = BicgParams {
+			max_iters: 10,
+			..BicgParams::default()
+		};
+		let ref mut out = Mat::<f64>::zeros(2, 1);
+		let result = bicgstab(
+			out.as_mut(),
+			precond,
+			precond,
+			A.as_ref(),
+			rhs.as_ref(),
+			params,
+			|_| {},
+			Par::Seq,
+			MemStack::new(&mut MemBuffer::new(bicgstab_scratch(
+				precond,
+				precond,
+				A.as_ref(),
+				1,
+				ParShape::Seq,
+			))),
+		);
+		let BicgError::NoConvergence { abs_residual, .. } = result.unwrap_err();
+		assert!(out.norm_l2().is_finite());
+		assert!((abs_residual - (rhs - A * &*out).norm_l2()).abs() < 1e-12);
+		assert!((abs_residual - 0.5).abs() < 1e-12);
+	}
+	#[test]
+	fn zero_guess_is_written_out_without_an_iteration() {
+		let ref A = mat![[1.0]];
+		let ref rhs = mat![[1.0]];
+		let precond = IdentityPrecond { dim: 1 };
+		let params = BicgParams {
+			initial_guess: InitialGuessStatus::Zero,
+			max_iters: 0,
+			..BicgParams::default()
+		};
+		let ref mut out = Mat::<f64>::full(1, 1, 7.0);
+		let result = bicgstab(
+			out.as_mut(),
+			precond,
+			precond,
+			A.as_ref(),
+			rhs.as_ref(),
+			params,
+			|_| {},
+			Par::Seq,
+			MemStack::new(&mut MemBuffer::new(bicgstab_scratch(
+				precond,
+				precond,
+				A.as_ref(),
+				1,
+				ParShape::Seq,
+			))),
+		);
+		let BicgError::NoConvergence { abs_residual, .. } = result.unwrap_err();
+		assert!(out[(0, 0)] == 0.0);
+		assert!(abs_residual == 1.0);
+	}
+	#[test]
+	fn block_rhs_with_identity_is_not_a_breakdown() {
+		// `r̃ᵀ v` is the identity: its pivots are 1, whatever the block width
+		let k = 64;
+		let ref A = Mat::<f32>::identity(k, k);
+		let ref rhs = Mat::<f32>::identity(k, k);
+		let precond = IdentityPrecond { dim: k };
+		let params = BicgParams {
+			initial_guess: InitialGuessStatus::Zero,
+			max_iters: 1,
+			..BicgParams::default()
+		};
+		let ref mut out = Mat::<f32>::zeros(k, k);
+		let result = bicgstab(
+			out.as_mut(),
+			precond,
+			precond,
+			A.as_ref(),
+			rhs.as_ref(),
+			params,
+			|_| {},
+			Par::Seq,
+			MemStack::new(&mut MemBuffer::new(bicgstab_scratch(
+				precond,
+				precond,
+				A.as_ref(),
+				k,
+				ParShape::Seq,
+			))),
+		);
+		assert!(result.is_ok());
+		assert!((A * &*out - rhs).norm_l2() < 1e-5);
 	}
 }
