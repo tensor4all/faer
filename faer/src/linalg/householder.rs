@@ -161,21 +161,31 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 	// small against the basis) and give every thread at least four rows (`4 * threads`). The
 	// third is the cost rule: `deep_rows * n * n` multiply-adds at the GEMM rate must pay for one
 	// section.
-	let threads = crate::utils::thread::parallelism_degree(&par);
+	// The width is the widest that pays, with at least four rows per participant; a narrower
+	// width than the token's reruns this call on a sub-team of that width, where the same
+	// decision then takes the whole sub-team.
 	let deep_rows = essentials.nrows().unbound().saturating_sub(n);
 	#[cfg(feature = "par-trace")]
 	crate::utils::cost::trace::shape("upgrade_above_floor", deep_rows, n, n);
-	let above_floor = deep_rows >= 2 * n
-		&& deep_rows >= 4 * threads
-		&& crate::utils::cost::par_pays::<T>(
+	let width = if deep_rows >= 2 * n {
+		crate::utils::cost::par_width_upto::<T>(
 			&par,
 			deep_rows.saturating_mul(n).saturating_mul(n),
 			crate::utils::cost::rate::gemm_mac(),
 			1,
-		);
+			deep_rows / 4,
+		)
+	} else {
+		1
+	};
 	#[cfg(feature = "par-trace")]
 	crate::utils::cost::trace::shape("", 0, 0, 0);
-	let mut par = if above_floor { par } else { Par::Seq };
+	if width >= 2 && width < par.degree() {
+		return crate::utils::thread::with_width(par, width, |par| {
+			upgrade_householder_factor(householder_factor, essentials, block_size, prev_block_size, par)
+		});
+	}
+	let mut par = if width >= 2 { par } else { Par::Seq };
 	let mut householder_factor = householder_factor;
 	let essentials = essentials;
 	assert!(householder_factor.nrows() == householder_factor.ncols());
@@ -232,20 +242,23 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 		// threads for `m = 4096, n = 16`, against 0.040 when its rows are split. The partials here
 		// are `n x n` each, tiny against the basis, and only the strict upper triangle is stored
 		// (the diagonal is the caller's `tau`), so the split costs almost nothing.
-		let threads = crate::utils::thread::parallelism_degree(&par);
 		let rows = basis_bot.nrows().unbound();
-		// shape conditions (`2 * n`, `4 * threads`) as above, then the cost rule
+		// shape conditions (`2 * n`, four rows per participant) as above, then the widest width
+		// that pays
 		#[cfg(feature = "par-trace")]
 		crate::utils::cost::trace::shape("upgrade_deep", rows, n, n);
-		let deep = threads > 1
-			&& rows >= 2 * n
-			&& rows >= 4 * threads
-			&& crate::utils::cost::par_pays::<T>(
+		let threads = if rows >= 2 * n {
+			crate::utils::cost::par_width_upto::<T>(
 				&par,
 				rows.saturating_mul(n).saturating_mul(n),
 				crate::utils::cost::rate::gemm_mac(),
 				1,
-			);
+				rows / 4,
+			)
+		} else {
+			1
+		};
+		let deep = threads > 1;
 		#[cfg(feature = "par-trace")]
 		crate::utils::cost::trace::shape("", 0, 0, 0);
 		if n <= NARROW_BASIS {
@@ -270,17 +283,18 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 	#[cfg(feature = "rayon")]
 			{
 				use rayon::prelude::*;
-				let chunk = rows.div_ceil(threads);
-				let n_chunks = rows.div_ceil(chunk);
+				// exactly `threads` balanced row ranges (at least four rows each), so the split runs
+				// at the width the gate chose
+				let n_chunks = threads;
 				let mut partials = alloc::vec![T::zero(); n_chunks * n * n];
 				let source = basis_bot;
-				crate::utils::thread::for_each(
+				crate::utils::thread::with_width(par, threads, |par| crate::utils::thread::for_each(
 					par,
 					n_chunks,
 					partials.par_chunks_mut(n * n).enumerate(),
 					|(index, part)| {
-						let lo = index * chunk;
-						let hi = rows.min(lo + chunk);
+						let (lo, len) = crate::utils::thread::par_split_indices(rows, index, n_chunks);
+						let hi = lo + len;
 						let mut part =
 							MatMut::from_column_major_slice_mut(part, n, n);
 						matmul_with_conj(
@@ -294,7 +308,7 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 							Par::Seq,
 						);
 					},
-				);
+				));
 				for index in 0..n_chunks {
 					let part = MatRef::from_column_major_slice(
 						&partials[index * n * n..(index + 1) * n * n],
@@ -545,7 +559,7 @@ fn apply_block_householder_on_the_left_in_place_generic<
 		N.unbound(),
 		matrix.ncols().unbound(),
 	);
-	let big_rank_one = crate::utils::cost::par_pays::<T>(
+	let big_rank_one = crate::utils::cost::par_width::<T>(
 		&par,
 		householder_basis
 			.nrows()
@@ -553,7 +567,7 @@ fn apply_block_householder_on_the_left_in_place_generic<
 			.saturating_mul(matrix.ncols().unbound()),
 		crate::utils::cost::rate::householder_rank_one(),
 		1,
-	);
+	) > 1;
 	let use_simd = N.unbound() == 1
 		&& T::SIMD_CAPABILITIES.is_simd()
 		&& !(crate::utils::thread::parallelism_degree(&par) > 1 && big_rank_one);
@@ -681,42 +695,52 @@ fn apply_block_householder_on_the_left_in_place_generic<
 		// region inside each -- `512 x 512` `qr_in_place` f64 at eight threads: 5.27 ms with
 		// the cap, 4.74 ms with eight tasks, and `1024 x 1024`: 20.5 -> 16.9 ms.
 		let mut n_tasks = Ord::min(threads, K.unbound());
+		let mut split_width = threads;
 		// The column split is one section over `n_tasks` participants; its work is the reduction
 		// plus the two products of the update, `2 * M * N * K` multiply-adds, plus the streaming
 		// of the `M * K` target
 		// (`cost::block_apply_estimate`). With the multiply-adds alone this estimate was 0.6 to
 		// 0.8 of the measured serial time of an `N = 8` block (`QR 128`).
 		if n_tasks > 1 {
-			let width = core::num::NonZeroUsize::new(n_tasks).unwrap();
 			let est = crate::utils::cost::block_apply_estimate::<T>(
 				M.unbound(),
 				N.unbound(),
 				K.unbound(),
 			);
+			// the split: the widest number of tasks (at most `K`) that pays for its one section;
+			// the region: the widest width that pays, shared out among the tasks
+			let tasks = crate::utils::cost::par_width_time_upto(&par, est, 1, n_tasks);
+			let width = crate::utils::cost::par_width_time(&par, est, 1);
 			#[cfg(feature = "par-trace")]
 	#[cfg(feature = "rayon")]
 			{
 				crate::utils::cost::trace::shape("n_tasks", M.unbound(), N.unbound(), K.unbound());
+				let w = core::num::NonZeroUsize::new(width.max(2)).unwrap();
 				crate::utils::cost::trace_pub(
 					M.unbound() * N.unbound() * K.unbound(),
 					1,
 					est,
-					par.shape().dispatch_cost(width),
-					par.shape().pays(est, 1, width),
+					par.shape().dispatch_cost(w),
+					width,
+					width > 1,
 					core::panic::Location::caller(),
 				);
 			}
-			let pays = par.shape().pays(est, 1, width);
 			#[cfg(feature = "par-trace")]
-			let pays = match crate::utils::cost::trace::N_TASKS_MODE.load(core::sync::atomic::Ordering::Relaxed) {
-				1 => (M.unbound() * K.unbound()).saturating_mul(4 * M.unbound()) >= gemm::get_threading_threshold(),
-				2 => true,
-				3 => false,
-				_ => pays,
+			let (tasks, width) = match crate::utils::cost::trace::N_TASKS_MODE.load(core::sync::atomic::Ordering::Relaxed) {
+				1 => {
+					if (M.unbound() * K.unbound()).saturating_mul(4 * M.unbound()) >= gemm::get_threading_threshold() {
+						(n_tasks, threads)
+					} else {
+						(1, 1)
+					}
+				},
+				2 => (n_tasks, threads),
+				3 => (1, 1),
+				_ => (tasks, width),
 			};
-			if !pays {
-				n_tasks = 1;
-			}
+			n_tasks = if width > 1 { tasks } else { 1 };
+			split_width = width;
 		}
 		let func = |(mut tmp, mut matrix): (
 			MatMut<'_, T, Dim<'N>>,
@@ -796,17 +820,20 @@ fn apply_block_householder_on_the_left_in_place_generic<
 			#[cfg(feature = "rayon")]
 			{
 				use rayon::prelude::*;
-				crate::utils::thread::for_each_with_par(par,
-					n_tasks,
-					tmp.rb_mut()
-						.par_col_partition_mut(n_tasks)
-						.zip_eq(matrix.rb_mut().par_col_partition_mut(n_tasks)),
-					func,
-				);
+				crate::utils::thread::with_width(par, split_width, |par| {
+					crate::utils::thread::for_each_with_par(
+						par,
+						n_tasks,
+						tmp.rb_mut()
+							.par_col_partition_mut(n_tasks)
+							.zip_eq(matrix.rb_mut().par_col_partition_mut(n_tasks)),
+						func,
+					)
+				});
 			}
 			#[cfg(not(feature = "rayon"))]
 			{
-				let _ = (n_tasks, func);
+				let _ = (n_tasks, split_width, func);
 				unreachable!("no parallel route in this build")
 			}
 		}

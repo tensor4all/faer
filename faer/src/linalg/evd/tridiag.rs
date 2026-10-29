@@ -1,6 +1,7 @@
 use crate::assert;
 use crate::internal_prelude::*;
 use crate::utils::cost::{ParThreshold, rate};
+use crate::utils::thread::with_width;
 use linalg::householder;
 use linalg::matmul::triangular::BlockStructure;
 use linalg::matmul::{self, dot};
@@ -285,6 +286,10 @@ pub fn tridiag_in_place<T: ComplexField>(
 	let mut A = A;
 	let mut H = householder;
 	let mut par = par;
+	// `Never` keeps the whole call sequential (the steps decide their own width otherwise)
+	if matches!(params.par_threshold, ParThreshold::Never) {
+		par = Par::Seq;
+	}
 	let n = A.nrows();
 	let b = H.nrows();
 	assert!(H.ncols() == n.saturating_sub(1));
@@ -323,15 +328,8 @@ pub fn tridiag_in_place<T: ComplexField>(
 			}
 			let rem = n - k - 1;
 			// One section per step: the symmetric fused update over column blocks; the unit is
-			// an element of the triangle.
-			if !params.par_threshold.region_pays::<T>(
-				par.shape(),
-				rem * rem / 2,
-				rate::tridiag(),
-				1,
-			) {
-				par = Par::Seq;
-			}
+			// an element of the triangle. The step runs at the widest width that pays.
+			let width = params.par_threshold.region_width::<T>(&par, rem * rem / 2, rate::tridiag(), 1);
 			let k1 = k + 1;
 			let tau_inv;
 			{
@@ -362,128 +360,134 @@ pub fn tridiag_in_place<T: ComplexField>(
 						},
 					);
 					w2.copy_from(y2.rb());
-					match par {
-						Par::Seq => {
-							let mut z2 = z2.rb_mut().col_mut(0);
-							tridiag_fused_op(
-								A22.rb_mut(),
-								y2.rb_mut(),
-								z2.rb_mut(),
-								w2.rb(),
-								w2.rb(),
-								u2.rb(),
-								u2.rb(),
-								x2.rb(),
-								x2.rb(),
-								tau_inv.to_cplx(),
-								simd_align(k1 + 1),
-							);
-							z!(y2.rb_mut(), z2.rb()).for_each(
-								|uz!(y, z): Zip!(&mut T, &T)| *y += z,
-							);
-						},
-	#[cfg(feature = "rayon")]
-						_ => {
-						let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
-							use rayon::prelude::*;
-							let nthreads = nthreads.get();
-							let mut z2 = z2.rb_mut().subcols_mut(0, nthreads);
-							let n2 = A22.ncols();
-							assert!((n2 as u64) < (1u64 << 50));
-							let idx_to_col_start = |idx: usize| {
-								let idx_as_percent =
-									idx as f64 / nthreads as f64;
-								let col_start_percent = 1.0f64
-									- libm::sqrt(1.0f64 - idx_as_percent);
-								(col_start_percent * n2 as f64) as usize
-							};
-							{
-								let A22 = A22.rb();
-								let y2 = y2.rb();
-								let ref f = tau_inv.to_cplx::<T>();
-								crate::utils::thread::for_each(par.reborrow(), 
-									nthreads,
-									z2.rb_mut().par_col_iter_mut().enumerate(),
-									|(idx, mut z2)| {
-										let first = idx_to_col_start(idx);
-										let last_col =
-											idx_to_col_start(idx + 1);
-										let nrows = n2 - first;
-										let ncols = last_col - first;
-										let mut A = unsafe {
-											A22.rb()
-												.subcols(first, ncols)
-												.subrows(first, nrows)
-												.const_cast()
-										};
-										{
-											let y2 = unsafe {
-												y2.subrows(first, ncols)
+					with_width(par.reborrow(), width, |par| {
+						match par {
+							Par::Seq => {
+								let mut z2 = z2.rb_mut().col_mut(0);
+								tridiag_fused_op(
+									A22.rb_mut(),
+									y2.rb_mut(),
+									z2.rb_mut(),
+									w2.rb(),
+									w2.rb(),
+									u2.rb(),
+									u2.rb(),
+									x2.rb(),
+									x2.rb(),
+									tau_inv.to_cplx(),
+									simd_align(k1 + 1),
+								);
+								z!(y2.rb_mut(), z2.rb()).for_each(
+									|uz!(y, z): Zip!(&mut T, &T)| *y += z,
+								);
+							},
+		#[cfg(feature = "rayon")]
+							_ => {
+							let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
+								use rayon::prelude::*;
+								let nthreads = nthreads.get();
+								let mut z2 = z2.rb_mut().subcols_mut(0, nthreads);
+								let n2 = A22.ncols();
+								assert!((n2 as u64) < (1u64 << 50));
+								let idx_to_col_start = |idx: usize| {
+									let idx_as_percent =
+										idx as f64 / nthreads as f64;
+									let col_start_percent = 1.0f64
+										- libm::sqrt(1.0f64 - idx_as_percent);
+									(col_start_percent * n2 as f64) as usize
+								};
+								{
+									let A22 = A22.rb();
+									let y2 = y2.rb();
+									let ref f = tau_inv.to_cplx::<T>();
+									crate::utils::thread::for_each(par, 
+										nthreads,
+										z2.rb_mut().par_col_iter_mut().enumerate(),
+										|(idx, mut z2)| {
+											let first = idx_to_col_start(idx);
+											let last_col =
+												idx_to_col_start(idx + 1);
+											let nrows = n2 - first;
+											let ncols = last_col - first;
+											let mut A = unsafe {
+												A22.rb()
+													.subcols(first, ncols)
+													.subrows(first, nrows)
 													.const_cast()
 											};
-											let mut z2 = z2
-												.rb_mut()
-												.subrows_mut(first, nrows);
-											let ry2 =
-												w2.rb().subrows(first, ncols);
-											let rz2 =
-												w2.rb().subrows(first, nrows);
-											let u0 = u2.subrows(first, nrows);
-											let u1 = u2.subrows(first, ncols);
-											let u2 =
-												x2.rb().subrows(first, ncols);
-											let v2 =
-												x2.rb().subrows(first, nrows);
-											tridiag_fused_op(
-												A.rb_mut(),
-												y2,
-												z2.rb_mut(),
-												ry2,
-												rz2,
-												u0,
-												u1,
-												u2,
-												v2,
-												f.copy(),
-												n.next_power_of_two()
-													- (k1 + 1) - first,
-											);
-										}
-										z2.rb_mut()
-											.subrows_mut(0, first)
-											.fill(zero());
-									},
-								);
-							}
-							for z2 in z2.rb().col_iter() {
-								z!(y2.rb_mut(), z2.rb())
-									.for_each(|uz!(y, z)| *y += z);
-							}
-						},
-					}
+											{
+												let y2 = unsafe {
+													y2.subrows(first, ncols)
+														.const_cast()
+												};
+												let mut z2 = z2
+													.rb_mut()
+													.subrows_mut(first, nrows);
+												let ry2 =
+													w2.rb().subrows(first, ncols);
+												let rz2 =
+													w2.rb().subrows(first, nrows);
+												let u0 = u2.subrows(first, nrows);
+												let u1 = u2.subrows(first, ncols);
+												let u2 =
+													x2.rb().subrows(first, ncols);
+												let v2 =
+													x2.rb().subrows(first, nrows);
+												tridiag_fused_op(
+													A.rb_mut(),
+													y2,
+													z2.rb_mut(),
+													ry2,
+													rz2,
+													u0,
+													u1,
+													u2,
+													v2,
+													f.copy(),
+													n.next_power_of_two()
+														- (k1 + 1) - first,
+												);
+											}
+											z2.rb_mut()
+												.subrows_mut(0, first)
+												.fill(zero());
+										},
+									);
+								}
+								for z2 in z2.rb().col_iter() {
+									z!(y2.rb_mut(), z2.rb())
+										.for_each(|uz!(y, z)| *y += z);
+								}
+							},
+						}
+					});
 				} else {
-					matmul::triangular::matmul(
-						y2.rb_mut(),
-						BlockStructure::Rectangular,
-						Accum::Replace,
-						A22.rb(),
-						BlockStructure::TriangularLower,
-						x2.rb(),
-						BlockStructure::Rectangular,
-						tau_inv.to_cplx(),
-						par.reborrow(),
-					);
-					matmul::triangular::matmul(
-						y2.rb_mut(),
-						BlockStructure::Rectangular,
-						Accum::Add,
-						A22.rb().adjoint(),
-						BlockStructure::StrictTriangularUpper,
-						x2.rb(),
-						BlockStructure::Rectangular,
-						tau_inv.to_cplx(),
-						par.reborrow(),
-					);
+					with_width(par.reborrow(), width, |par| {
+						matmul::triangular::matmul(
+							y2.rb_mut(),
+							BlockStructure::Rectangular,
+							Accum::Replace,
+							A22.rb(),
+							BlockStructure::TriangularLower,
+							x2.rb(),
+							BlockStructure::Rectangular,
+							tau_inv.to_cplx(),
+							par,
+						);
+					});
+					with_width(par.reborrow(), width, |par| {
+						matmul::triangular::matmul(
+							y2.rb_mut(),
+							BlockStructure::Rectangular,
+							Accum::Add,
+							A22.rb().adjoint(),
+							BlockStructure::StrictTriangularUpper,
+							x2.rb(),
+							BlockStructure::Rectangular,
+							tau_inv.to_cplx(),
+							par,
+						);
+					});
 				}
 				z!(y2.rb_mut(), A21.rb()).for_each(
 					|uz!(y, a): Zip!(&mut T, &T)| {

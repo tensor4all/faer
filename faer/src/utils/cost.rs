@@ -207,43 +207,31 @@ impl From<ParThreshold> for usize {
 }
 
 impl ParThreshold {
-	/// Whether a region of `units` of work in the unit of `rate` that opens `sections`
-	/// sections runs in parallel on `shape`, at the full degree of the shape.
+	/// The width a region of `units` of work in the unit of `rate` that opens `sections`
+	/// sections runs at on `par` (1: sequential); the caller runs it on a sub-team of that width
+	/// ([`with_width`](crate::utils::thread::with_width)).
 	///
-	/// [`Derived`](Self::Derived) is [`ParShape::pays_full`] of `units * rate`; an explicit
-	/// [`Fixed`](Self::Fixed) floor keeps the previous rule, `units >= floor`.
+	/// [`Derived`](Self::Derived) is [`par_width`] of `units * rate`, the widest width that pays;
+	/// an explicit [`Fixed`](Self::Fixed) floor keeps its rule, the whole degree when
+	/// `units >= floor`; [`Never`](Self::Never) is 1.
 	#[cfg_attr(feature = "par-trace", track_caller)]
-	pub(crate) fn region_pays<T: crate::ComplexField>(
+	pub(crate) fn region_width<T: crate::ComplexField>(
 		self,
-		shape: ParShape,
+		par: &crate::Par,
 		units: usize,
 		rate: Rate,
 		sections: u32,
-	) -> bool {
-		// a sequential shape, or a token of one participant (a `Team` of size 1), never pays:
-		// skip the estimate (a QR 128 asks hundreds of times)
-		if shape.degree() < 2 && !matches!(self, Self::Fixed(_)) {
-			return false;
-		}
-		let r = self.region_pays_impl::<T>(shape, units, rate, sections);
-		#[cfg(feature = "par-trace")]
-		trace_decision(shape, shape.degree(), units, rate.of::<T>(), sections, r, core::panic::Location::caller());
-		r
-	}
-
-	fn region_pays_impl<T: crate::ComplexField>(
-		self,
-		shape: ParShape,
-		units: usize,
-		rate: Rate,
-		sections: u32,
-	) -> bool {
+	) -> usize {
 		match self {
-			Self::Never => false,
-			Self::Fixed(floor) => units >= floor,
-			Self::Derived => {
-				shape.pays_full(serial_time(units, rate.of::<T>()), sections)
+			Self::Never => 1,
+			Self::Fixed(floor) => {
+				if units >= floor {
+					par.degree()
+				} else {
+					1
+				}
 			},
+			Self::Derived => par_width::<T>(par, units, rate, sections),
 		}
 	}
 }
@@ -520,8 +508,10 @@ pub mod trace {
 		pub sections: u32,
 		/// estimated serial time in ns
 		pub estimate_ns: f64,
-		/// dispatch cost of one section at the shape's width, in ns
+		/// dispatch cost of one section at `width`, in ns
 		pub dispatch_ns: f64,
+		/// the width the gate chose, or the width it asked about (1: sequential)
+		pub width: usize,
 		/// the decision
 		pub parallel: bool,
 	}
@@ -554,6 +544,7 @@ pub mod trace {
 		sections: u32,
 		estimate_ns: f64,
 		dispatch_ns: f64,
+		width: usize,
 		parallel: bool,
 	) {
 		if !ON.load(Ordering::Relaxed) {
@@ -565,7 +556,7 @@ pub mod trace {
 		} else {
 			label
 		};
-		LOG.lock().unwrap().push(Record { site, dims, units, sections, estimate_ns, dispatch_ns, parallel });
+		LOG.lock().unwrap().push(Record { site, dims, units, sections, estimate_ns, dispatch_ns, width, parallel });
 	}
 }
 
@@ -616,24 +607,72 @@ pub(crate) fn par_can_pay_time_team(team: &threadteam::TeamExec<'_>, estimate: D
 		&& pays_at(estimate, sections, team.dispatch_costs().min_cost(threadteam::DispatchKind::Team))
 }
 
-/// Whether a region of `units` of work at `rate` that opens `sections` sections pays on `par`,
-/// at the full degree of `par` ([`ParShape::pays_full`]).
+/// The widest width in `2..=degree` at which a region of serial time `estimate` that opens
+/// `sections` sections pays on `par`, or 1 (sequential) when none does.
+///
+/// Every width is considered: the search runs from the full width down and stops at the first
+/// that pays, which is the widest. A narrower width that does not pay says nothing about a wider
+/// one, because a measured row can fall with the width (`aarch64-apple`'s team row is 3.0, 2.3,
+/// 1.4 us at widths 2, 4, 6).
+pub(crate) fn par_width_time(par: &crate::Par, estimate: Duration, sections: u32) -> usize {
+	par_width_time_upto(par, estimate, sections, usize::MAX)
+}
+
+/// [`par_width_time`] among the widths up to `max` (a region that cannot use more participants,
+/// such as a split into at most `max` tasks).
+pub(crate) fn par_width_time_upto(par: &crate::Par, estimate: Duration, sections: u32, max: usize) -> usize {
+	match par {
+		#[cfg(feature = "threadteam")]
+		crate::Par::Team(team) => par_width_team(team, estimate, sections, max),
+		_ => {
+			let _ = (estimate, sections, max);
+			1
+		},
+	}
+}
+
+/// [`par_width_time_upto`] for a team token.
+#[cfg(feature = "threadteam")]
+pub(crate) fn par_width_team(team: &threadteam::TeamExec<'_>, estimate: Duration, sections: u32, max: usize) -> usize {
+	// the cheap rejection first: a region that does not pay at the cheapest width of the table
+	// pays at none (a QR 128 asks hundreds of times)
+	if max < 2 || !par_can_pay_time_team(team, estimate, sections) {
+		return 1;
+	}
+	(2..=team.size().get().min(max))
+		.rev()
+		.find(|&w| pays_at(estimate, sections, team.dispatch_cost(NonZeroUsize::new(w).unwrap())))
+		.unwrap_or(1)
+}
+
+/// [`par_width_time`] of `units` of work at `rate`: the width the region runs at (1:
+/// sequential).
 #[cfg_attr(feature = "par-trace", track_caller)]
-pub(crate) fn par_pays<T: crate::ComplexField>(
+pub(crate) fn par_width<T: crate::ComplexField>(
 	par: &crate::Par,
 	units: usize,
 	rate: Rate,
 	sections: u32,
-) -> bool {
-	// a sequential token, or one of a single participant (a `Team` of size 1: it behaves exactly
-	// like `Par::Seq`), never pays: skip the estimate (a QR 128 asks 500 times)
-	if par.degree() < 2 {
-		return false;
+) -> usize {
+	par_width_upto::<T>(par, units, rate, sections, usize::MAX)
+}
+
+/// [`par_width`] among the widths up to `max`.
+#[cfg_attr(feature = "par-trace", track_caller)]
+pub(crate) fn par_width_upto<T: crate::ComplexField>(
+	par: &crate::Par,
+	units: usize,
+	rate: Rate,
+	sections: u32,
+	max: usize,
+) -> usize {
+	if par.degree() < 2 || max < 2 {
+		return 1;
 	}
-	let r = par_pays_time(par, serial_time(units, rate.of::<T>()), sections, par.degree());
+	let w = par_width_time_upto(par, serial_time(units, rate.of::<T>()), sections, max);
 	#[cfg(feature = "par-trace")]
-	trace_decision(par.shape(), par.shape().degree(), units, rate.of::<T>(), sections, r, core::panic::Location::caller());
-	r
+	trace_decision(par.shape(), w, units, rate.of::<T>(), sections, w > 1, core::panic::Location::caller());
+	w
 }
 
 #[cfg(feature = "par-trace")]
@@ -649,7 +688,7 @@ fn trace_decision(
 	let d = NonZeroUsize::new(width)
 		.map(|w| shape.dispatch_cost(w).as_secs_f64() * 1e9)
 		.unwrap_or(f64::INFINITY);
-	trace::record(loc, units, sections, units as f64 * ns, d, r);
+	trace::record(loc, units, sections, units as f64 * ns, d, width, r);
 }
 
 /// Whether a join of two halves pays: one section of width 2 (the two halves are the
@@ -847,7 +886,7 @@ mod tests {
 		sections: u32,
 	) -> usize {
 		let pays = |u: usize| {
-			ParThreshold::Derived.region_pays::<T>(shape, u, r, sections)
+			shape.pays_full(serial_time(u, r.of::<T>()), sections)
 		};
 		let mut hi = 1usize;
 		while !pays(hi) {
@@ -1020,12 +1059,14 @@ mod tests {
 
 	#[test]
 	fn fixed_and_never_keep_their_meaning() {
-		let s = ParShape::team(6);
 		let r = rate::lu_full_pivot();
-		assert!(!ParThreshold::Never.region_pays::<f64>(s, usize::MAX, r, 1));
-		assert!(ParThreshold::Fixed(100).region_pays::<f64>(ParShape::Seq, 100, r, 1));
-		assert!(!ParThreshold::Fixed(100).region_pays::<f64>(s, 99, r, 1));
-		assert!(ParThreshold::Fixed(100).region_pays::<f64>(s, 100, r, 1));
+		// a fixed floor takes the whole degree at the floor, nothing below it; never is serial
+		assert_eq!(ParThreshold::Fixed(100).region_width::<f64>(&crate::Par::Seq, 100, r, 1), 1);
+		crate::team::with_team(6, |par| {
+			assert_eq!(ParThreshold::Never.region_width::<f64>(&par, usize::MAX, r, 1), 1);
+			assert_eq!(ParThreshold::Fixed(100).region_width::<f64>(&par, 99, r, 1), 1);
+			assert_eq!(ParThreshold::Fixed(100).region_width::<f64>(&par, 100, r, 1), 6);
+		});
 		// the integer form of the C API
 		assert_eq!(ParThreshold::from(0), ParThreshold::Derived);
 		assert_eq!(ParThreshold::from(usize::MAX), ParThreshold::Never);
@@ -1035,19 +1076,11 @@ mod tests {
 
 	#[test]
 	fn derived_gates_never_pay_on_a_sequential_shape() {
+		let seq = crate::Par::Seq;
 		for (_, r, sections) in gates(rates()) {
-			assert!(!ParThreshold::Derived.region_pays::<f64>(
-				ParShape::Seq,
-				usize::MAX / 2,
-				r,
-				sections
-			));
-			assert!(!ParThreshold::Derived.region_pays::<c64>(
-				ParShape::Seq,
-				usize::MAX / 2,
-				r,
-				sections
-			));
+			assert_eq!(ParThreshold::Derived.region_width::<f64>(&seq, usize::MAX / 2, r, sections), 1);
+			assert_eq!(ParThreshold::Derived.region_width::<c64>(&seq, usize::MAX / 2, r, sections), 1);
+			assert!(!ParShape::Seq.pays_full(serial_time(usize::MAX / 2, r.of::<f64>()), sections));
 		}
 	}
 
@@ -1073,7 +1106,7 @@ mod tests {
 		}
 		// representative sizes at width 6 on the M5 table (D = 1.4 us, 4.2 us per section)
 		let pays = |u: usize, r: Rate, f: u32| {
-			ParThreshold::Derived.region_pays::<f64>(team, u, r, f)
+			team.pays_full(serial_time(u, r.of::<f64>()), f)
 		};
 		// full pivoting LU: a 100 x 100 trailing block stays serial, 200 x 200 is parallel
 		assert!(!pays(100 * 100, M5.lu_full_pivot, 1));
@@ -1091,15 +1124,17 @@ mod tests {
 	}
 
 	#[test]
-	fn par_pays_reads_the_degree_of_the_token() {
+	fn par_width_reads_the_degree_of_the_token() {
 		let seq = crate::Par::Seq;
-		assert!(!par_pays::<f64>(&seq, usize::MAX / 2, rate::matvec(), 1));
+		assert_eq!(par_width::<f64>(&seq, usize::MAX / 2, rate::matvec(), 1), 1);
 		crate::team::with_team(6, |par| {
-			assert!(par_pays::<f64>(&par, 10_000_000, rate::matvec(), 1));
-			assert!(!par_pays::<f64>(&par, 1_000, rate::matvec(), 1));
+			assert_eq!(par_width::<f64>(&par, 10_000_000, rate::matvec(), 1), 6);
+			assert_eq!(par_width::<f64>(&par, 1_000, rate::matvec(), 1), 1);
+			// a cap below the degree bounds the search
+			assert_eq!(par_width_upto::<f64>(&par, 10_000_000, rate::matvec(), 1, 3), 3);
 		});
 		crate::team::with_team(1, |par| {
-			assert!(!par_pays::<f64>(&par, 10_000_000, rate::matvec(), 1));
+			assert_eq!(par_width::<f64>(&par, 10_000_000, rate::matvec(), 1), 1);
 		});
 	}
 
@@ -1416,8 +1451,8 @@ mod tests {
 			assert!(!pays(no));
 		}
 		// a sparse product of 1e6 multiply-adds is above the floor, 1e3 below
-		assert!(ParThreshold::Derived.region_pays::<f64>(team, 1_000_000, M5.sparse_matmul, 1));
-		assert!(!ParThreshold::Derived.region_pays::<f64>(team, 1_000, M5.sparse_matmul, 1));
+		assert!(team.pays_full(serial_time(1_000_000, M5.sparse_matmul.of::<f64>()), 1));
+		assert!(!team.pays_full(serial_time(1_000, M5.sparse_matmul.of::<f64>()), 1));
 	}
 }
 
@@ -1428,10 +1463,11 @@ pub fn trace_pub(
 	sections: u32,
 	estimate: Duration,
 	dispatch: Duration,
+	width: usize,
 	r: bool,
 	loc: &'static core::panic::Location<'static>,
 ) {
-	trace::record(loc, units, sections, estimate.as_secs_f64() * 1e9, dispatch.as_secs_f64() * 1e9, r);
+	trace::record(loc, units, sections, estimate.as_secs_f64() * 1e9, dispatch.as_secs_f64() * 1e9, width, r);
 }
 
 #[cfg(all(test, feature = "sparse-linalg"))]

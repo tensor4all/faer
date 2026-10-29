@@ -95,30 +95,32 @@ const SWAP_STAGE_SECTIONS: u32 = 4;
 /// Sections of the swap stage when one side holds every column (the first panel of a wide
 /// matrix, the last of a tall one): one split of the columns over the whole budget.
 const SWAP_ONE_SIDE_SECTIONS: u32 = 1;
-use crate::utils::cost::{gemm_ns_per_mac, rate, serial_time};
+use crate::utils::cost::{gemm_ns_per_mac, par_width_time, rate, serial_time};
+use crate::utils::thread::with_width;
 
 pub use crate::utils::cost::ParThreshold;
 
-/// Whether the trailing update (`b x cols` solve, `rows x cols x b` product) of a level runs
-/// parallel. [`ParThreshold::Derived`] derives the answer from the serial time and the
-/// dispatch cost of `shape`; [`Fixed`](ParThreshold::Fixed) is an explicit floor in `f64`
-/// elements of the updated block, counted in flops (a complex element carries four times the
-/// arithmetic).
-fn trailing_update_pays<T: ComplexField>(
-	shape: ParShape,
+/// The width the trailing update (`b x cols` solve, `rows x cols x b` product) of a level runs
+/// at (1: sequential). [`ParThreshold::Derived`] is the widest width of `par` that pays for the
+/// serial time; [`Fixed`](ParThreshold::Fixed) is an explicit floor in `f64` elements of the
+/// updated block, counted in flops (a complex element carries four times the arithmetic), and
+/// takes the whole degree above it.
+fn trailing_update_width<T: ComplexField>(
+	par: &Par,
 	par_threshold: ParThreshold,
 	rows: usize,
 	cols: usize,
 	b: usize,
-) -> bool {
+) -> usize {
 	let floor = match par_threshold {
-		ParThreshold::Never => return false,
+		ParThreshold::Never => return 1,
 		ParThreshold::Fixed(n) => n,
 		ParThreshold::Derived => {
 			let macs = cols.saturating_mul(
 				b.saturating_mul(b) / 2 + rows.saturating_mul(b),
 			);
-			return shape.pays_full(
+			return par_width_time(
+				par,
 				serial_time(macs, gemm_ns_per_mac::<T>()),
 				TRAILING_UPDATE_SECTIONS,
 			);
@@ -127,24 +129,27 @@ fn trailing_update_pays<T: ComplexField>(
 	let work = rows
 		.saturating_mul(cols)
 		.saturating_mul(if T::IS_REAL { 2 } else { 8 });
-	work > floor.saturating_mul(2)
+	if work > floor.saturating_mul(2) { par.degree() } else { 1 }
 }
 
-/// Whether the swap stage (`n` row swaps over `cols` columns of an `m` row matrix) runs
-/// parallel; `par_threshold` as in [`trailing_update_pays`], where an explicit value counts
-/// `m * cols` elements.
-fn swap_stage_pays<T: ComplexField>(
-	shape: ParShape,
+/// The width the swap stage (`n` row swaps over `cols` columns of an `m` row matrix) runs at;
+/// `par_threshold` as in [`trailing_update_width`], where an explicit value counts `m * cols`
+/// elements.
+fn swap_stage_width<T: ComplexField>(
+	par: &Par,
 	par_threshold: ParThreshold,
 	m: usize,
 	n: usize,
 	cols: usize,
 	one_side: bool,
-) -> bool {
+) -> usize {
 	match par_threshold {
-		ParThreshold::Never => false,
-		ParThreshold::Fixed(floor) => m.saturating_mul(cols) > floor,
-		ParThreshold::Derived => shape.pays_full(
+		ParThreshold::Never => 1,
+		ParThreshold::Fixed(floor) => {
+			if m.saturating_mul(cols) > floor { par.degree() } else { 1 }
+		},
+		ParThreshold::Derived => par_width_time(
+			par,
 			serial_time(n.saturating_mul(cols), rate::lu_swap().of::<T>()),
 			if one_side { SWAP_ONE_SIDE_SECTIONS } else { SWAP_STAGE_SECTIONS },
 		),
@@ -195,33 +200,25 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 		// cold caches. Below it take `Par::Seq`; the recursion keeps the caller's
 		// `par`, so every level decides for its own trailing update.
 		let (rows1, cols1, b) = (A11.nrows(), A11.ncols(), A10.ncols());
-		let mut par_here = if trailing_update_pays::<T>(
-			par.shape(),
-			params.par_threshold,
-			rows1,
-			cols1,
-			b,
-		) {
-			par.reborrow()
-		} else {
-			Par::Seq
-		};
+		let width = trailing_update_width::<T>(&par, params.par_threshold, rows1, cols1, b);
+		with_width(par.reborrow(), width, |mut par_here| {
 	#[cfg(feature = "rayon")]
-		{
-			linalg::triangular_solve::solve_unit_lower_triangular_in_place(
-				A00.rb(),
-				A01.rb_mut(),
-				par_here.reborrow(),
+			{
+				linalg::triangular_solve::solve_unit_lower_triangular_in_place(
+					A00.rb(),
+					A01.rb_mut(),
+					par_here.reborrow(),
+				);
+			}
+			linalg::matmul::matmul(
+				A11.rb_mut(),
+				Accum::Add,
+				A10.rb(),
+				A01.rb(),
+				-one::<T>(),
+				par_here,
 			);
-		}
-		linalg::matmul::matmul(
-			A11.rb_mut(),
-			Accum::Add,
-			A10.rb(),
-			A01.rb(),
-			-one::<T>(),
-			par_here,
-		);
+		});
 		n_trans += lu_in_place_recursion(
 			A.rb_mut().get_mut(block_size..m, ..),
 			block_size,
@@ -248,70 +245,68 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 	};
 	let (A_left, A_right) = A.rb_mut().split_at_col_mut(start);
 	let A_right = A_right.get_mut(.., end - start..ncols - start);
-	let par = if swap_stage_pays::<T>(
-		par.shape(),
+	let width = swap_stage_width::<T>(
+		&par,
 		params.par_threshold,
 		m,
 		n,
 		ncols - n,
 		start == 0 || end == ncols,
-	) {
-		par
-	} else {
-		Par::Seq
-	};
-	match par {
-		Par::Seq => {
-			swap(A_left);
-			swap(A_right);
-		},
-	#[cfg(feature = "rayon")]
-		_ => {
-		let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
-			let nthreads = nthreads.get();
-			let len = (A_left.ncols() + A_right.ncols()) as f64;
-			let left_threads = Ord::min(
-				(nthreads as f64 * (A_left.ncols() as f64 / len)) as usize,
-				nthreads,
-			);
-			let (left_cols, right_cols) = (A_left.ncols(), A_right.ncols());
-			if left_cols == 0 || right_cols == 0 {
-				// one side holds every column: it takes the whole budget
-				let (A, _) = if left_cols == 0 { (A_right, A_left) } else { (A_left, A_right) };
-				crate::utils::thread::for_each(
-					par,
+	);
+	with_width(par.reborrow(), width, |par| {
+		match par {
+			Par::Seq => {
+				swap(A_left);
+				swap(A_right);
+			},
+		#[cfg(feature = "rayon")]
+			_ => {
+			let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
+				let nthreads = nthreads.get();
+				let len = (A_left.ncols() + A_right.ncols()) as f64;
+				let left_threads = Ord::min(
+					(nthreads as f64 * (A_left.ncols() as f64 / len)) as usize,
 					nthreads,
-					A.par_col_partition_mut(nthreads),
-					|A| swap(A),
 				);
-			} else {
-				// the two sides run on the two halves of the split, each on the
-				// parallelism it is handed
-				crate::utils::thread::join_sized(
-					par,
-					left_threads,
-					|par| {
-						let n = par.degree();
-						crate::utils::thread::for_each(
-							par,
-							n,
-							A_left.par_col_partition_mut(n),
-							|A| swap(A),
-						)
-					},
-					|par| {
-						let n = par.degree();
-						crate::utils::thread::for_each(
-							par,
-							n,
-							A_right.par_col_partition_mut(n),
-							|A| swap(A),
-						)
-					},
-				);
-			}
-		},
-	}
+				let (left_cols, right_cols) = (A_left.ncols(), A_right.ncols());
+				if left_cols == 0 || right_cols == 0 {
+					// one side holds every column: it takes the whole budget
+					let (A, _) = if left_cols == 0 { (A_right, A_left) } else { (A_left, A_right) };
+					crate::utils::thread::for_each(
+						par,
+						nthreads,
+						A.par_col_partition_mut(nthreads),
+						|A| swap(A),
+					);
+				} else {
+					// the two sides run on the two halves of the split, each on the
+					// parallelism it is handed
+					crate::utils::thread::join_sized(
+						par,
+						left_threads,
+						|par| {
+							let n = par.degree();
+							crate::utils::thread::for_each(
+								par,
+								n,
+								A_left.par_col_partition_mut(n),
+								|A| swap(A),
+							)
+						},
+						|par| {
+							let n = par.degree();
+							crate::utils::thread::for_each(
+								par,
+								n,
+								A_right.par_col_partition_mut(n),
+								|A| swap(A),
+							)
+						},
+					);
+				}
+			},
+		}
+	});
 	n_trans
 }
 /// $LU$ factorization tuning parameters
@@ -467,36 +462,43 @@ mod tests {
 	#[test]
 	fn region_rules_follow_the_serial_time() {
 		use core::num::NonZeroUsize;
-		let seq = ParShape::Seq;
-		// sequential never pays, whatever the size
-		assert!(!trailing_update_pays::<f64>(seq, ParThreshold::Derived, 4096, 4096, 256));
-		assert!(!swap_stage_pays::<f64>(seq, ParThreshold::Derived, 4096, 256, 4096, false));
-		{
-			let par = ParShape::team(6);
-			// tiny regions stay serial, huge ones go parallel
-			assert!(!trailing_update_pays::<f64>(par, ParThreshold::Derived, 16, 16, 8));
-			assert!(trailing_update_pays::<f64>(par, ParThreshold::Derived, 2048, 2048, 128));
-			assert!(!swap_stage_pays::<f64>(par, ParThreshold::Derived, 64, 16, 48, false));
-			assert!(swap_stage_pays::<f64>(par, ParThreshold::Derived, 4096, 256, 4096, false));
-			// the swap stage of a 64 x 1024 matrix (64 swaps over 960 columns, every column on
-			// one side: one section) follows the rule on the tables of the host class, for both
-			// dtypes; the same region counted as the two sided split (four sections) is what kept
-			// it serial. The verdict itself depends on the class, so the test states the rule.
-			for w in [4, 8] {
-				let par = ParShape::team(w);
-				let rule = |ns: f64| pays_at(serial_time(64 * 960, ns), SWAP_ONE_SIDE_SECTIONS, par.dispatch_cost(NonZeroUsize::new(w).unwrap()));
-				assert_eq!(swap_stage_pays::<f64>(par, ParThreshold::Derived, 64, 64, 960, true), rule(rate::lu_swap().of::<f64>()), "f64 {w}");
-				assert_eq!(swap_stage_pays::<c64>(par, ParThreshold::Derived, 64, 64, 960, true), rule(rate::lu_swap().of::<c64>()), "c64 {w}");
-			}
+		let seq = Par::Seq;
+		// sequential never goes wider than one, whatever the size
+		assert_eq!(trailing_update_width::<f64>(&seq, ParThreshold::Derived, 4096, 4096, 256), 1);
+		assert_eq!(swap_stage_width::<f64>(&seq, ParThreshold::Derived, 4096, 256, 4096, false), 1);
+		crate::team::with_team(6, |par| {
+			// tiny regions stay serial, huge ones take the whole team
+			assert_eq!(trailing_update_width::<f64>(&par, ParThreshold::Derived, 16, 16, 8), 1);
+			assert_eq!(trailing_update_width::<f64>(&par, ParThreshold::Derived, 2048, 2048, 128), 6);
+			assert_eq!(swap_stage_width::<f64>(&par, ParThreshold::Derived, 64, 16, 48, false), 1);
+			assert_eq!(swap_stage_width::<f64>(&par, ParThreshold::Derived, 4096, 256, 4096, false), 6);
 			// a complex trailing update reaches the floor at fewer elements than a real one
 			let (r, c) = (160, 160);
-			let real = trailing_update_pays::<f64>(par, ParThreshold::Derived, r, c, 32);
-			let cplx = trailing_update_pays::<c64>(par, ParThreshold::Derived, r, c, 32);
+			let real = trailing_update_width::<f64>(&par, ParThreshold::Derived, r, c, 32);
+			let cplx = trailing_update_width::<c64>(&par, ParThreshold::Derived, r, c, 32);
 			assert!(cplx >= real);
-			// an explicit floor restores the fixed rule and `usize::MAX` disables
-			assert!(trailing_update_pays::<f64>(par, ParThreshold::Fixed(1), 64, 64, 8));
-			assert!(!trailing_update_pays::<f64>(par, ParThreshold::Never, 4096, 4096, 256));
-			assert!(!swap_stage_pays::<f64>(par, ParThreshold::Never, 4096, 256, 4096, false));
+			// an explicit floor restores the fixed rule (the whole team) and `usize::MAX` disables
+			assert_eq!(trailing_update_width::<f64>(&par, ParThreshold::Fixed(1), 64, 64, 8), 6);
+			assert_eq!(trailing_update_width::<f64>(&par, ParThreshold::Never, 4096, 4096, 256), 1);
+			assert_eq!(swap_stage_width::<f64>(&par, ParThreshold::Never, 4096, 256, 4096, false), 1);
+		});
+		// the swap stage of a 64 x 1024 matrix (64 swaps over 960 columns, every column on one
+		// side: one section) takes the widest width at which the rule holds on the tables of the
+		// host class, for both dtypes; the same region counted as the two sided split (four
+		// sections) is what kept it serial. The verdict depends on the class, so the test states
+		// the rule.
+		for w in [4, 8] {
+			crate::team::with_team(w, |par| {
+				let shape = par.shape();
+				let rule = |ns: f64| {
+					(2..=w)
+						.rev()
+						.find(|&k| pays_at(serial_time(64 * 960, ns), SWAP_ONE_SIDE_SECTIONS, shape.dispatch_cost(NonZeroUsize::new(k).unwrap())))
+						.unwrap_or(1)
+				};
+				assert_eq!(swap_stage_width::<f64>(&par, ParThreshold::Derived, 64, 64, 960, true), rule(rate::lu_swap().of::<f64>()), "f64 {w}");
+				assert_eq!(swap_stage_width::<c64>(&par, ParThreshold::Derived, 64, 64, 960, true), rule(rate::lu_swap().of::<c64>()), "c64 {w}");
+			});
 		}
 	}
 
