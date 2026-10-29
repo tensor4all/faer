@@ -513,3 +513,45 @@ fn lapack_nonsymmetric_evd_checkers_require_left_adjoint() {
 		);
 	}
 }
+/// #112: the back substitution clamped a vanishing shift to `eps * sum |t_ij|`, which grows with
+/// `n`, so on a Jordan block (kind 3) and a tightly clustered triangle (kind 5) the GET22 residual
+/// ratio grew like `n` (62.5 at n = 63, where LAPACK's `dgeev` gives 0.5 on the same Jordan block).
+/// The clamp is now relative to the eigenvalue and the largest entry. Run with the regular tests,
+/// at the sizes of the opt-in family that failed, both eigenvector sides, CHKHS's threshold.
+#[test]
+fn clustered_eigenvector_residuals_do_not_grow_with_n() {
+	for n in [63, 65] {
+		for kind in [3, 5] {
+			let a = general_case(n, kind);
+			let mut l = Mat::<Scalar>::zeros(n, n);
+			let mut r = Mat::<Scalar>::zeros(n, n);
+			let mut wr = Col::<Real>::zeros(n);
+			let mut wi = Col::<Real>::zeros(n);
+			let p = Spec::new(EvdParams { ..auto!(Scalar) });
+			let mut mem = MemBuffer::new(evd_scratch::<Scalar>(
+				n,
+				ComputeEigenvectors::Yes,
+				ComputeEigenvectors::Yes,
+				Par::Seq.shape(),
+				p,
+			));
+			evd_call(
+				a.as_ref(),
+				wr.as_mut(),
+				wi.as_mut(),
+				Some(l.as_mut()),
+				Some(r.as_mut()),
+				Par::Seq,
+				MemStack::new(&mut mem),
+				p,
+			)
+			.unwrap();
+			let wr: Vec<_> = wr.iter().copied().collect();
+			let wi: Vec<_> = wi.iter().copied().collect();
+			for (x, left) in [(l.as_ref(), true), (r.as_ref(), false)] {
+				let (res, _) = eigenvector_ratios(a.as_ref(), x, &wr, &wi, left);
+				crate::assert!(res < 20.0, "kind {kind}, n {n}, left {left}: residual ratio {res}");
+			}
+		}
+	}
+}
