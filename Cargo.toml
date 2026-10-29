@@ -21,4 +21,4 @@ lto = "off"
 # Probe only (not for merge): threadteam with the staged waits (tensor4all/threadteam-rs
 # branch feat/wait-openmp), for the faer#107 before/after comparison.
 [patch.crates-io]
-threadteam = { git = "https://github.com/tensor4all/threadteam-rs", rev = "6bcc1b719362d1caa85cabaefd60b050450897ef" }
+threadteam = { git = "https://github.com/tensor4all/threadteam-rs", rev = "ea470376382f9e12f9c68fd5bd5ca903ea4d1ba3" }
