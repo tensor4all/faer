@@ -15,7 +15,7 @@ concurrency:
 jobs:
   validation:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 55
     outputs:
       unexpected: ${{ steps.summary.outputs.unexpected }}
       stale: ${{ steps.summary.outputs.stale }}
@@ -36,7 +36,7 @@ jobs:
           python3 scripts/test-lapack-validation.py
           node --test scripts/test-lapack-reporter.cjs
       - name: Build once and run all numerical families
-        timeout-minutes: 44 # build <=20m; family limits sum to 20m; setup/headroom
+        timeout-minutes: 49 # build <=20m; family limits sum to 25m; setup/headroom
         run: scripts/run-lapack-validation.sh
       - name: Summarize known and new failures
         id: summary

@@ -18,6 +18,8 @@ class Runner(unittest.TestCase):
         self.assertEqual(v.classify('linalg::evd::lapack::f64::lapack_schur_reorder_cases'), 'schur_reorder')
         self.assertEqual(v.classify('linalg::qr::lapack::c64::lapack_qr_reflector_checkers'), 'qr')
         self.assertEqual(v.classify('linalg::svd::tests::lapack_svd_f32::lapack::diagonal_families'), 'svd')
+        self.assertEqual(v.classify('linalg::svd::bidiag_svd::tests::test_josef'), 'svd_large')
+        self.assertIsNone(v.classify('linalg::svd::bidiag_svd::tests::test_deflation43'))
         # a self-adjoint accuracy test beside the case suite (tensor4all/faer#100): classified, not a case record
         name = 'linalg::evd::lapack::c32::lapack_self_adjoint_evd_qr_spectrum_accuracy'
         self.assertEqual(v.classify(name), 'self_adjoint_evd')
@@ -43,7 +45,7 @@ class Runner(unittest.TestCase):
         self.assertEqual(len(calls), len(v.FAMILIES))
         self.assertEqual(next(r for r in rows if r['family'] == 'svd')['exit_code'], 101)
         self.assertFalse(next(r for r in rows if r['family'] == 'lu')['complete'])
-        self.assertEqual(rows[-1]['family'], 'lstsq')
+        self.assertEqual(rows[-1]['family'], 'svd_large')
         self.assertTrue(rows[-1]['complete'])
         self.assertTrue(all('--exact' in c and '--include-ignored' in c for c in calls))
 

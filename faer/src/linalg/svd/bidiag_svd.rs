@@ -2147,7 +2147,9 @@ mod tests {
 		}
 	}
 	#[test]
-	#[ignore]
+	// n = 8660 in f32 with full U and V: about a minute even optimised, so it runs in the nightly
+	// LAPACK validation (family `svd_large`, scripts/run-lapack-validation.py), not with every test.
+	#[ignore = "large (n = 8660): runs in the nightly LAPACK validation"]
 	fn test_josef() {
 		for file in std::fs::read_dir(
 			PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data/svd/"),
