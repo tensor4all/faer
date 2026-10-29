@@ -200,14 +200,17 @@ pub mod thread {
 			return;
 		}
 		let size_a = size_a.clamp(1, degree - 1);
-		// one slot type for two different closure types
-		let ops: [Slot<alloc::boxed::Box<dyn FnOnce(Par) + Send>>; 2] = [
-			Slot::new(alloc::boxed::Box::new(op_a)),
-			Slot::new(alloc::boxed::Box::new(op_b)),
-		];
+		// a typed slot per closure, so nothing is boxed (#111: no allocation per region)
+		let (a, b) = (Slot::new(op_a), Slot::new(op_b));
 		split(par, &[size_a, degree - size_a], &|c, child| {
 			// SAFETY: the split hands index `c` to one child only, and `c < 2`
-			unsafe { (ops[c].take())(child) }
+			unsafe {
+				if c == 0 {
+					(a.take())(child)
+				} else {
+					(b.take())(child)
+				}
+			}
 		});
 	}
 

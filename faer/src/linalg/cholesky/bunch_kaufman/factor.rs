@@ -140,8 +140,11 @@ fn rank_1_update_and_argmax<T: ComplexField>(
 	A: MatMut<'_, T>,
 	L: ColRef<'_, T>,
 	d: T::Real,
+	best: &mut [(usize, usize, T::Real)],
 	par: Par,
 ) -> (usize, usize, T::Real) {
+	// the parallel arm is the only reader (absent without `rayon`)
+	let _ = &best;
 	with_dim!(N, A.nrows());
 	match par {
 		Par::Seq => rank_1_update_and_argmax_seq(
@@ -164,8 +167,9 @@ fn rank_1_update_and_argmax<T: ComplexField>(
 					1.0f64 - libm::sqrt(1.0f64 - idx_as_percent);
 				(col_start_percent * n as f64) as usize
 			};
-			let mut r =
-				alloc::vec![(0usize, 0usize, zero::< T::Real > ()); nthreads];
+			// one entry per block, from the call's scratch (no allocation per step, #111); every
+			// entry is written by its block
+			let r = &mut best[..nthreads];
 			crate::utils::thread::for_each(par, 
 				nthreads,
 				r.par_iter_mut().enumerate(),
@@ -182,7 +186,8 @@ fn rank_1_update_and_argmax<T: ComplexField>(
 					);
 				},
 			);
-			r.into_iter()
+			r.iter()
+				.map(|(i, j, v)| (*i, *j, v.copy()))
 				.max_by(|(_, _, a), (_, _, b)| {
 					if a == b {
 						core::cmp::Ordering::Equal
@@ -204,8 +209,11 @@ fn rank_2_update_and_argmax<'N, T: ComplexField>(
 	d00: T::Real,
 	d11: T::Real,
 	d10: T,
+	best: &mut [(usize, usize, T::Real)],
 	par: Par,
 ) -> (usize, usize, T::Real) {
+	// the parallel arm is the only reader (absent without `rayon`)
+	let _ = &best;
 	with_dim!(N, A.nrows());
 	match par {
 		Par::Seq => rank_2_update_and_argmax_seq(
@@ -232,8 +240,9 @@ fn rank_2_update_and_argmax<'N, T: ComplexField>(
 					1.0f64 - libm::sqrt(1.0f64 - idx_as_percent);
 				(col_start_percent * n as f64) as usize
 			};
-			let mut r =
-				alloc::vec![(0usize, 0usize, zero::< T::Real > ()); nthreads];
+			// one entry per block, from the call's scratch (no allocation per step, #111); every
+			// entry is written by its block
+			let r = &mut best[..nthreads];
 			crate::utils::thread::for_each(par, 
 				nthreads,
 				r.par_iter_mut().enumerate(),
@@ -254,7 +263,8 @@ fn rank_2_update_and_argmax<'N, T: ComplexField>(
 					);
 				},
 			);
-			r.into_iter()
+			r.iter()
+				.map(|(i, j, v)| (*i, *j, v.copy()))
 				.max_by(|(_, _, a), (_, _, b)| {
 					if a == b {
 						core::cmp::Ordering::Equal
@@ -272,6 +282,7 @@ fn lblt_full_piv<T: ComplexField>(
 	A: MatMut<'_, T>,
 	subdiag: DiagMut<'_, T>,
 	pivots: &mut [usize],
+	best: &mut [(usize, usize, T::Real)],
 	par: Par,
 	params: LbltParams,
 ) {
@@ -359,7 +370,7 @@ fn lblt_full_piv<T: ComplexField>(
 			}
 			if n != 0 {
 				(max_i, max_j, max_offdiag) = with_width(par.reborrow(), width, |par| {
-					rank_1_update_and_argmax(A.rb_mut(), L.rb(), diag, par)
+					rank_1_update_and_argmax(A.rb_mut(), L.rb(), diag, best, par)
 				});
 			}
 		} else {
@@ -389,6 +400,7 @@ fn lblt_full_piv<T: ComplexField>(
 						d00.copy(),
 						d11.copy(),
 						d10.copy(),
+						best,
 						par,
 					)
 				});
@@ -1158,12 +1170,16 @@ pub fn cholesky_in_place_scratch<I: Index, T: ComplexField>(
 	params: Spec<LbltParams, T>,
 ) -> StackReq {
 	let params = params.config;
-	let _ = par;
 	let mut bs = params.block_size;
 	if bs < 2 || dim <= bs {
 		bs = 0;
 	}
-	StackReq::new::<usize>(dim).and(temp_mat_scratch::<T>(dim, bs))
+	// the pivots, then the blocked variant's workspace or the full-pivoting variant's pivot
+	// candidates, one per block of a parallel step
+	StackReq::new::<usize>(dim).and(
+		temp_mat_scratch::<T>(dim, bs)
+			.or(StackReq::new::<(usize, usize, T::Real)>(par.degree())),
+	)
 }
 /// info about the result of the $LBL^\top$ factorization
 #[derive(Copy, Clone, Debug)]
@@ -1234,7 +1250,8 @@ pub fn cholesky_in_place<'out, I: Index, T: ComplexField>(
 		_ => (false, false),
 	};
 	if params.pivoting == PivotingStrategy::Full {
-		lblt_full_piv(A, subdiag, pivots, par, params);
+		let (mut best, _) = stack.make_with(par.degree(), |_| (0usize, 0usize, zero::<T::Real>()));
+		lblt_full_piv(A, subdiag, pivots, best.as_mut(), par, params);
 	} else {
 		lblt_blocked(A, subdiag, pivots, bs, rook, diagonal, par, stack);
 	}
