@@ -69,3 +69,12 @@ factors, which go to zero as the shift converges), ping-pong buffers so a reject
 Block width and floor (`bidiag.rs`), the dqds back-off factor, the padding threshold: each has its
 scan in the worklog and a one-line summary next to the constant. A threshold without its table is a
 guess.
+
+## A panel made of short regions is hidden, not split further
+
+The blocked QR's panel at 4096 is 121 ms at 16T and barely shrinks with the thread count or the block
+width (block 128 → 32 cuts its arithmetic 4x and its time 104 → 86 ms). It is a fixed cost per
+recursion node, at serial `dgeqr2`'s speed. Splitting its applies by rows or packing their basis
+changed it by 1 ms; overlapping it with the previous block's trailing apply on a split team
+(look-ahead) is the lever (`docs/worklogs/2026-10-30-qr-lookahead.md`, faer#160). Before threading a
+stage further, time it at block widths that differ by 4x: if it does not follow the arithmetic, hide it.

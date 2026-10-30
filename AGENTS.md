@@ -68,6 +68,22 @@ file-layout and test-placement overrides to the shared rules.
   upstream revision that was measured, and leave the decision to the maintainer.
   Explicit permission is required before anything more than a record here.
 
+## Working Memory In Parallel Code
+
+The allocation rule (tensor4all/faer#111) forbids heap allocation **per call**. A steady-state call
+allocates nothing, and `faer/tests/no_step_alloc.rs` guards this. The rule does not require that
+every byte come from the caller's scratch.
+
+Per-thread working memory is allowed and is often the faster choice: a buffer that the owning
+thread allocates once, first-touches itself (so it stays in its L2/L3 and on its NUMA node), and
+reuses across calls, for example a per-thread reusable pool.
+
+Decide buffer by buffer what is private to a thread and what is shared. Shared buffers include a
+packed panel that every task reads, together with its ready flags. Compare each buffer with
+OpenBLAS's level-3 threading (`driver/level3/level3_thread.c`, `driver/others/memory.c`
+`blas_memory_alloc`), then measure on a 64-core host (1-64 threads, CCX/CCD/NUMA-aligned CPU sets)
+before choosing.
+
 ## Work Logs And Review Intent
 
 Follow the shared [Work Logs And Design

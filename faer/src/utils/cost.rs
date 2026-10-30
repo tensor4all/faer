@@ -755,6 +755,54 @@ pub(crate) fn block_apply_estimate_with<T: crate::ComplexField>(
 	Duration::from_secs_f64(ns * 1e-9)
 }
 
+/// A panel's measured speed-up on a team: on `from..=to` participants it takes `ratio` of its time
+/// on one; elsewhere (fewer participants, or the full host where short regions cost more) the
+/// one-participant time is assumed.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct PanelTeam {
+	pub from: usize,
+	pub to: usize,
+	pub ratio: f64,
+}
+
+/// The step model of a look-ahead (a blocked factorization that factors panel `j + 1` while block
+/// `j`'s trailing update runs, faer#168): the participants to give the panel, or `None` when
+/// overlapping does not pay on `par`.
+///
+/// One step either runs the panel and then the update on the whole team, or the panel on `a`
+/// participants alongside the update on the other `p - a`:
+///
+/// - sequential: `P(p) + F / p`;
+/// - overlapped: `max(P(a), F / (p - a))` plus one split,
+///
+/// with `panel` (`P(1)`) and `far` (`F`, the update of the columns beyond the next panel) serial
+/// estimates of the caller's own stages and `team` the panel's measured speed-up. `a` is 1, or 4
+/// from 8 participants on (the panel group widths that have been measured).
+pub(crate) fn lookahead_width(par: &crate::Par, panel: Duration, far: Duration, team: PanelTeam) -> Option<usize> {
+	let p = par.degree();
+	if p < 2 {
+		return None;
+	}
+	let (panel, far) = (panel.as_secs_f64(), far.as_secs_f64());
+	let panel_on = |a: usize| if (team.from..=team.to).contains(&a) { panel * team.ratio } else { panel };
+	let sequential = panel_on(p) + far / p as f64;
+	let split = par.shape().dispatch_cost(NonZeroUsize::new(p).unwrap()).as_secs_f64();
+	let mut best: Option<(usize, f64)> = None;
+	for a in [1usize, 4] {
+		if a >= p || (a > 1 && p < 8) {
+			continue;
+		}
+		let overlapped = f64::max(panel_on(a), far / (p - a) as f64) + split;
+		if best.is_none_or(|(_, c)| overlapped < c) {
+			best = Some((a, overlapped));
+		}
+	}
+	match best {
+		Some((a, c)) if c < sequential => Some(a),
+		_ => None,
+	}
+}
+
 /// Serial time of `count` units at `ns` nanoseconds each.
 pub(crate) fn serial_time(count: usize, ns: f64) -> Duration {
 	Duration::from_secs_f64(count as f64 * ns * 1e-9)
@@ -813,6 +861,34 @@ impl ParShape {
 
 #[cfg(test)]
 mod tests {
+	/// The look-ahead step model (faer#168): never on one participant; on 4 participants no
+	/// overlap when the update is short against the panel and a one-participant panel when it is
+	/// long; a one-participant panel at 16 when the update dominates; a panel group of 4 at 64 when
+	/// the update on 63 would finish before a one-participant panel.
+	#[cfg(feature = "threadteam")]
+	#[test]
+	fn lookahead_width_follows_the_step_model() {
+		use core::time::Duration;
+		let ms = Duration::from_millis;
+		let team = super::PanelTeam { from: 4, to: 32, ratio: 0.68 };
+		assert!(super::lookahead_width(&crate::Par::Seq, ms(5), ms(500), team).is_none());
+		crate::team::with_team(4, |par| {
+			// a one-participant panel (5 ms) against 0.68 * 5 + 1/4 on the team: no overlap
+			assert_eq!(super::lookahead_width(&par, ms(5), ms(1), team), None);
+			// F = 40 ms: max(5, 40/3) = 13.3 against 3.4 + 10 = 13.4
+			assert_eq!(super::lookahead_width(&par, ms(5), ms(40), team), Some(1));
+		});
+		crate::team::with_team(16, |par| {
+			// F = 400 ms: a = 1 gives max(5, 26.7) = 26.7, a = 4 gives max(3.4, 33.3); sequential 28.4
+			assert_eq!(super::lookahead_width(&par, ms(5), ms(400), team), Some(1));
+		});
+		crate::team::with_team(64, |par| {
+			// F = 1000 ms, P = 20 ms: a = 1 gives max(20, 15.9) = 20; a = 4 gives
+			// max(13.6, 16.7) = 16.7; sequential 20 + 15.6 = 35.6
+			assert_eq!(super::lookahead_width(&par, ms(20), ms(1000), team), Some(4));
+		});
+	}
+
 	use super::*;
 	use crate::c64;
 
