@@ -38,6 +38,16 @@ pub fn spicy_matmul_scratch<T: ComplexField>(
 			return StackReq::EMPTY;
 		}
 	}
+	spicy_matmul_generic_scratch::<T>(nrows, ncols, depth, gather, diag)
+}
+/// The scratch of [`spicy_matmul_generic`].
+fn spicy_matmul_generic_scratch<T: ComplexField>(
+	nrows: usize,
+	ncols: usize,
+	depth: usize,
+	gather: bool,
+	diag: bool,
+) -> StackReq {
 	let diag = temp_mat_scratch::<T>(nrows, if diag { depth } else { 0 });
 	let gather = temp_mat_scratch::<T>(nrows, if gather { ncols } else { 0 });
 	diag.and(gather)
@@ -293,6 +303,32 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 			});
 		}
 	}
+	spicy_matmul_generic(
+		C, C_block, row_idx, col_idx, beta, A, conj_A, B, conj_B, D, alpha, par, stack,
+	);
+}
+
+/// The product without a native kernel: every target other than x86_64 with AVX2 and FMA, and
+/// every non-native scalar type. It needs the scratch of [`spicy_matmul_scratch`] for the gather
+/// output and the scaled `A`. Separate from [`spicy_matmul`] so that its tests run on every host.
+fn spicy_matmul_generic<I: Index, T: ComplexField>(
+	mut C: MatMut<'_, T>,
+	C_block: BlockStructure,
+	row_idx: Option<&[I]>,
+	col_idx: Option<&[I]>,
+	beta: Accum,
+	A: MatRef<'_, T>,
+	conj_A: Conj,
+	B: MatRef<'_, T>,
+	conj_B: Conj,
+	D: Option<DiagRef<'_, T>>,
+	alpha: T,
+	mut par: Par,
+	stack: &mut MemStack,
+) {
+	let nrows = A.nrows();
+	let ncols = B.ncols();
+	let depth = A.ncols();
 	let (mut out, stack) = unsafe {
 		temp_mat_uninit::<T, _, _>(
 			nrows,
@@ -382,7 +418,9 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 					alpha,
 					par,
 				);
-			} else if ncols > nrows {
+			} else if C_block.is_upper() && ncols > nrows {
+				// the columns right of the square part are strictly upper: a lower block
+				// must not write them
 				linalg::matmul::matmul_with_conj(
 					C.rb_mut().get_mut(..size, size..),
 					if row_idx.is_some() || col_idx.is_some() {
@@ -403,12 +441,14 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 	let lower = C_block.is_lower();
 	let upper = C_block.is_upper();
 	let diag = matches!(C_block.diag_kind(), DiagonalKind::Generic) as usize;
+	// a rectangular block is neither lower nor upper: every gathered entry is stored
+	let dense = C_block.is_dense();
 	match (row_idx, col_idx) {
 		(Some(row_idx), Some(col_idx)) => match beta {
 			Accum::Replace => {
 				for (j, &jj) in col_idx.iter().enumerate() {
 					for (i, &ii) in row_idx.iter().enumerate() {
-						if (lower && j < i + diag) || (upper && i < j + diag) {
+						if dense || (lower && j < i + diag) || (upper && i < j + diag) {
 							C[(ii.zx(), jj.zx())] = out[(i, j)].copy();
 						}
 					}
@@ -417,7 +457,7 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 			Accum::Add => {
 				for (j, &jj) in col_idx.iter().enumerate() {
 					for (i, &ii) in row_idx.iter().enumerate() {
-						if (lower && j < i + diag) || (upper && i < j + diag) {
+						if dense || (lower && j < i + diag) || (upper && i < j + diag) {
 							C[(ii.zx(), jj.zx())] += &out[(i, j)];
 						}
 					}
@@ -428,7 +468,7 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 			Accum::Replace => {
 				for j in 0..ncols {
 					for (i, &ii) in row_idx.iter().enumerate() {
-						if (lower && j < i + diag) || (upper && i < j + diag) {
+						if dense || (lower && j < i + diag) || (upper && i < j + diag) {
 							C[(ii.zx(), j)] = out[(i, j)].copy();
 						}
 					}
@@ -437,7 +477,7 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 			Accum::Add => {
 				for j in 0..ncols {
 					for (i, &ii) in row_idx.iter().enumerate() {
-						if (lower && j < i + diag) || (upper && i < j + diag) {
+						if dense || (lower && j < i + diag) || (upper && i < j + diag) {
 							C[(ii.zx(), j)] += &out[(i, j)];
 						}
 					}
@@ -448,7 +488,7 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 			Accum::Replace => {
 				for (j, &jj) in col_idx.iter().enumerate() {
 					for i in 0..nrows {
-						if (lower && j < i + diag) || (upper && i < j + diag) {
+						if dense || (lower && j < i + diag) || (upper && i < j + diag) {
 							C[(i, jj.zx())] = out[(i, j)].copy();
 						}
 					}
@@ -457,7 +497,7 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 			Accum::Add => {
 				for (j, &jj) in col_idx.iter().enumerate() {
 					for i in 0..nrows {
-						if (lower && j < i + diag) || (upper && i < j + diag) {
+						if dense || (lower && j < i + diag) || (upper && i < j + diag) {
 							C[(i, jj.zx())] += &out[(i, j)];
 						}
 					}
@@ -472,8 +512,53 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 mod tests {
 	use super::*;
 
+	/// The product through [`spicy_matmul`], or directly through the generic path, which
+	/// x86_64 with AVX2 and FMA otherwise never reaches for a native type. The scratch is the
+	/// route's own request; the generic path takes its temporaries from it.
+	fn product<T: ComplexField>(
+		generic: bool,
+		C: MatMut<'_, T>,
+		C_block: BlockStructure,
+		row_idx: Option<&[usize]>,
+		col_idx: Option<&[usize]>,
+		beta: Accum,
+		A: MatRef<'_, T>,
+		conj_A: Conj,
+		B: MatRef<'_, T>,
+		conj_B: Conj,
+		D: Option<DiagRef<'_, T>>,
+		alpha: T,
+	) {
+		let (m, n, depth) = (A.nrows(), B.ncols(), A.ncols());
+		let gather = row_idx.is_some() || col_idx.is_some();
+		let req = if generic {
+			spicy_matmul_generic_scratch::<T>(m, n, depth, gather, D.is_some())
+		} else {
+			spicy_matmul_scratch::<T>(m, n, depth, gather, D.is_some())
+		};
+		let mut mem = dyn_stack::MemBuffer::new(req);
+		let stack = MemStack::new(&mut mem);
+		if generic {
+			spicy_matmul_generic(
+				C, C_block, row_idx, col_idx, beta, A, conj_A, B, conj_B, D, alpha, Par::Seq,
+				stack,
+			);
+		} else {
+			spicy_matmul(
+				C, C_block, row_idx, col_idx, beta, A, conj_A, B, conj_B, D, alpha, Par::Seq,
+				stack,
+			);
+		}
+	}
+
 	#[test]
 	fn empty_strict_triangle_preserves_parent_guards() {
+		for generic in [false, true] {
+			empty_strict_triangle_preserves_parent_guards_on(generic);
+		}
+	}
+
+	fn empty_strict_triangle_preserves_parent_guards_on(generic: bool) {
 		let a = Mat::from_fn(2, 1, |i, _| 2.0_f64 + i as f64);
 		let b = Mat::from_fn(1, 2, |_, j| 4.0_f64 + j as f64);
 		for block in [
@@ -484,7 +569,8 @@ mod tests {
 		] {
 			let mut c = Mat::from_fn(2, 2, |_, _| 7.0_f64);
 			let expected = c.clone();
-			spicy_matmul::<usize, f64>(
+			product::<f64>(
+				generic,
 				c.as_mut().submatrix_mut(0, 0, 1, 1),
 				block,
 				None,
@@ -496,8 +582,6 @@ mod tests {
 				Conj::No,
 				None,
 				1.0,
-				Par::Seq,
-				MemStack::new(&mut []),
 			);
 			std::assert_eq!(c, expected);
 		}
@@ -505,6 +589,16 @@ mod tests {
 
 	fn check_strict_triangles<T: ComplexField<Real = f64>>(
 		scalar: impl Fn(f64, f64) -> T,
+		depths: &[usize],
+	) {
+		for generic in [false, true] {
+			check_strict_triangles_on(generic, &scalar, depths);
+		}
+	}
+
+	fn check_strict_triangles_on<T: ComplexField<Real = f64>>(
+		generic: bool,
+		scalar: &impl Fn(f64, f64) -> T,
 		depths: &[usize],
 	) {
 		for (m, n) in [
@@ -579,16 +673,8 @@ mod tests {
 									}
 								}
 							}
-							let mut mem = dyn_stack::MemBuffer::new(
-								spicy_matmul_scratch::<T>(
-									m,
-									n,
-									depth,
-									ri || ci,
-									true,
-								),
-							);
-							spicy_matmul::<usize, T>(
+							product::<T>(
+								generic,
 								c.as_mut().submatrix_mut(
 									0,
 									0,
@@ -605,15 +691,13 @@ mod tests {
 								Conj::No,
 								Some(d.as_ref().col(0).as_diagonal()),
 								alpha,
-								Par::Seq,
-								MemStack::new(&mut mem),
 							);
 							std::assert!(c.as_ref().is_all_finite());
 							let error =
 								(c.as_ref() - expected.as_ref()).norm_max();
 							std::assert!(
 								error < 1e-10,
-								"m={m} n={n} depth={depth} lower={} ri={ri} ci={ci} replace={} real={} error={error}; c={c:?}; expected={expected:?}",
+								"generic={generic} block={block:?} m={m} n={n} depth={depth} lower={} ri={ri} ci={ci} replace={} real={} error={error}; c={c:?}; expected={expected:?}",
 								block.is_lower(),
 								beta == Accum::Replace,
 								T::IS_REAL
@@ -641,24 +725,31 @@ mod tests {
 	fn strict_triangle_preserves_nonempty_parent_guards() {
 		let a = Mat::from_fn(4, 1, |i, _| 2.0_f64 + i as f64);
 		let b = Mat::from_fn(1, 4, |_, j| 4.0_f64 + j as f64);
-		let mut c = Mat::from_fn(4, 4, |_, _| 7.0_f64);
-		spicy_matmul::<usize, f64>(
-			c.as_mut().submatrix_mut(0, 0, 3, 3),
-			BlockStructure::StrictTriangularLower,
-			None,
-			None,
-			Accum::Replace,
-			a.as_ref().submatrix(0, 0, 3, 1),
-			Conj::No,
-			b.as_ref().submatrix(0, 0, 1, 3),
-			Conj::No,
-			None,
-			1.0,
-			Par::Seq,
-			MemStack::new(&mut []),
-		);
-		for j in 0..4 {
-			std::assert_eq!(c[(3, j)], 7.0);
+		for generic in [false, true] {
+			let mut c = Mat::from_fn(4, 4, |_, _| 7.0_f64);
+			product::<f64>(
+				generic,
+				c.as_mut().submatrix_mut(0, 0, 3, 3),
+				BlockStructure::StrictTriangularLower,
+				None,
+				None,
+				Accum::Replace,
+				a.as_ref().submatrix(0, 0, 3, 1),
+				Conj::No,
+				b.as_ref().submatrix(0, 0, 1, 3),
+				Conj::No,
+				None,
+				1.0,
+			);
+			for j in 0..4 {
+				std::assert_eq!(c[(3, j)], 7.0);
+			}
+			// the strict upper part of the 3 x 3 block stays as it was
+			for j in 0..3 {
+				for i in 0..j + 1 {
+					std::assert_eq!(c[(i, j)], 7.0, "generic={generic} ({i}, {j})");
+				}
+			}
 		}
 	}
 }

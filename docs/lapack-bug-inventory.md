@@ -53,13 +53,16 @@ Nothing was reported upstream: under this repository's rules, upstream feedback 
 | 12 | The real Schur QR never returned when the deflation-window sort could not swap a pair (a hang). | #112 comparison sweep (4 matrix families, n = 16-257, scales to the range limits) | #144 | #154 | 0.26.0 | `aed_sort_terminates_when_a_swap_fails` | [faer-030](../upstream-reports/faer-030-real-schur-aed-sort-hang/) |
 | 13 | Real eigenvectors of strongly graded matrices `D A D^-1` had GET22 residuals up to 2.6e9, where `dgeev` is below 5e-4. The cause was the 2 x 2 block solves, which now follow `?LALN2`. | #112 comparison sweep | #145 | #154 | 0.26.0 | `lapack_nonsymmetric_evd_graded_pairs_keep_their_residual`, `lapack_nonsymmetric_evd_pair_solve_with_a_small_determinant`, `lapack_nonsymmetric_evd_real_shift_block_below_the_square_root_of_min_positive` | [faer-031](../upstream-reports/faer-031-real-evd-pair-clamp/) |
 | 14 | The unpivoted LDL at n >= 65, in the two layouts that reverse rows and columns, had reconstruction, solve and inverse ratios of 1e9 to 1e15, positive definite input included. The x86 kernel reversed a negative depth stride without reversing the diagonal `D`. | `indefinite`, `lapack_indefinite_*`, layouts 2 and 3 | #113 | #117 (workaround), then #122 (`t4a-private-gemm-x86` 0.1.27, tensor4all/t4a-private-gemm-x86#5) | 0.26.0 | `a_diagonal_product_reads_the_depth_in_any_direction` | [gemm-x86-001](../upstream-reports/gemm-x86-001-diag-negative-stride/) (`private-gemm-x86` 0.1.22; upstream faer 0.24.4's unpivoted LDL is affected) |
+| 15 | A rejected real Schur swap changed T and Q: the 2 x 2 blocks were standardized after the kernel had rejected. LAPACK `DLAEXC` returns with T and Q untouched. | `schur_reorder`, LAPACK `dget34` records (2 x 2 / 2 x 2 section): 148 rejected swaps per real type | none; this inventory's follow-up for #31 | this inventory's follow-up PR | unreleased | `lapack_schur_reorder_checkers` (one rejected `dget34` record bit for bit), `lapack_schur_reorder_cases` (all 42,258 `dget34` records per real type) | not reported: the upstream code does the same, but it is internal and reports every swap as a success |
+| 16 | `lahqr_schur22` lacked `dlanv2`'s `B = 0` case, so a lower triangular 2 x 2 block (`[[x, 0], [c, x]]`) stayed in the Schur form. The real EVD of `[[2, 1], [-1, 0]]` returned an eigenvector with residual `sqrt(2)`. | `schur_reorder`, `dget34`'s standardization check on accepted 2 x 2 swaps | none; this inventory's follow-up for #31 | this inventory's follow-up PR | unreleased | `lahqr_schur22_standardizes_a_lower_triangular_result`, `geev_scaling_tests::defective_double_eigenvalue_has_small_residuals` | [faer-032](../upstream-reports/faer-032-real-evd-defective-double-eigenvalue/) |
+| 17 | The generic `spicy_matmul` path (every target but x86_64 with AVX2/FMA, and non-native types) wrote nothing for a `Rectangular` block with row or column indices, and wrote the strictly upper columns of a lower block with more columns than rows. | the three strict-triangle matmul tests, failing on the weekly aarch64 lane (both hosts) as on the first run's macOS arm64 | none; this inventory's follow-up for #31 | this inventory's follow-up PR | unreleased | the strict-triangle tests in `linalg::matmul::internal`, now on both routes on every host | not reported: same code upstream, but no public caller reaches either case |
 
 Rows 12 and 13 were not found by a family test.
 They came from the comparison sweep against LAPACK that #112 asked for.
 They are listed because that sweep is part of the validation work, and their regression tests sit in the `nonsymmetric_evd` family's module.
 
-Every defect that also occurs upstream has an upstream-reports entry, so this inventory adds none.
-Row 9 is the only fork-only defect.
+Every defect that also occurs upstream and shows through a public upstream entry point has an upstream-reports entry.
+Row 9 is the only fork-only defect. Row 15 is in upstream code too, but no public upstream entry point shows it.
 
 ## Defects in the checker or the runner
 
@@ -106,10 +109,10 @@ Each family carries the fix's test as regression evidence.
 
 * **Ledger:** no known failure; the ledger is empty.
 * **Open plan:** tensor4all/faer#31 (the validation plan) is still open.
-* **Untested check:** the GET34 rejection contract — a rejected swap leaves T and Q bitwise unchanged — has never run. No fixture is rejected.
-* **Host:** the nightly runs on x86_64 (ubuntu-latest) only. The original development runs were on macOS arm64. No aarch64 run is scheduled, so a defect specific to the `gemm` crate fallback would not show. One known example is the per-call allocation of #58 ([gemm-001](../upstream-reports/gemm-001-per-call-allocation/)), which is not a numerical defect.
-* **Strict-triangle tests:** the lapack-validation.md record lists three strict-triangle matmul tests in `linalg::matmul::internal` (`empty_strict_triangle_preserves_parent_guards`, `strict_triangle_maps_preserve_stored_entries_and_parent_guards`, `strict_triangle_preserves_nonempty_parent_guards`) as pre-existing failures. They are outside the LAPACK families. They pass on `main` `56e5d95` on x86_64 (broccoli, 2026-10-30). The failures were recorded on macOS arm64 and have not been re-run there, so it is not established whether they were fixed or are specific to that host.
-* **#82 upstream:** whether #82 also occurs upstream was not checked.
+* **GET34 rejection contract:** it now runs. LAPACK `dget34`'s own records give 148 rejected swaps per real type. It found rows 15 and 16.
+* **Host:** the nightly runs on x86_64 (ubuntu-latest). A weekly aarch64 lane (`lapack-validation-aarch64.yml`, `ubuntu-24.04-arm` and `macos-latest`) runs the same families. The lane also runs the three strict-triangle tests below and the #58 allocation test with `--ignored`; that test is the known per-call allocation of the `gemm` crate fallback ([gemm-001](../upstream-reports/gemm-001-per-call-allocation/)), to be replaced by #56. It is reported as a warning and does not fail the lane. Its results are in the pull request that added the lane.
+* **Strict-triangle tests:** they failed on aarch64, in the weekly lane's first run on `ubuntu-24.04-arm` and `macos-latest`. They passed on x86_64 only because the x86 kernel never takes the generic path. They found row 17, which is now fixed, and the tests run both routes on every host.
+* **#82 upstream:** checked on 2026-10-30 against `faer` 0.24.4, the latest release. The issue's matrix returns sorted singular values. A diagonal 128 x 128 matrix with `1`, `0.5` and a subnormal at the split positions `65`, `100` and `127` (the fork's direct regression input) also returns sorted values through `Mat::svd`. Upstream's `deflate` has the same `sml` comparisons that the fork replaced (`src/linalg/svd/bidiag_svd.rs:845`, `:871`), but no public reproduction was found, so there is no upstream-reports entry. In the fork, the trigger was 0.24.9's `norm_l2` change.
 
 ## What the suite does not validate
 
@@ -134,7 +137,7 @@ Each family carries the fix's test as regression evidence.
 | `svd` | see [lapack-svd-pilot.md](lapack-svd-pilot.md); the parallel cases use only thin or omitted factors |
 | `hessenberg`, `schur` | condition-weighted spectrum comparison: there is no faer estimator, so Jordan and non-normal cases are checked by backward residual |
 | `nonsymmetric_evd` | GET22's max-entry normalization is replaced by faer's unit 2-norm; the Schur-vector helper is right-only |
-| `schur_reorder` | other EC input records, condition estimation, alternative reordering drivers; no rejected swap is exercised |
+| `schur_reorder` | other EC input records, condition estimation, alternative reordering drivers; `dget34`'s scaled-residual summary (RMAX, LMAX) is replaced by per-record DHST01 and exact checks |
 | `balance` | other BAL/BAK records, separate job flags, left-vector back-transformation; the combined API is serial |
 | `tridiagonal_evd` | MRRR, bisection, inverse iteration, range selection, Sturm certification, vendor-algorithm comparison |
 | `self_adjoint_evd` | packed and banded interfaces, alternate UPLO, other LAPACK drivers |

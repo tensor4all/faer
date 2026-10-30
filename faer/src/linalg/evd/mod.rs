@@ -3307,6 +3307,34 @@ mod geev_scaling_tests {
 		}};
 	}
 
+	/// A defective double real eigenvalue, whose 2 x 2 block the Schur iteration returned lower
+	/// triangular (`[[1, 0], [c, 1]]`) because `lahqr_schur22` lacked `dlanv2`'s `B = 0` case. The
+	/// eigenvector back substitution then treated that block as a conjugate pair with a zero
+	/// imaginary part: `[[2, 1], [-1, 0]]` returned an eigenvector with `|A v - v| = sqrt(2)`.
+	/// `dgeev` gives two nearly parallel eigenvectors with small residuals.
+	#[test]
+	fn defective_double_eigenvalue_has_small_residuals() {
+		let jordan = |a: [[f64; 3]; 3], n: usize| -> Vec<Vec<Z>> {
+			(0..n).map(|i| (0..n).map(|j| Z::new(a[i][j], 0.0)).collect()).collect()
+		};
+		let cases = [
+			(jordan([[2.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0; 3]], 2)),
+			(jordan([[0.0, -1.0, 0.0], [1.0, 2.0, 0.0], [0.0; 3]], 2)),
+			(jordan([[0.0, -1.0, 5.0], [1.0, 2.0, 1.0], [0.0, 0.0, 3.0]], 3)),
+			(jordan([[2.0, 1.0, -1.0], [-1.0, 0.0, 2.0], [0.0, 0.0, 3.0]], 3)),
+		];
+		for a in &cases {
+			let n = a.len();
+			let m = Mat::<f64>::from_fn(n, n, |i, j| a[i][j].re);
+			let evd = m.eigen(Par::Seq).unwrap();
+			let w: Vec<Z> = (0..n).map(|i| Z::new(evd.S()[i].re, evd.S()[i].im)).collect();
+			let u: Vec<Vec<Z>> = (0..n).map(|i| (0..n).map(|j| Z::new(evd.U()[(i, j)].re, evd.U()[(i, j)].im)).collect()).collect();
+			assert!(w.iter().all(|w| w.is_finite()) && u.iter().flatten().all(|u| u.is_finite()));
+			let r = get22(a, &u, &w, f64::EPSILON);
+			assert!(r <= 20.0, "{a:?}: GET22 {r}");
+		}
+	}
+
 	/// The ends of the range for a complex matrix, where faer's complex modulus overflows
 	/// (`2^1023 + 0i`, `2^127 + 0i`) or underflows (`2^-1074`, `2^-149`): the eigenvalues come
 	/// back exactly.

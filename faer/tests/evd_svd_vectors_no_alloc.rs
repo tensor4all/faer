@@ -4,11 +4,14 @@
 //! call. The allocator counts every allocation of the process while the call
 //! runs; the inputs and the scratch are built outside the counted interval.
 //!
-//! x86_64 only for now. Elsewhere, and on x86_64 without AVX2 and FMA, `matmul` falls back to the
-//! `gemm` crate, which allocates its packing buffers per call and takes no caller scratch
-//! (upstream-reports/gemm-001-per-call-allocation). That path is #56's to replace; drop the target
-//! gate when it lands.
-#![cfg(all(feature = "std", target_arch = "x86_64"))]
+//! It holds on x86_64 with AVX2 and FMA. Elsewhere, and on x86_64 without
+//! them, `matmul` falls back to the `gemm` crate, which allocates its packing
+//! buffers per call and takes no caller scratch
+//! (upstream-reports/gemm-001-per-call-allocation). That path is #56's to
+//! replace, so the test is ignored off x86_64; the weekly aarch64 lane of the
+//! LAPACK validation runs it with `--ignored` and reports its counts. Drop the
+//! `ignore` when #56 lands.
+#![cfg(feature = "std")]
 use faer::diag::Diag;
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::evd::{
@@ -126,7 +129,12 @@ fn hermitian(n: usize) -> Mat<c64> {
 
 // one test function: the counter is process wide, so nothing else may run while it counts
 #[test]
+#[cfg_attr(
+	not(target_arch = "x86_64"),
+	ignore = "#58: the gemm crate fallback allocates per call until #56"
+)]
 fn evd_and_bidiagonal_svd_with_vectors_allocate_nothing() {
+	#[cfg(target_arch = "x86_64")]
 	if !(std::arch::is_x86_feature_detected!("avx2")
 		&& std::arch::is_x86_feature_detected!("fma"))
 	{

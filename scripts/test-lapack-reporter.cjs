@@ -63,3 +63,10 @@ test('propagate permission/network failures', async () => {
   await assert.rejects(report(args), error => error.status === 403);
   assert.equal(calls.length, 1);
 });
+test('a lane with its own title keeps its own issue', async () => {
+  const lane = 'Weekly aarch64 LAPACK numerical validation is failing';
+  const {calls, args} = fixture({issues: [{number: 3, title}]});
+  await report({...args, title: lane});
+  assert.deepEqual(calls.map(c => c[0]), ['getLabel', 'create']);
+  assert.equal(calls[1][1].title, lane);
+});

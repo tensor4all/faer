@@ -73,7 +73,7 @@ def run_command(command, log, timeout):
     return code, time.perf_counter() - start
 
 
-def run_families(binary, groups, output, command=run_command):
+def run_families(binary, groups, output, command=run_command, limit_scale=1.0):
     rows = []
     for family in FAMILIES:
         names = groups[family]
@@ -82,7 +82,7 @@ def run_families(binary, groups, output, command=run_command):
         log = output / (family + '.log')
         code, seconds = command(
             [str(binary), '--exact', *names, '--include-ignored', '--nocapture', '--test-threads=1'],
-            log, LIMITS[family],
+            log, LIMITS[family] * limit_scale,
         )
         contents = log.read_text()
         summaries = SUMMARY.findall(contents)
@@ -179,6 +179,8 @@ def expected_records(groups):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=Path('target/lapack-validation'))
+    parser.add_argument('--limit-scale', type=float, default=1.0,
+                        help='multiply every family time limit (slower hosts, e.g. the aarch64 lane)')
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -214,7 +216,7 @@ def main():
                                  text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True).stdout
         (output / 'selection.log').write_text(listing)
         groups = selected_tests(listing)
-        report['families'] = run_families(binary, groups, output)
+        report['families'] = run_families(binary, groups, output, limit_scale=args.limit_scale)
         known = load_known(Path(__file__).resolve().parent.parent)
         report['known_failing'], report['unexpected'], report['stale'] = classify_failures(
             report['families'], groups, known, output)

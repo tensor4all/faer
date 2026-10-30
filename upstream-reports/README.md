@@ -1,6 +1,6 @@
 # Upstream reports
 
-This list is updated over time. Last updated: 2026-10-29.
+This list is updated over time. Last updated: 2026-10-30.
 
 This directory lists defects that we found while working on a port of `faer` and that also occur in the published upstream crates.
 Each entry was reproduced by running its program against the upstream release named in the table.
@@ -45,6 +45,7 @@ The program prints the expected and the actual value, and exits with status 1 wh
 | [faer-029](faer-029-evd-input-not-scaled/) | The nonsymmetric EVD loses every eigenvector digit when the entries are tiny | `faer` 0.24.4 | inaccurate value | tensor4all/faer#112 | not yet | 2026-10-29 |
 | [faer-030](faer-030-real-schur-aed-sort-hang/) | Real Schur QR does not return when the deflation-window sort cannot swap a pair | `faer` 0.24.4 | hang | tensor4all/faer#144 | not yet | 2026-10-29 |
 | [faer-031](faer-031-real-evd-pair-clamp/) | The real nonsymmetric EVD returns a wrong eigenvector for a complex pair | `faer` 0.24.4 | wrong value | fix for tensor4all/faer#145 | not yet | 2026-10-29 |
+| [faer-032](faer-032-real-evd-defective-double-eigenvalue/) | The real nonsymmetric EVD returns a wrong eigenvector for a defective double eigenvalue | `faer` 0.24.4 | wrong value | fix for tensor4all/faer#31 (`dget34`) | not yet | 2026-10-30 |
 | [gemm-001](gemm-001-per-call-allocation/) | Every matrix product allocates on the heap | `gemm` 0.19.0 | heap allocation per call | not fixed (tensor4all/faer#56 planned) | not yet | 2026-10-30 |
 | [gemm-x86-001](gemm-x86-001-diag-negative-stride/) | A product with a diagonal gives a wrong value when the left matrix is stored backwards | `private-gemm-x86` 0.1.22 | wrong value | tensor4all/t4a-private-gemm-x86#5 (`84ca6db`) | not yet | 2026-10-29 |
 

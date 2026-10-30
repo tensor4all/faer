@@ -40,7 +40,7 @@ and safe-minimum handling. Complex-modulus adaptations are identified explicitly
 | hessenberg | adapted; passing | CHKHS 1–2, HST01, ORT01/UNT01 | 20 | evd::lapack | Packed reflectors extracted to logical H |
 | schur | adapted; passing | CHKHS 3–8; HST01 | 20 | evd::lapack | Equivalent Schur forms; compare invariant/residual/spectra |
 | nonsymmetric_evd | adapted; residual failures recorded | CHKHS right/left residuals; GET22 | 20 | evd::lapack | Full EVD exposes both sides; Schur-vector helper exposes right only |
-| schur_reorder | implemented; passing | S/DGET34, S/D/C/ZGET36; *ec.in selected records | 20 | evd::lapack | Real 1×1/2×2; complex 1×1; rejection contract |
+| schur_reorder | implemented; passing | S/DGET34 (all records), S/D/C/ZGET36; *ec.in selected records | 20 | evd::lapack | Real 1×1/2×2; complex 1×1; rejection contract exercised by `dget34`'s rejected records |
 | balance | implemented; passing | CHKBL/CHKBK; *bal.in/*bak.in | source checker | evd::lapack | Combined balance; right-vector back-transform; metadata adaptation |
 | tridiagonal_evd | implemented; passing | CHKST 9–12/22–26 where applicable | 60 | evd::lapack | QR/DC properties; no MRRR/range selection/Sturm certification |
 | self_adjoint_evd | implemented; passing (spectrum accuracy fixed by #76) | CHKST reduction/full interface; SYT21/HET21 | 60 | evd::lapack | Lower-triangle ownership; no packed/banded interfaces |
@@ -162,8 +162,10 @@ round trips, isolation, nonfinite no-write errors, four layouts and reuse are co
 ### Phases 3, 5 and 6 — Reordering and self-adjoint EVD
 
 Reordering passes all 3,132 calls (0.04s). A rejected GET34 swap must leave T
-and Q bitwise unchanged (the DLAEXC contract); no current fixture is rejected,
-so that check has not yet run on a rejection. GET34/36's normwise similarity contract
+and Q bitwise unchanged (the DLAEXC contract). No fixture of this run was rejected,
+so that check did not run here. It runs since 2026-10-30: the family now includes
+LAPACK `dget34`'s own 42,258 records per real type, 148 of which are rejected.
+That found two defects (rows 15 and 16 of [lapack-bug-inventory.md](lapack-bug-inventory.md)). GET34/36's normwise similarity contract
 sets the full Schur matrix scale for moving-block identity; it does not promise
 relative accuracy with respect to a tiny individual block. The initial local
 relative oracle falsely rejected valid swaps; its normalization was corrected
