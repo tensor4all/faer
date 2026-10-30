@@ -164,3 +164,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(suitesparse)',
     'cfg(docs_rs)',
   ] }
+
+# probe for tensor4all/faer#160, not for merging
+[[example]]
+name = "qr_phases_160"
+required-features = ["par-trace"]

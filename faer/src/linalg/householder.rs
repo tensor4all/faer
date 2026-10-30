@@ -737,10 +737,38 @@ fn apply_block_householder_on_the_left_in_place_generic<
 				},
 				2 => (n_tasks, threads),
 				3 => (1, 1),
+				// probe (faer#160): at most four column tasks on the whole budget (the old cap)
+				4 => (Ord::min(n_tasks, 4), threads),
 				_ => (tasks, width),
 			};
 			n_tasks = if width > 1 { tasks } else { 1 };
 			split_width = width;
+		}
+		// the owner-packed schedule (`apply_owner_packed`): native types, a basis of two columns
+		// or more (the pointer slots come from `tmp`, `N * K` elements against `n_tasks <= K`
+		// pointers)
+		#[cfg(all(feature = "std", feature = "threadteam"))]
+		if n_tasks > 1
+			&& N.unbound() >= 2
+			&& owner_packed::<T>()
+			&& (T::IS_NATIVE_F64 || T::IS_NATIVE_C64 || T::IS_NATIVE_F32 || T::IS_NATIVE_C32)
+		{
+			let basis = householder_basis.as_dyn();
+			let factor = householder_factor.as_dyn();
+			let matrix = matrix.rb_mut().as_dyn_mut();
+			let slots_ptr = tmp.as_ptr_mut() as *const core::sync::atomic::AtomicUsize;
+			assert!(slots_ptr as usize % core::mem::align_of::<usize>() == 0);
+			crate::utils::thread::with_width(par, n_tasks, |par| match par {
+				Par::Team(team) => {
+					let p = team.size().get();
+					assert!(p * core::mem::size_of::<usize>() <= N.unbound() * K.unbound() * core::mem::size_of::<T>());
+					// SAFETY: `tmp` holds at least `p` pointers (above) and is not otherwise used
+					let slots = unsafe { core::slice::from_raw_parts(slots_ptr, p) };
+					unsafe { apply_owner_packed(basis, factor, conj_lhs, matrix, forward, team, slots) }
+				},
+				_ => unreachable!("n_tasks > 1 needs a team"),
+			});
+			return;
 		}
 		let func = |(mut tmp, mut matrix): (
 			MatMut<'_, T, Dim<'N>>,
@@ -1087,6 +1115,72 @@ mod tests {
 	use crate::{Conj, Mat, Par};
 	use num_complex::ComplexFloat;
 	use reborrow::ReborrowMut;
+
+	/// The owner-packed schedule (`apply_owner_packed`): every packed row slice of the basis is read
+	/// by every column block, the head's unit triangle is made explicit in the pack, and the factor
+	/// is solved per block. Checked against the sequential apply with a QR's own basis and factor,
+	/// for both directions of the solve, f64 and c64, a column-major and a row-major target, a
+	/// target narrower than the team and one much wider, and more participants than basis rows per
+	/// slice.
+	#[cfg(all(feature = "std", feature = "threadteam", feature = "par-trace"))]
+	#[test]
+	fn owner_packed_apply_matches_sequential() {
+		use crate::c64;
+		use crate::linalg::qr::no_pivoting::factor as qrf;
+		use core::sync::atomic::Ordering;
+		fn case<T: crate::traits::ComplexField>(m: usize, k: usize, cols: usize, row_major: bool, gen: impl Fn(usize, usize) -> T)
+		where
+			T: Copy + core::ops::Sub<Output = T>,
+		{
+			let mut basis = Mat::<T>::from_fn(m, k, |i, j| gen(i, j));
+			let mut factor = Mat::<T>::zeros(k, k);
+			let mut mem = MemBuffer::new(qrf::qr_in_place_scratch::<T>(m, k, k, crate::ParShape::Seq, Default::default()));
+			qrf::qr_in_place(basis.as_mut(), factor.as_mut(), Par::Seq, MemStack::new(&mut mem), Default::default());
+			let target = Mat::<T>::from_fn(m, cols, |i, j| gen(i + 3, j + 5));
+			let target = if row_major { target.transpose().to_owned().transpose().to_owned() } else { target };
+			let mut mem = MemBuffer::new(apply_block_householder_transpose_on_the_left_in_place_scratch::<T>(m, k, cols).or(
+				apply_block_householder_on_the_left_in_place_scratch::<T>(m, k, cols),
+			));
+			for transpose in [false, true] {
+				let run = |dst: &mut Mat<T>, par: Par, mem: &mut MemBuffer| {
+					if transpose {
+						apply_block_householder_transpose_on_the_left_in_place_with_conj(basis.as_ref(), factor.as_ref(), Conj::Yes, dst.as_mut(), par, MemStack::new(mem));
+					} else {
+						apply_block_householder_on_the_left_in_place_with_conj(basis.as_ref(), factor.as_ref(), Conj::No, dst.as_mut(), par, MemStack::new(mem));
+					}
+				};
+				let mut sequential = target.clone();
+				run(&mut sequential, Par::Seq, &mut mem);
+				let mut packed = target.clone();
+				let before = crate::utils::cost::trace::OWNER_PACKED_CALLS.load(Ordering::Relaxed);
+				crate::utils::cost::trace::N_TASKS_MODE.store(5, Ordering::Relaxed);
+				crate::team::with_team(4, |par| run(&mut packed, par, &mut mem));
+				crate::utils::cost::trace::N_TASKS_MODE.store(0, Ordering::Relaxed);
+				assert!(
+					crate::utils::cost::trace::OWNER_PACKED_CALLS.load(Ordering::Relaxed) > before,
+					"m {m} k {k} cols {cols}: the owner-packed path did not run"
+				);
+				let scale = (m * k) as f64 * 1e-15;
+				for i in 0..m {
+					for j in 0..cols {
+						let d = crate::traits::math_utils::abs(&(packed[(i, j)] - sequential[(i, j)]));
+						assert!(
+							crate::traits::math_utils::abs(&d) <= crate::traits::math_utils::from_f64::<T::Real>(scale),
+							"m {m} k {k} cols {cols} row_major {row_major} transpose {transpose} ({i}, {j})"
+						);
+					}
+				}
+			}
+		}
+		let r = |i: usize, j: usize| ((i * 7 + j * 13) % 17) as f64 / 17.0 - 0.5;
+		let c = |i: usize, j: usize| c64::new(r(i, j), r(j + 1, i + 2));
+		for &(m, k, cols) in &[(1500, 32, 5), (1500, 32, 200), (700, 24, 300), (3000, 64, 4)] {
+			for row_major in [false, true] {
+				case::<f64>(m, k, cols, row_major, r);
+				case::<c64>(m, k, cols, row_major, c);
+			}
+		}
+	}
 
 	/// The `N == 1` kernel is one sequential rank-one update per target column, and it is skipped in
 	/// favour of the generic path -- which partitions the columns and threads its products -- when
@@ -1562,5 +1656,164 @@ mod gate_tests {
 				close(seq.as_ref(), par.as_ref());
 			}
 		});
+	}
+}
+
+/// Per-thread working memory of [`apply_owner_packed`]: grown by its owner, first touched by it
+/// (so it stays in the owner's caches and on its NUMA node), reused across calls. Lines of 64
+/// bytes keep every view in it aligned for the kernels.
+#[cfg(all(feature = "std", feature = "threadteam"))]
+#[derive(Clone, Copy)]
+#[repr(align(64))]
+struct WorkLine(#[allow(dead_code)] [u8; 64]);
+#[cfg(all(feature = "std", feature = "threadteam"))]
+std::thread_local! {
+	static APPLY_WORK: core::cell::RefCell<alloc::vec::Vec<WorkLine>> = const { core::cell::RefCell::new(alloc::vec::Vec::new()) };
+}
+
+/// The block apply `C <- C - V op(T)^-1 V^H C` with OpenBLAS's level-3 buffer roles
+/// (`driver/level3/level3_thread.c`, `driver/others/memory.c`):
+///
+/// - participant `i` packs row slice `i` of `V` (the unit triangle of its head made explicit) into
+///   its own per-thread buffer, and publishes it: the basis is read from memory once per call and
+///   every packed slice lives in its owner's cache and NUMA node (OpenBLAS's `sb`, packed by its
+///   owner and shared through `job[].working`);
+/// - a barrier, then participant `i` owns column block `i` of the target: `W_i = sum_s P_s^H C_s,i`
+///   over the shared slices, starting from its own, the solve with `T` on `W_i`, and
+///   `C_s,i -= P_s W_i`. `W_i` is private, in the same per-thread buffer (OpenBLAS's private `sa`).
+///
+/// The kernels run sequentially per participant, so no call reaches the parallel kernel and its
+/// per-call job arrays. `slots` holds one pointer per participant.
+///
+/// # Safety
+///
+/// `T` is a native float type (its bytes may be zero-initialised), `slots` has at least
+/// `team.size()` entries, and `matrix` does not alias `basis` or `factor`.
+#[cfg(all(feature = "std", feature = "threadteam"))]
+#[allow(clippy::too_many_arguments)]
+unsafe fn apply_owner_packed<T: ComplexField>(
+	basis: MatRef<'_, T>,
+	factor: MatRef<'_, T>,
+	conj_lhs: Conj,
+	matrix: MatMut<'_, T>,
+	forward: bool,
+	team: threadteam::TeamExec<'_>,
+	slots: &[core::sync::atomic::AtomicUsize],
+) {
+	use core::sync::atomic::Ordering;
+	let (m, k) = basis.shape();
+	let ncols = matrix.ncols();
+	let p = team.size().get();
+	assert!(slots.len() >= p);
+	#[cfg(feature = "par-trace")]
+	crate::utils::cost::trace::OWNER_PACKED_CALLS.fetch_add(1, Ordering::Relaxed);
+	let (c_ptr, c_rs, c_cs) = (matrix.as_ptr_mut() as usize, matrix.row_stride(), matrix.col_stride());
+	team.run_with(|part| {
+		let i = part.index();
+		let (r0, mi) = crate::utils::thread::par_split_indices(m, i, p);
+		let (c0, ni) = crate::utils::thread::par_split_indices(ncols, i, p);
+		APPLY_WORK.with(|work| {
+			let mut work = work.borrow_mut();
+			let elems = mi * k + k * ni;
+			let lines = (elems * core::mem::size_of::<T>()).div_ceil(64).max(1);
+			if work.len() < lines {
+				// grown once per high-water mark by this thread, which also touches it first
+				work.resize(lines, WorkLine([0; 64]));
+			}
+			let base = work.as_mut_ptr() as *mut T;
+			// SAFETY: `base` holds `mi * k + k * ni` elements of a native float type, owned by
+			// this thread until the region ends.
+			let mut packed = unsafe { MatMut::<T>::from_raw_parts_mut(base, mi, k, 1, mi as isize) };
+			for j in 0..k {
+				for r in 0..mi {
+					let g = r0 + r;
+					packed[(r, j)] = if g < j {
+						zero()
+					} else if g == j {
+						one()
+					} else {
+						basis[(g, j)].clone()
+					};
+				}
+			}
+			slots[i].store(base as usize, Ordering::Release);
+			part.barrier().expect("no participant of the block apply panics before the barrier");
+			if ni == 0 {
+				return;
+			}
+			// SAFETY: column block `i` of the target belongs to this participant alone.
+			let col = |s0: usize, len: usize| unsafe {
+				MatMut::<T>::from_raw_parts_mut(
+					(c_ptr as *mut T).wrapping_offset(s0 as isize * c_rs + c0 as isize * c_cs),
+					len,
+					ni,
+					c_rs,
+					c_cs,
+				)
+			};
+			let slice = |s: usize| {
+				let (s0, ms) = crate::utils::thread::par_split_indices(m, s, p);
+				let ptr = slots[s].load(Ordering::Acquire) as *const T;
+				// SAFETY: published before the barrier, read-only until the region ends.
+				(s0, unsafe { MatRef::<T>::from_raw_parts(ptr, ms, k, 1, ms as isize) })
+			};
+			// SAFETY: the tail of this thread's buffer, disjoint from its packed slice.
+			let mut w = unsafe { MatMut::<T>::from_raw_parts_mut(base.add(mi * k), k, ni, 1, k as isize) };
+			for t in 0..p {
+				let (s0, ps) = slice((i + t) % p);
+				matmul_with_conj(
+					w.rb_mut(),
+					if t == 0 { Accum::Replace } else { Accum::Add },
+					ps.transpose(),
+					Conj::Yes.compose(conj_lhs),
+					col(s0, ps.nrows()).rb(),
+					Conj::No,
+					one(),
+					Par::Seq,
+				);
+			}
+			if forward {
+				triangular_solve::solve_lower_triangular_in_place_with_conj(
+					factor.transpose(),
+					Conj::Yes.compose(conj_lhs),
+					w.rb_mut(),
+					Par::Seq,
+				);
+			} else {
+				triangular_solve::solve_upper_triangular_in_place_with_conj(
+					factor,
+					Conj::No.compose(conj_lhs),
+					w.rb_mut(),
+					Par::Seq,
+				);
+			}
+			for t in 0..p {
+				let (s0, ps) = slice((i + t) % p);
+				matmul_with_conj(
+					col(s0, ps.nrows()),
+					Accum::Add,
+					ps,
+					Conj::No.compose(conj_lhs),
+					w.rb(),
+					Conj::No,
+					-one::<T>(),
+					Par::Seq,
+				);
+			}
+		});
+	});
+}
+
+/// Whether the block apply takes the owner-packed schedule. Probe builds choose it with
+/// `N_TASKS_MODE == 5`; otherwise off until the broccoli comparison decides (faer#90, #160).
+#[cfg(all(feature = "std", feature = "threadteam"))]
+fn owner_packed<T: ComplexField>() -> bool {
+	#[cfg(feature = "par-trace")]
+	{
+		crate::utils::cost::trace::N_TASKS_MODE.load(core::sync::atomic::Ordering::Relaxed) == 5
+	}
+	#[cfg(not(feature = "par-trace"))]
+	{
+		false
 	}
 }

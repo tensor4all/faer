@@ -140,8 +140,29 @@ fn qr_in_place_blocked<T: ComplexField>(
 	let block_size = H.nrows();
 	assert!(block_size > 0);
 	if block_size == 1 {
-		return qr_in_place_unblocked(A, H.row_mut(0), row_start, col_start);
+		#[cfg(feature = "par-trace")]
+		let t0 = std::time::Instant::now();
+		let r = qr_in_place_unblocked(A, H.row_mut(0), row_start, col_start);
+		#[cfg(feature = "par-trace")]
+		crate::utils::cost::trace::phase_add(crate::utils::cost::trace::PHASE_LEAF, t0.elapsed().as_nanos() as u64);
+		return r;
 	}
+	#[cfg(feature = "par-trace")]
+	let depth = crate::utils::cost::trace::QR_DEPTH.with(|d| {
+		let v = d.get();
+		d.set(v + 1);
+		v
+	});
+	#[cfg(feature = "par-trace")]
+	struct DepthGuard;
+	#[cfg(feature = "par-trace")]
+	impl Drop for DepthGuard {
+		fn drop(&mut self) {
+			crate::utils::cost::trace::QR_DEPTH.with(|d| d.set(d.get() - 1));
+		}
+	}
+	#[cfg(feature = "par-trace")]
+	let _depth_guard = DepthGuard;
 	let sub_block_size = if m * n < params.blocking_threshold {
 		1
 	} else {
@@ -161,6 +182,8 @@ fn qr_in_place_blocked<T: ComplexField>(
 		while offset < block_size && col < n {
 			let block_size = Ord::min(n - col, block_size - offset);
 			let sub_block_size = Ord::min(block_size, sub_block_size);
+			#[cfg(feature = "par-trace")]
+			let t0 = std::time::Instant::now();
 			let new_row = qr_in_place_blocked(
 				A.rb_mut().subcols_mut(0, col + block_size),
 				H.rb_mut().subrows_mut(offset, sub_block_size),
@@ -170,6 +193,12 @@ fn qr_in_place_blocked<T: ComplexField>(
 				stack,
 				params.into(),
 			);
+			#[cfg(feature = "par-trace")]
+			if depth == 0 {
+				crate::utils::cost::trace::phase_add(crate::utils::cost::trace::PHASE_PANEL, t0.elapsed().as_nanos() as u64);
+			}
+			#[cfg(feature = "par-trace")]
+			let t0 = std::time::Instant::now();
 			let local = new_row - row;
 			if local > 0 {
 				let mut k = 0;
@@ -229,6 +258,12 @@ fn qr_in_place_blocked<T: ComplexField>(
 					);
 				}
 			}
+			#[cfg(feature = "par-trace")]
+			if depth == 0 {
+				crate::utils::cost::trace::phase_add(crate::utils::cost::trace::PHASE_FACTOR, t0.elapsed().as_nanos() as u64);
+			}
+			#[cfg(feature = "par-trace")]
+			let t0 = std::time::Instant::now();
 			let (Q0, A1) = A
 				.rb_mut()
 				.get_mut(row.., ..)
@@ -238,6 +273,11 @@ fn qr_in_place_blocked<T: ComplexField>(
 			if A1.ncols() > 0 {
 				householder::apply_block_householder_transpose_on_the_left_in_place_with_conj(Q0.rb(), H.rb(), Conj::Yes, A1, par.reborrow(), stack);
 			}
+			#[cfg(feature = "par-trace")]
+			crate::utils::cost::trace::phase_add(
+				if depth == 0 { crate::utils::cost::trace::PHASE_APPLY } else { crate::utils::cost::trace::PHASE_PANEL_APPLY },
+				t0.elapsed().as_nanos() as u64,
+			);
 			offset += local;
 			row += local;
 			col += block_size;
