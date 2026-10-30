@@ -3,6 +3,8 @@
 pub mod bound;
 /// the parallel rule: dispatch cost of a shape against the serial time of a region
 pub mod cost;
+/// static partitions of a parallel region's work (the equal-area triangle)
+pub(crate) mod partition;
 /// the parallel route onto a threadteam team, with [`team::with_team`] for the caller
 #[cfg(feature = "threadteam")]
 pub mod team;
