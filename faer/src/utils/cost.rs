@@ -518,6 +518,9 @@ pub mod trace {
 	/// Override of the block apply column split gate, for probes: 0 the rule, 1 the previous
 	/// rule (`M * K * 4 * M >= gemm threshold`), 2 always parallel, 3 never.
 	pub static N_TASKS_MODE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+	/// The split of a team's product into a lower triangle, for probes (faer#160): 0 equal-area
+	/// column ranges, one sequential kernel call per participant; 1 the kernel's own tile split.
+	pub static LOWER_SPLIT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 	static ON: AtomicBool = AtomicBool::new(false);
 	static LOG: Mutex<Vec<Record>> = Mutex::new(Vec::new());
 	std::thread_local! {

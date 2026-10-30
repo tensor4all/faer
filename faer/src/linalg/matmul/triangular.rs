@@ -606,6 +606,46 @@ fn upper_x_lower_into_lower_impl_unchecked<'N, T: ComplexField>(
 		);
 	}
 }
+/// The first column of piece `i` of `parts` when the lower part of an `m x n`
+/// destination (row `r` and column `c` with `r >= c`) is cut into column ranges
+/// of equal area: column `c` holds `m - c` entries, so the area left of `c` is
+/// `c*m - c*(c - 1)/2`. Boundaries are rounded to whole microkernel columns (8)
+/// and are nondecreasing; piece `parts - 1` ends at `n`.
+#[cfg(all(target_arch = "x86_64", feature = "std", feature = "threadteam"))]
+fn area_split(m: usize, n: usize, i: usize, parts: usize) -> usize {
+	if i == 0 {
+		return 0;
+	}
+	if i >= parts {
+		return n;
+	}
+	let (mf, nf) = (m as f64, n.min(m) as f64);
+	let total = nf * mf - nf * (nf - 1.0) / 2.0;
+	let want = total * i as f64 / parts as f64;
+	// c*m - c^2/2 + c/2 = want, the smaller root
+	let b = mf + 0.5;
+	let c = b - (b * b - 2.0 * want).max(0.0).sqrt();
+	((c.round() as usize).next_multiple_of(8)).min(n)
+}
+
+/// Whether a team's product into a lower triangle is cut by area
+/// ([`area_split`]); probes can switch back to the kernel's own split
+/// (`cost::trace::LOWER_SPLIT`, 1).
+#[cfg(all(target_arch = "x86_64", feature = "std", feature = "threadteam"))]
+#[inline]
+fn lower_by_area() -> bool {
+	#[cfg(feature = "par-trace")]
+	{
+		crate::utils::cost::trace::LOWER_SPLIT
+			.load(core::sync::atomic::Ordering::Relaxed)
+			== 0
+	}
+	#[cfg(not(feature = "par-trace"))]
+	{
+		true
+	}
+}
+
 fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 	dst: MatMut<'_, T, Dim<'N>, Dim<'N>>,
 	beta: Accum,
@@ -663,6 +703,9 @@ fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 					};
 					macro_rules! go {
 						($call:path, $last:expr) => {
+							go!($call, $last, dst, lhs, rhs)
+						};
+						($call:path, $last:expr, $dst:ident, $lhs:ident, $rhs:ident) => {
 							$call(
 								const {
 									if T::IS_NATIVE_F64 {
@@ -677,12 +720,12 @@ fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 								},
 								const { IType::U32 },
 								feat,
-								dst.nrows(),
-								dst.ncols(),
-								lhs.ncols(),
-								dst.as_ptr_mut() as _,
-								dst.row_stride(),
-								dst.col_stride(),
+								$dst.nrows(),
+								$dst.ncols(),
+								$lhs.ncols(),
+								$dst.as_ptr_mut() as _,
+								$dst.row_stride(),
+								$dst.col_stride(),
 								core::ptr::null(),
 								core::ptr::null(),
 								DstKind::Lower,
@@ -690,15 +733,15 @@ fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 									crate::Accum::Replace => Accum::Replace,
 									crate::Accum::Add => Accum::Add,
 								},
-								lhs.as_ptr() as _,
-								lhs.row_stride(),
-								lhs.col_stride(),
+								$lhs.as_ptr() as _,
+								$lhs.row_stride(),
+								$lhs.col_stride(),
 								conj_lhs == Conj::Yes,
 								core::ptr::null(),
 								0,
-								rhs.as_ptr() as _,
-								rhs.row_stride(),
-								rhs.col_stride(),
+								$rhs.as_ptr() as _,
+								$rhs.row_stride(),
+								$rhs.col_stride(),
 								conj_rhs == Conj::Yes,
 								alpha as *const T as *const (),
 								$last,
@@ -717,6 +760,81 @@ fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 						match crate::utils::team::kernel::kernel_width(
 							&team, estimate,
 						) {
+							Some(width) if lower_by_area() => {
+								// The triangle in `width` column ranges of
+								// equal area, one per participant, each
+								// a sequential kernel call on its trapezoid
+								// (OpenBLAS `syrk_thread`). One section instead
+								// of the kernel's two per cache block,
+								// and no participant idles on the tiles the
+								// triangle leaves out.
+								let (m, n, k) =
+									(dst.nrows(), dst.ncols(), lhs.ncols());
+								let (drs, dcs) =
+									(dst.row_stride(), dst.col_stride());
+								let (lrs, lcs) =
+									(lhs.row_stride(), lhs.col_stride());
+								let (rrs, rcs) =
+									(rhs.row_stride(), rhs.col_stride());
+								let dptr =
+									crate::utils::thread::Ptr(dst.as_ptr_mut());
+								let lptr = crate::utils::thread::Ptr(
+									lhs.as_ptr() as *mut T,
+								);
+								let rptr = crate::utils::thread::Ptr(
+									rhs.as_ptr() as *mut T,
+								);
+								crate::utils::team::stats::bump(
+									&crate::utils::team::stats::GEMM_LOWER_BY_AREA,
+								);
+								crate::utils::team::run(
+									team,
+									width,
+									&|i, parts| {
+										let (c0, c1) = (
+											area_split(m, n, i, parts),
+											area_split(m, n, i + 1, parts),
+										);
+										if c0 == c1 || c0 >= m {
+											return;
+										}
+										let (dptr, lptr, rptr) =
+											(dptr, lptr, rptr);
+										// SAFETY: the pieces are disjoint
+										// column ranges of `dst`
+										// (rows `c0..m`, columns `c0..c1`), and
+										// `lhs`/`rhs` are only read.
+										let dst = MatMut::<T, usize, usize>::from_raw_parts_mut(
+										dptr.0.wrapping_offset(c0 as isize * (drs + dcs)),
+										m - c0,
+										c1 - c0,
+										drs,
+										dcs,
+									);
+										let lhs = MatRef::<T, usize, usize>::from_raw_parts(
+										lptr.0.wrapping_offset(c0 as isize * lrs),
+										m - c0,
+										k,
+										lrs,
+										lcs,
+									);
+										let rhs = MatRef::<T, usize, usize>::from_raw_parts(
+										rptr.0.wrapping_offset(c0 as isize * rcs),
+										k,
+										c1 - c0,
+										rrs,
+										rcs,
+									);
+										go!(
+											private_gemm_x86::gemm,
+											1,
+											dst,
+											lhs,
+											rhs
+										)
+									},
+								);
+							},
 							Some(width) => {
 								crate::utils::team::kernel::with_fork(
 									team,
@@ -1537,6 +1655,51 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 				conj_lhs,
 				par,
 			)
+		}
+	}
+}
+
+#[cfg(all(
+	test,
+	target_arch = "x86_64",
+	feature = "std",
+	feature = "threadteam"
+))]
+mod area_split_tests {
+	use super::area_split;
+
+	/// The pieces cover `0..n` in order, start on whole microkernel columns,
+	/// and hold equal areas up to one column strip of rounding.
+	#[test]
+	fn pieces_cover_the_triangle_with_equal_areas() {
+		for &(m, n) in &[
+			(4096usize, 4096usize),
+			(2047, 2048),
+			(301, 301),
+			(40, 40),
+			(9, 10),
+		] {
+			for parts in [1usize, 2, 3, 4, 7, 16, 64] {
+				let cuts: Vec<usize> =
+					(0..=parts).map(|i| area_split(m, n, i, parts)).collect();
+				assert_eq!((cuts[0], cuts[parts]), (0, n));
+				assert!(
+					cuts.windows(2).all(|w| w[0] <= w[1]),
+					"{m}x{n}/{parts}: {cuts:?}"
+				);
+				assert!(cuts[1..parts].iter().all(|c| c % 8 == 0 || *c == n));
+				let area = |c0: usize, c1: usize| {
+					(c0..c1.min(m)).map(|c| m - c).sum::<usize>()
+				};
+				let total = area(0, n);
+				for w in cuts.windows(2) {
+					let strip = 8 * m;
+					assert!(
+						area(w[0], w[1]).abs_diff(total / parts) <= strip,
+						"{m}x{n}/{parts}: {cuts:?}"
+					);
+				}
+			}
 		}
 	}
 }
