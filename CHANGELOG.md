@@ -1,3 +1,21 @@
+# t4a-faer 0.27.0 (tensor4all fork; with t4a-faer-traits 0.24.2)
+
+Changes since `t4a-faer` 0.26.0 (tag `faer-v0.26.0`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`.
+
+## Breaking: threadteam 0.2 (#158)
+
+The public API carries threadteam's types (`Par::Team(threadteam::TeamExec)`,
+`ParShape::Team(_, threadteam::DispatchCosts)`), and the requirement is now `threadteam` 0.2. A crate
+that builds its `Pool`/`Team` with threadteam 0.1 and lends it to faer must move to threadteam 0.2
+together with this release; no faer signature changes otherwise. With threadteam 0.2, `with_team`
+called repeatedly at one width reuses the threads of a cached pool instead of spawning and joining a
+fresh set (#107).
+
+## Correctness
+
+- The values-only SVD no longer allocates on the heap: dqds takes its work arrays from the caller's
+  `MemStack` (included in `svd_scratch`) and sorts without a heap buffer (#156, #157).
+
 # t4a-faer 0.26.0 (tensor4all fork; with t4a-faer-traits 0.24.2)
 
 Changes since `t4a-faer` 0.25.2 (tag `faer-v0.25.2`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`.

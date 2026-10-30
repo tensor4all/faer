@@ -1,6 +1,6 @@
 [package]
 name = "t4a-faer"
-version = "0.26.0"
+version = "0.27.0"
 edition = "2021"
 authors = ["sarah quiñones <sarah@veganb.tw>"]
 description = "Temporary tensor4all fork of faer: an AI-driven experiment build for tenferro-rs."
