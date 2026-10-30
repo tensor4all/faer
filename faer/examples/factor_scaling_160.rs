@@ -4,7 +4,7 @@
 //! feature, so the same file builds against `origin/main` and against the fix branch.
 //!
 //! ```text
-//! factor_scaling_160 --threads T --op qr|q|hess|tridiag|bidiag|apply --n N [--reps R]
+//! factor_scaling_160 --threads T --op qr|q|hess|tridiag|bidiag|eigh|svd|apply --n N [--reps R]
 //!                    [--k K --cols C]      (apply: basis N x K, target N x C)
 //! ```
 //! Output: `op,n,k,cols,threads,rep,ms`, one line per repetition after one untimed call.
@@ -45,7 +45,7 @@ fn main() {
 	let bs = qrf::recommended_block_size::<f64>(n, n);
 
 	let mut a0 = seeded(n, n, n as u64);
-	if op == "tridiag" {
+	if op == "tridiag" || op == "eigh" {
 		let s = &a0 + a0.transpose();
 		a0 = s;
 	}
@@ -75,6 +75,9 @@ fn main() {
 		"tridiag" => evd::tridiag::tridiag_in_place_scratch::<f64>(n, shape, Default::default()),
 		"bidiag" => svd::bidiag::bidiag_in_place_scratch::<f64>(n, n, shape, Default::default()),
 		"apply" => householder::apply_block_householder_transpose_on_the_left_in_place_scratch::<f64>(n, k, cols),
+		// the whole decompositions whose back-transforms use the block apply (eigenvectors, U and V)
+		"eigh" => evd::self_adjoint_evd_scratch::<f64>(n, evd::ComputeEigenvectors::Yes, shape, Default::default()),
+		"svd" => svd::svd_scratch::<f64>(n, n, svd::ComputeSvdVectors::Thin, svd::ComputeSvdVectors::Thin, shape, Default::default()),
 		_ => panic!("unknown op {op}"),
 	};
 	let mut mem = MemBuffer::new(StackReq::all_of(&[req]));
@@ -100,6 +103,15 @@ fn main() {
 				"hess" => evd::hessenberg::hessenberg_in_place(a.as_mut(), h2.as_mut(), par, stack, Default::default()),
 				"tridiag" => evd::tridiag::tridiag_in_place(a.as_mut(), h2.as_mut(), par, stack, Default::default()),
 				"bidiag" => svd::bidiag::bidiag_in_place(a.as_mut(), h1.as_mut(), h2.as_mut(), par, stack, Default::default()),
+				"eigh" => {
+					let mut s = Mat::<f64>::zeros(n, 1);
+					evd::self_adjoint_evd(a.as_ref(), s.as_mut().col_mut(0).as_diagonal_mut(), Some(q.as_mut()), par, stack, Default::default()).unwrap();
+				},
+				"svd" => {
+					let mut s = Mat::<f64>::zeros(n, 1);
+					let mut v = Mat::<f64>::zeros(n, n);
+					svd::svd(a.as_ref(), s.as_mut().col_mut(0).as_diagonal_mut(), Some(q.as_mut()), Some(v.as_mut()), par, stack, Default::default()).unwrap();
+				},
 				"apply" => householder::apply_block_householder_transpose_on_the_left_in_place_with_conj(
 					basis.as_ref(),
 					factor.as_ref(),
@@ -127,5 +139,11 @@ fn main() {
 			}
 		}
 	});
+	#[cfg(feature = "par-trace")]
+	eprintln!(
+		"# {op} n={n} threads={threads} owner_packed_calls={} row_split_calls={}",
+		faer::utils::cost::trace::OWNER_PACKED_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+		faer::utils::cost::trace::ROW_SPLIT_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+	);
 	assert!(a[(0, 0)].is_finite() && q[(0, 0)].is_finite() && target[(0, 0)].is_finite());
 }

@@ -1709,6 +1709,9 @@ struct WorkLine(#[allow(dead_code)] [u8; 64]);
 #[cfg(all(feature = "std", feature = "threadteam"))]
 std::thread_local! {
 	static APPLY_WORK: core::cell::RefCell<alloc::vec::Vec<WorkLine>> = const { core::cell::RefCell::new(alloc::vec::Vec::new()) };
+	/// The caller's copy of the factor `T` for [`apply_owner_packed`] (shared, read by every
+	/// participant's solve), reused across calls.
+	static APPLY_FACTOR: core::cell::RefCell<alloc::vec::Vec<WorkLine>> = const { core::cell::RefCell::new(alloc::vec::Vec::new()) };
 }
 
 /// The block apply `C <- C - V op(T)^-1 V^H C` with OpenBLAS's level-3 buffer roles
@@ -1748,6 +1751,17 @@ unsafe fn apply_owner_packed<T: ComplexField>(
 	#[cfg(feature = "par-trace")]
 	crate::utils::cost::trace::OWNER_PACKED_CALLS.fetch_add(1, Ordering::Relaxed);
 	let (c_ptr, c_rs, c_cs) = (matrix.as_ptr_mut() as usize, matrix.row_stride(), matrix.col_stride());
+	// `T` packed once per call by the caller into its own reusable buffer, contiguous, and shared
+	// read-only by every participant's solve (dlarfb reads it in place through `trmm`)
+	let mut factor_buf = APPLY_FACTOR.with(|f| core::mem::take(&mut *f.borrow_mut()));
+	let lines = (k * k * core::mem::size_of::<T>()).div_ceil(64).max(1);
+	if factor_buf.len() < lines {
+		factor_buf.resize(lines, WorkLine([0; 64]));
+	}
+	// SAFETY: `k * k` native elements in the caller's buffer, not shared until the region.
+	let mut packed_factor = unsafe { MatMut::<T>::from_raw_parts_mut(factor_buf.as_mut_ptr() as *mut T, k, k, 1, k as isize) };
+	packed_factor.copy_from(factor);
+	let factor = packed_factor.rb();
 	team.run_with(|part| {
 		let i = part.index();
 		let (r0, mi) = crate::utils::thread::par_split_indices(m, i, p);
@@ -1842,6 +1856,7 @@ unsafe fn apply_owner_packed<T: ComplexField>(
 			}
 		});
 	});
+	APPLY_FACTOR.with(|f| *f.borrow_mut() = factor_buf);
 }
 
 /// Whether the block apply takes the owner-packed schedule. Probe builds choose it with
