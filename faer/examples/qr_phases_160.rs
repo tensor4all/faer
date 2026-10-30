@@ -37,6 +37,9 @@ fn main() {
 	let blocks = arg(&args, "--blocks").map(|s| list(&s)).unwrap_or(vec![0]);
 	let reps: usize = arg(&args, "--reps").map(|s| s.parse().unwrap()).unwrap_or(3);
 	let want_trace = args.iter().any(|a| a == "--trace");
+	if args.iter().any(|a| a == "--panel-seq") {
+		trace::PANEL_SEQ.store(true, Ordering::Relaxed);
+	}
 	if let Some(c) = arg(&args, "--row-split-cols") {
 		trace::ROW_SPLIT_COLS.store(c.parse().unwrap(), Ordering::Relaxed);
 	}
@@ -49,7 +52,7 @@ fn main() {
 	});
 	let mut a = a0.clone();
 
-	println!("n,threads,mode,block,rep,total_ms,panel_ms,leaf_ms,factor_ms,apply_ms,panel_apply_ms");
+	println!("n,threads,mode,block,rep,total_ms,panel_ms,leaf_ms,factor_ms,apply_ms,panel_apply_ms,pa_w1,pa_w2,pa_w4,pa_w8,pa_w16,pa_w32,pa_w64,pa_w128,panel_factor_ms");
 	faer::utils::team::with_team(threads, |mut par| {
 		for &block in &blocks {
 			let bs = if block == 0 { qrf::recommended_block_size::<f64>(n, n) } else { block.min(n) };
@@ -82,13 +85,15 @@ fn main() {
 					qrf::qr_in_place(a.as_mut(), qc.as_mut(), par.reborrow(), MemStack::new(&mut mem), Default::default());
 					let total = t0.elapsed().as_secs_f64() * 1e3;
 					let ms = |i: usize| trace::PHASE_NS[i].load(Ordering::Relaxed) as f64 * 1e-6;
+					let by: Vec<String> = trace::PANEL_BY_WIDTH_NS.iter().map(|c| format!("{:.3}", c.load(Ordering::Relaxed) as f64 * 1e-6)).collect();
 					println!(
-						"{n},{threads},{mode},{bs},{rep},{total:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+						"{n},{threads},{mode},{bs},{rep},{total:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{}",
 						ms(trace::PHASE_PANEL),
 						ms(trace::PHASE_LEAF),
 						ms(trace::PHASE_FACTOR),
 						ms(trace::PHASE_APPLY),
 						ms(trace::PHASE_PANEL_APPLY),
+						by.join(","),
 					);
 				}
 				if want_trace {

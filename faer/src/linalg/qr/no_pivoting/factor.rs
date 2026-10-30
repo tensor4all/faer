@@ -184,12 +184,16 @@ fn qr_in_place_blocked<T: ComplexField>(
 			let sub_block_size = Ord::min(block_size, sub_block_size);
 			#[cfg(feature = "par-trace")]
 			let t0 = std::time::Instant::now();
+			#[cfg(feature = "par-trace")]
+			let panel_seq = depth == 0 && crate::utils::cost::trace::PANEL_SEQ.load(core::sync::atomic::Ordering::Relaxed);
+			#[cfg(not(feature = "par-trace"))]
+			let panel_seq = false;
 			let new_row = qr_in_place_blocked(
 				A.rb_mut().subcols_mut(0, col + block_size),
 				H.rb_mut().subrows_mut(offset, sub_block_size),
 				row,
 				col,
-				par.reborrow(),
+				if panel_seq { Par::Seq } else { par.reborrow() },
 				stack,
 				params.into(),
 			);
@@ -261,6 +265,8 @@ fn qr_in_place_blocked<T: ComplexField>(
 			#[cfg(feature = "par-trace")]
 			if depth == 0 {
 				crate::utils::cost::trace::phase_add(crate::utils::cost::trace::PHASE_FACTOR, t0.elapsed().as_nanos() as u64);
+			} else {
+				crate::utils::cost::trace::PANEL_BY_WIDTH_NS[8].fetch_add(t0.elapsed().as_nanos() as u64, core::sync::atomic::Ordering::Relaxed);
 			}
 			#[cfg(feature = "par-trace")]
 			let t0 = std::time::Instant::now();
@@ -274,10 +280,17 @@ fn qr_in_place_blocked<T: ComplexField>(
 				householder::apply_block_householder_transpose_on_the_left_in_place_with_conj(Q0.rb(), H.rb(), Conj::Yes, A1, par.reborrow(), stack);
 			}
 			#[cfg(feature = "par-trace")]
-			crate::utils::cost::trace::phase_add(
-				if depth == 0 { crate::utils::cost::trace::PHASE_APPLY } else { crate::utils::cost::trace::PHASE_PANEL_APPLY },
-				t0.elapsed().as_nanos() as u64,
-			);
+			{
+				let ns = t0.elapsed().as_nanos() as u64;
+				crate::utils::cost::trace::phase_add(
+					if depth == 0 { crate::utils::cost::trace::PHASE_APPLY } else { crate::utils::cost::trace::PHASE_PANEL_APPLY },
+					ns,
+				);
+				if depth > 0 {
+					let bin = (usize::BITS - 1 - local.max(1).leading_zeros()) as usize;
+					crate::utils::cost::trace::PANEL_BY_WIDTH_NS[bin.min(7)].fetch_add(ns, core::sync::atomic::Ordering::Relaxed);
+				}
+			}
 			offset += local;
 			row += local;
 			col += block_size;

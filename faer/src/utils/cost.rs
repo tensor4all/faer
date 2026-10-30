@@ -522,6 +522,12 @@ pub mod trace {
 	pub static OWNER_PACKED_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 	/// Calls of the row-split block apply (probe, faer#160).
 	pub static ROW_SPLIT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+	/// Probe: run the QR's panel (the recursion below depth 0) sequentially; the trailing apply keeps
+	/// the team.
+	pub static PANEL_SEQ: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+	/// Probe: ns of the block applies inside the panel by basis width (bin `log2(N)`, last bin 128+),
+	/// and of the factor merges inside the panel (bin 8).
+	pub static PANEL_BY_WIDTH_NS: [core::sync::atomic::AtomicU64; 9] = [const { core::sync::atomic::AtomicU64::new(0) }; 9];
 	/// Mode 6: the row split takes applies whose target has at most this many columns; the others
 	/// follow the rule.
 	pub static ROW_SPLIT_COLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(128);
@@ -554,6 +560,9 @@ pub mod trace {
 		for i in 0..5 {
 			PHASE_NS[i].store(0, Ordering::Relaxed);
 			PHASE_CALLS[i].store(0, Ordering::Relaxed);
+		}
+		for c in &PANEL_BY_WIDTH_NS {
+			c.store(0, Ordering::Relaxed);
 		}
 	}
 	static ON: AtomicBool = AtomicBool::new(false);
