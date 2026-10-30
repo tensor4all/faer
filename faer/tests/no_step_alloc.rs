@@ -1,6 +1,7 @@
 //! #111: a parallel region allocates nothing on the heap. Each counted call below runs on a held
-//! team with its regions forced parallel (`ParThreshold::Fixed(0)`), after a warm-up, and the
-//! allocator counts every allocation of the process (any thread) while the call runs. The team,
+//! team after a warm-up. Existing configurable gates are forced with `ParThreshold::Fixed(0)`;
+//! Pfaffian uses its derived gate on a larger input. The allocator counts every allocation
+//! of the process (any thread) while the call runs. The team,
 //! the matrices and the scratch are built outside the counted interval, and the check that the
 //! regions did dispatch reads the team counters after it.
 #![cfg(all(feature = "std", feature = "threadteam"))]
@@ -105,6 +106,19 @@ fn parallel_regions_allocate_nothing() {
 			// both update ranks ran: a 2x2 pivot leaves a nonzero subdiagonal entry, a 1x1 a zero
 			let subs: Vec<f64> = (0..n).map(|i| sub[i]).collect();
 			assert!(subs.iter().any(|&x| x != 0.0) && subs.iter().any(|&x| x == 0.0), "Bunch-Kaufman, width {width}: a pivot size never occurred");
+
+			// Pfaffian: the complete call, including its internally partitioned column updates.
+			let x = sample(258, 258, 171);
+			let a0 = &x - x.transpose();
+			let mut mem = MemBuffer::new(faer::linalg::pfaffian::pfaffian_scratch::<f64>(258));
+			let (allocs, parallel) = counted(|| {
+				let value = faer::linalg::pfaffian::pfaffian(
+					a0.as_ref(), par.reborrow(), MemStack::new(&mut mem),
+				).unwrap();
+				assert!(value.is_finite());
+			});
+			assert!(parallel > 0, "Pfaffian, width {width}: no parallel region");
+			assert_eq!(allocs, 0, "Pfaffian, width {width}");
 
 			// `join_sized`, the LU swap stage's split, with closures that capture
 			let mut left = vec![0usize; 4];
