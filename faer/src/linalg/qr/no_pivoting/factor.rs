@@ -349,53 +349,29 @@ static LOOKAHEAD_STEPS: core::sync::atomic::AtomicUsize = core::sync::atomic::At
 #[cfg(test)]
 static LOOKAHEAD_FORCE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// The panel group of a look-ahead step, or `None` when overlapping does not pay.
-///
-/// One step either runs the next panel and then the trailing apply on the whole team, or the
-/// panel on `a` participants alongside the apply on the other `p - a`:
-///
-/// - sequential: `P(p) + F / p`;
-/// - overlapped: `max(P(a), F / (p - a))` plus one split,
-///
-/// with `F` the far columns' block apply and `P` the panel, both serial estimates at the block
-/// apply rate (`cost::block_apply_estimate`; the panel as a block apply of its own width on
-/// itself, which matches its measured serial time at block 128). The panel's speed-up on a team
-/// is the measured one: `PANEL_TEAM` below.
+/// The panel group of a QR look-ahead step, or `None` when overlapping does not pay: the step
+/// model of `cost::lookahead_width`, with `F` the far columns' block apply and `P` the panel, both
+/// serial estimates at the block apply rate (`cost::block_apply_estimate`; the panel as a block
+/// apply of its own width on itself, which matches its measured serial time at block 128), and
+/// the panel's measured speed-up on a team (`PANEL_TEAM`).
 fn lookahead_width<T: ComplexField>(par: &Par, rows: usize, basis_cols: usize, panel_cols: usize, far_cols: usize) -> Option<usize> {
 	// time of the panel on `a` participants over its time on one: 4096 at block 128 on broccoli
 	// (EPYC 7702P), faer#160 `panel2`: 184-186 ms on one, 124-131 ms on 4 to 32, 182 ms on 64
 	// (the full host: short regions at width 64). Two participants are not measured and are
 	// not offered.
-	const PANEL_TEAM: f64 = 0.68;
-	let p = par.degree();
-	if p < 2 {
-		return None;
-	}
+	const PANEL_TEAM: crate::utils::cost::PanelTeam = crate::utils::cost::PanelTeam { from: 4, to: 32, ratio: 0.68 };
 	#[cfg(test)]
 	match LOOKAHEAD_FORCE.load(core::sync::atomic::Ordering::Relaxed) {
 		0 => {},
-		a => return Some(Ord::min(a, p - 1)),
+		a if par.degree() >= 2 => return Some(Ord::min(a, par.degree() - 1)),
+		_ => return None,
 	}
-	let panel_rows = rows - basis_cols;
-	let panel = crate::utils::cost::block_apply_estimate::<T>(panel_rows, panel_cols, panel_cols).as_secs_f64();
-	let far = crate::utils::cost::block_apply_estimate::<T>(rows, basis_cols, far_cols).as_secs_f64();
-	let panel_on = |a: usize| if (4..=32).contains(&a) { panel * PANEL_TEAM } else { panel };
-	let sequential = panel_on(p) + far / p as f64;
-	let split = par.shape().dispatch_cost(core::num::NonZeroUsize::new(p).unwrap()).as_secs_f64();
-	let mut best: Option<(usize, f64)> = None;
-	for a in [1usize, 4] {
-		if a >= p || (a > 1 && p < 8) {
-			continue;
-		}
-		let overlapped = f64::max(panel_on(a), far / (p - a) as f64) + split;
-		if best.is_none_or(|(_, c)| overlapped < c) {
-			best = Some((a, overlapped));
-		}
+	if par.degree() < 2 {
+		return None;
 	}
-	match best {
-		Some((a, c)) if c < sequential => Some(a),
-		_ => None,
-	}
+	let panel = crate::utils::cost::block_apply_estimate::<T>(rows - basis_cols, panel_cols, panel_cols);
+	let far = crate::utils::cost::block_apply_estimate::<T>(rows, basis_cols, far_cols);
+	crate::utils::cost::lookahead_width(par, panel, far, PANEL_TEAM)
 }
 /// Factors a matrix whose columns are not the contiguous direction by copying
 /// it into a column-major buffer, factoring that, and copying the factor back.

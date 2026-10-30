@@ -22,6 +22,7 @@ Revision measured: `main` `81f3b1d`/`294e432`. No upstream revision was measured
 - **Per-step decision** (`lookahead_width`). Sequential costs `P(p) + F/p`. Overlapped costs `max(P(a), F/(p − a))` plus one split. F and P come from `cost::block_apply_estimate`. The panel is estimated as a block apply of its own width on itself, which matches its measured serial time at block 128. `a` is taken from {1, 4}.
 
   The panel's team speed-up is a constant, `PANEL_TEAM = 0.68`, measured in panel2 on broccoli: 185 ms on one participant against 124-131 ms on 4-32. At 4T the model overlaps only the last blocks, where the far apply is between roughly 1.3 and 8 panels' work.
+- **A shared part (faer#168).** The step model is `cost::lookahead_width(par, panel, far, PanelTeam)`, with no QR-specific input. A factorization that factors panel `j + 1` during block `j`'s update supplies its own serial estimates for the panel and the far update, and its measured panel team speed-up. LU (#123) and Cholesky can reuse it. The QR keeps only its estimates and its `PANEL_TEAM` row.
 - **Block width unchanged.** `Q_coeff`'s height is the compact-WY layout that the Q formation, solves and sequence applies read. With the panel hidden, the block-width lever shrinks: the model gives block 128 the edge at 16T, because the apply rate falls with the width.
 
 ## Verification conclusions and constraints
