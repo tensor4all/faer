@@ -1,6 +1,7 @@
-//! #58: with the scratch sized by the matching `*_scratch` request, the self-adjoint EVD with
-//! eigenvectors and the bidiagonal SVD with vectors (divide and conquer from n = 128) allocate nothing
-//! on the heap on a warm call. The allocator counts every allocation of the process while the call
+//! #58: with the scratch sized by the matching `*_scratch` request, the
+//! self-adjoint EVD with eigenvectors and the bidiagonal SVD with vectors
+//! (divide and conquer from n = 128) allocate nothing on the heap on a warm
+//! call. The allocator counts every allocation of the process while the call
 //! runs; the inputs and the scratch are built outside the counted interval.
 //!
 //! x86_64 only for now. Elsewhere, and on x86_64 without AVX2 and FMA, `matmul` falls back to the
