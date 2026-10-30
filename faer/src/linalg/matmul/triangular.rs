@@ -606,31 +606,9 @@ fn upper_x_lower_into_lower_impl_unchecked<'N, T: ComplexField>(
 		);
 	}
 }
-/// The first column of piece `i` of `parts` when the lower part of an `m x n`
-/// destination (row `r` and column `c` with `r >= c`) is cut into column ranges
-/// of equal area: column `c` holds `m - c` entries, so the area left of `c` is
-/// `c*m - c*(c - 1)/2`. Boundaries are rounded to whole microkernel columns (8)
-/// and are nondecreasing; piece `parts - 1` ends at `n`.
-#[cfg(all(target_arch = "x86_64", feature = "std", feature = "threadteam"))]
-fn area_split(m: usize, n: usize, i: usize, parts: usize) -> usize {
-	if i == 0 {
-		return 0;
-	}
-	if i >= parts {
-		return n;
-	}
-	let (mf, nf) = (m as f64, n.min(m) as f64);
-	let total = nf * mf - nf * (nf - 1.0) / 2.0;
-	let want = total * i as f64 / parts as f64;
-	// c*m - c^2/2 + c/2 = want, the smaller root
-	let b = mf + 0.5;
-	let c = b - (b * b - 2.0 * want).max(0.0).sqrt();
-	((c.round() as usize).next_multiple_of(8)).min(n)
-}
-
 /// Whether a team's product into a lower triangle is cut by area
-/// ([`area_split`]); probes can switch back to the kernel's own split
-/// (`cost::trace::LOWER_SPLIT`, 1).
+/// (`utils::partition::lower_area_split`); probes can switch back to the
+/// kernel's own split (`cost::trace::LOWER_SPLIT`, 1).
 #[cfg(all(target_arch = "x86_64", feature = "std", feature = "threadteam"))]
 #[inline]
 fn lower_by_area() -> bool {
@@ -791,10 +769,13 @@ fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 									team,
 									width,
 									&|i, parts| {
-										let (c0, c1) = (
-											area_split(m, n, i, parts),
-											area_split(m, n, i + 1, parts),
-										);
+										// whole microkernel columns
+										let split = |i| {
+											crate::utils::partition::lower_area_split(
+												m, n, i, parts, 8,
+											)
+										};
+										let (c0, c1) = (split(i), split(i + 1));
 										if c0 == c1 || c0 >= m {
 											return;
 										}
@@ -1655,51 +1636,6 @@ fn matmul_imp<'M, 'N, 'K, T: ComplexField>(
 				conj_lhs,
 				par,
 			)
-		}
-	}
-}
-
-#[cfg(all(
-	test,
-	target_arch = "x86_64",
-	feature = "std",
-	feature = "threadteam"
-))]
-mod area_split_tests {
-	use super::area_split;
-
-	/// The pieces cover `0..n` in order, start on whole microkernel columns,
-	/// and hold equal areas up to one column strip of rounding.
-	#[test]
-	fn pieces_cover_the_triangle_with_equal_areas() {
-		for &(m, n) in &[
-			(4096usize, 4096usize),
-			(2047, 2048),
-			(301, 301),
-			(40, 40),
-			(9, 10),
-		] {
-			for parts in [1usize, 2, 3, 4, 7, 16, 64] {
-				let cuts: Vec<usize> =
-					(0..=parts).map(|i| area_split(m, n, i, parts)).collect();
-				assert_eq!((cuts[0], cuts[parts]), (0, n));
-				assert!(
-					cuts.windows(2).all(|w| w[0] <= w[1]),
-					"{m}x{n}/{parts}: {cuts:?}"
-				);
-				assert!(cuts[1..parts].iter().all(|c| c % 8 == 0 || *c == n));
-				let area = |c0: usize, c1: usize| {
-					(c0..c1.min(m)).map(|c| m - c).sum::<usize>()
-				};
-				let total = area(0, n);
-				for w in cuts.windows(2) {
-					let strip = 8 * m;
-					assert!(
-						area(w[0], w[1]).abs_diff(total / parts) <= strip,
-						"{m}x{n}/{parts}: {cuts:?}"
-					);
-				}
-			}
 		}
 	}
 }
