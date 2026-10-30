@@ -53,7 +53,7 @@ gate has changed and two kinds of adoption are now in the ledger.
 | Workspace | `faer-ffi` is excluded (the C API and its cbindgen build are unused by tensor4all). |
 | Upstream base | Synced with Codeberg `0ecd846` (2026-10-17) by a merge commit, so `upstream/main` is an ancestor of this branch. Those nine upstream commits since the previous base `ddbd2ae` (the sparse CSC example doc, `MatMut::from_row_major_slice_with_stride_mut`'s strides, the CG/BiCGSTAB uninitialized read) were written upstream by Paul and Connor Smith and had already been cherry-picked here on 2026-10-22 in `9f3dc58`, `ae9b979` and `064016e` (their messages name Codeberg #305, #326 and `1b2d9a9`; the tests `codeberg_305`/`codeberg_326` came with them). The direction is upstream to fork, not the reverse: nothing was fed back upstream. The cherry-picked content is byte-identical to upstream's, so the sync changes no file -- the merged tree hash equals the pre-merge tree hash. Later syncs record the new base here. |
 | Publication | crates.io, in the order `t4a-faer-traits` then `t4a-faer`. Releases are tagged `faer-v<faer version>` and published by hand from a clean checkout of the tag; a `v<faer version>` tag would also start `publish.yml`. A version that is already on crates.io is skipped, so a release that bumps only one crate still succeeds. |
-| Released | Latest: `t4a-faer 0.27.0` with `t4a-faer-traits 0.24.2`, published from the commit tagged `faer-v0.27.0` (see the release section at the end). The published `src/**` is byte-identical to the tagged commit, so that commit is the revision a consumer pins. A later commit needs a new version. Earlier releases carry their own `faer-v<version>` tags. |
+| Released | Latest: `t4a-faer 0.27.1` with `t4a-faer-traits 0.24.2`, published from the commit tagged `faer-v0.27.1` (see the release section at the end). The published `src/**` is byte-identical to the tagged commit, so that commit is the revision a consumer pins. A later commit needs a new version. Earlier releases carry their own `faer-v<version>` tags. |
 | LICENSE | A `LICENSE` copy lives in each crate directory so the published archive ships the MIT text (`license-file` next to `license` makes Cargo warn). |
 
 ## Experiments
@@ -287,3 +287,11 @@ builds its team with threadteam 0.1 and hands it to faer no longer compiles agai
 it cannot be a patch of 0.26. The release carries #157 (dqds work arrays from the caller's `MemStack`,
 #156) and #158. `CHANGELOG.md` lists both; the evidence lives in their ledger rows above. This release
 adds no code.
+
+## Released: `t4a-faer` 0.27.1 (2026-10-30)
+
+`t4a-faer` 0.27.1; `t4a-faer-traits` stays 0.24.2 (no change in `faer-traits/`). Published from the
+merge commit of the version-bump PR, tagged `faer-v0.27.1`. A patch release: `cargo semver-checks`
+against 0.27.0 reports no public API change. It carries the QR look-ahead (#160, #165) and the real
+Schur reordering fixes (#167); `CHANGELOG.md` lists them and the evidence lives in their ledger rows
+above. #161 to #164 change only CI, tests and documentation. This release adds no code.

@@ -1,3 +1,19 @@
+# t4a-faer 0.27.1 (tensor4all fork; with t4a-faer-traits 0.24.2)
+
+Changes since `t4a-faer` 0.27.0 (tag `faer-v0.27.0`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`. No public API change.
+
+## Performance
+
+- The blocked QR factors the next panel while the current block's trailing update runs, on a split
+  team, when the per-step cost model says the overlap pays (#160, #165). Results match the
+  sequential factorization (R, rank, Householder factors, Q R = A); scratch does not grow.
+
+## Correctness
+
+- Real Schur reordering: a swap the kernel rejects now leaves T and Q unchanged, and the 2x2
+  standardization handles dlanv2's B = 0 case, which fixes a wrong eigenvector of the real EVD for a
+  lower triangular 2x2 block such as [[2, 1], [-1, 0]] (#167).
+
 # t4a-faer 0.27.0 (tensor4all fork; with t4a-faer-traits 0.24.2)
 
 Changes since `t4a-faer` 0.26.0 (tag `faer-v0.26.0`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`.
