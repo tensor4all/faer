@@ -3,6 +3,10 @@
 This is a bounded Rust adaptation of the candidates in [#31](https://github.com/tensor4all/faer/issues/31).
 Port completion and numerical success are separate.
 
+Every defect the validation found, with its issue, fix, release, regression test and upstream
+status, and what the validation does not cover: [lapack-bug-inventory.md](lapack-bug-inventory.md).
+The sections below record the runs as they happened; the inventory gives the current state.
+
 ## Source and baseline
 
 LAPACK 3.12.0, distributed by OpenBLAS revision
