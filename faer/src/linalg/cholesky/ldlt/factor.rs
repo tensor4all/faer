@@ -389,6 +389,28 @@ pub(crate) fn cholesky_recursion_right_looking<T: ComplexField>(
 		)
 	} else {
 		let mut count = 0;
+		#[cfg(feature = "par-trace")]
+		let depth = crate::utils::cost::trace::CHOL_DEPTH.with(|d| {
+			let v = d.get();
+			d.set(v + 1);
+			v
+		});
+		#[cfg(feature = "par-trace")]
+		struct DepthGuard;
+		#[cfg(feature = "par-trace")]
+		impl Drop for DepthGuard {
+			fn drop(&mut self) {
+				crate::utils::cost::trace::CHOL_DEPTH.with(|d| d.set(d.get() - 1));
+			}
+		}
+		#[cfg(feature = "par-trace")]
+		let _guard = DepthGuard;
+		#[cfg(feature = "par-trace")]
+		let stage = |i: usize, t0: std::time::Instant| {
+			if depth == 0 {
+				crate::utils::cost::trace::CHOL_NS[i].fetch_add(t0.elapsed().as_nanos() as u64, core::sync::atomic::Ordering::Relaxed);
+			}
+		};
 		let block_size = Ord::min(n.next_power_of_two() / 2, block_size);
 		let mut A = A;
 		let mut D = D;
@@ -402,6 +424,8 @@ pub(crate) fn cholesky_recursion_right_looking<T: ComplexField>(
 			let mut D0 = D.rb_mut().subcols_mut(j, block_size);
 			let mut L10xD0 = A01.transpose_mut();
 			let signs = signs.map(|signs| &signs[j..][..block_size]);
+			#[cfg(feature = "par-trace")]
+			let t0 = std::time::Instant::now();
 			match cholesky_recursion_right_looking(
 				A00.rb_mut(),
 				D0.rb_mut(),
@@ -417,6 +441,10 @@ pub(crate) fn cholesky_recursion_right_looking<T: ComplexField>(
 				Ok(local_count) => count += local_count,
 				Err(fail_idx) => return Err(j + fail_idx),
 			}
+			#[cfg(feature = "par-trace")]
+			stage(0, t0);
+			#[cfg(feature = "par-trace")]
+			let t0 = std::time::Instant::now();
 			let A00 = A00.rb();
 			if is_llt {
 				linalg::triangular_solve::solve_lower_triangular_in_place(
@@ -431,6 +459,10 @@ pub(crate) fn cholesky_recursion_right_looking<T: ComplexField>(
 					par.reborrow(),
 				)
 			}
+			#[cfg(feature = "par-trace")]
+			stage(1, t0);
+			#[cfg(feature = "par-trace")]
+			let t0 = std::time::Instant::now();
 			let mut A10 = A10.rb_mut();
 			if is_llt {
 				linalg::matmul::triangular::matmul(
@@ -491,6 +523,8 @@ pub(crate) fn cholesky_recursion_right_looking<T: ComplexField>(
 					);
 				}
 			};
+			#[cfg(feature = "par-trace")]
+			stage(2, t0);
 			j += block_size;
 		}
 		Ok(count)

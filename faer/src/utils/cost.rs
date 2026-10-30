@@ -518,6 +518,15 @@ pub mod trace {
 	/// Override of the block apply column split gate, for probes: 0 the rule, 1 the previous
 	/// rule (`M * K * 4 * M >= gemm threshold`), 2 always parallel, 3 never.
 	pub static N_TASKS_MODE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+	/// Probe (faer#160 cholesky): every gated width is capped at this value.
+	pub static WIDTH_CAP: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+	/// Probe (faer#160 cholesky): ns of the stages of the top level of the right-looking
+	/// Cholesky (0 diagonal block, 1 triangular solve, 2 trailing update), and calls.
+	pub static CHOL_NS: [core::sync::atomic::AtomicU64; 3] = [const { core::sync::atomic::AtomicU64::new(0) }; 3];
+	std::thread_local! {
+		/// recursion depth of the right-looking Cholesky on this thread
+		pub static CHOL_DEPTH: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+	}
 	static ON: AtomicBool = AtomicBool::new(false);
 	static LOG: Mutex<Vec<Record>> = Mutex::new(Vec::new());
 	std::thread_local! {
@@ -639,6 +648,8 @@ pub(crate) fn par_width_team(team: &threadteam::TeamExec<'_>, estimate: Duration
 	if max < 2 || !par_can_pay_time_team(team, estimate, sections) {
 		return 1;
 	}
+	#[cfg(feature = "par-trace")]
+	let max = max.min(trace::WIDTH_CAP.load(core::sync::atomic::Ordering::Relaxed));
 	(2..=team.size().get().min(max))
 		.rev()
 		.find(|&w| pays_at(estimate, sections, team.dispatch_cost(NonZeroUsize::new(w).unwrap())))
