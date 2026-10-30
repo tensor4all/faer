@@ -388,6 +388,19 @@ fn lapack_schur_reorder_checkers() {
 	let (t, from, to) = get36_fixture();
 	crate::assert!(schur_form(t.as_ref()));
 	crate::assert!(from < t.nrows() && to < t.nrows());
+	if <Scalar as ComplexField>::IS_REAL {
+		// The first rejected `dget34` record: a 2x2 block with eigenvalues
+		// about 0 +- tiny next to the nilpotent [[1, 1], [-1, -1]]. A rejection
+		// leaves T and Q bitwise unchanged (DLAEXC, INFO = 1).
+		let s = (Real::MIN_POSITIVE / Real::EPSILON).sqrt();
+		let t0 = Mat::<Scalar>::from_fn(4, 4, |i, j| {
+			z([[0.0, s, -2.0, 0.5], [-s * s, -0.0, 1.0, 3.0], [0.0, 0.0, 1.0, 1.0], [0.0, 0.0, -1.0, -1.0]][i][j])
+		});
+		let mut run = Run::new("schur_reorder_checker");
+		crate::assert!(get34_case(&mut run, t0.as_ref(), 2, 2, 0));
+		crate::assert!(run.failures.is_empty(), "{:?}", run.failures);
+		crate::assert!(get34_matrices().len() == 42_258);
+	}
 }
 #[test]
 #[ignore = "opt-in LAPACK numerical validation (#31)"]
@@ -424,5 +437,162 @@ fn lapack_schur_reorder_cases() {
 			reorder_case(&mut run, t.as_ref(), from, to, layout, scale);
 		}
 	}
-	run.finish(combos.len() * 2 * 3 * (1 + 3 * 4 * 4) + 4 * 3 * 4);
+	// LAPACK `dget34`'s own records: the only fixtures here that `DLAEXC`
+	// rejects, so the rejection contract runs (148 rejections in its 2x2/2x2
+	// section in f32 and f64 on the measured x86_64 host).
+	let mut get34 = 0;
+	if <Scalar as ComplexField>::IS_REAL {
+		let mut rejected = 0;
+		for (index, (t0, n1, n2)) in get34_matrices().into_iter().enumerate() {
+			rejected += get34_case(&mut run, t0.as_ref(), n1, n2, index) as usize;
+			get34 += 1;
+		}
+		run.require("GET34", "no swap rejected: the rejection contract did not run", rejected > 0);
+	}
+	run.finish(combos.len() * 2 * 3 * (1 + 3 * 4 * 4) + 4 * 3 * 4 + get34);
+}
+/// The `T` matrices of LAPACK 3.12.0 `TESTING/EIG/dget34.f`, in its loop
+/// order, with the block sizes `(n1, n2)` passed to `DLAEXC` at `j1 = 1`.
+fn get34_matrices() -> Vec<(Mat<Scalar>, usize, usize)> {
+	let eps = Real::EPSILON;
+	let smlnum = Real::MIN_POSITIVE / eps;
+	let bignum = 1.0 / smlnum;
+	let val = [
+		0.0,
+		smlnum.sqrt(),
+		1.0,
+		2.0,
+		bignum.sqrt(),
+		-smlnum.sqrt(),
+		-1.0,
+		-2.0,
+		-bignum.sqrt(),
+	];
+	let vm = [1.0, 1.0 + 2.0 * eps];
+	let v = |i: usize| val[i - 1];
+	let mut out = Vec::new();
+	let mat = |n: usize, f: &dyn Fn(usize, usize) -> Real| {
+		Mat::<Scalar>::from_fn(n, n, |i, j| z(f(i + 1, j + 1)))
+	};
+	for ia in 1..=9 {
+		for iam in 0..2 {
+			for ib in 1..=9 {
+				for ic in 1..=9 {
+					let t = [[v(ia) * vm[iam], v(ib)], [0.0, v(ic)]];
+					out.push((mat(2, &|i, j| t[i - 1][j - 1]), 1, 1));
+				}
+			}
+		}
+	}
+	for ia in 1..=5 {
+		for iam in 0..2 {
+			for ib in 1..=5 {
+				for ic11 in 1..=5 {
+					for ic12 in 2..=5 {
+						for ic21 in 2..=4 {
+							for ic22 in [-1.0, 1.0] {
+								let t = [
+									[v(ia) * vm[iam], v(ib), -2.0 * v(ib)],
+									[0.0, v(ic11), v(ic12)],
+									[0.0, -v(ic21), v(ic11) * ic22],
+								];
+								out.push((mat(3, &|i, j| t[i - 1][j - 1]), 1, 2));
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	for ia11 in 1..=5 {
+		for ia12 in 2..=5 {
+			for ia21 in 2..=4 {
+				for ia22 in [-1.0, 1.0] {
+					for icm in 0..2 {
+						for ib in 1..=5 {
+							for ic in 1..=5 {
+								let t = [
+									[v(ia11), v(ia12), -2.0 * v(ib)],
+									[-v(ia21), v(ia11) * ia22, v(ib)],
+									[0.0, 0.0, v(ic) * vm[icm]],
+								];
+								out.push((mat(3, &|i, j| t[i - 1][j - 1]), 2, 1));
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	for ia11 in 1..=5 {
+		for ia12 in 2..=5 {
+			for ia21 in 2..=4 {
+				for ia22 in [-1.0, 1.0] {
+					for ib in 1..=5 {
+						for ic11 in 3..=4 {
+							for ic12 in 3..=4 {
+								for ic21 in 3..=4 {
+									for ic22 in [-1.0, 1.0] {
+										for icm in 5..=7 {
+											let m = v(icm).abs();
+											let t12 = v(ia12);
+											let t34 = v(ic12) * m;
+											let t = [
+												[v(ia11), t12, -2.0 * v(ib), 0.5 * v(ib)],
+												[-t12 * v(ia21), v(ia11) * ia22, v(ib), 3.0 * v(ib)],
+												[0.0, 0.0, v(ic11) * m, t34],
+												[0.0, 0.0, -t34 * v(ic21) * m, v(ic11) * ic22 * m],
+											];
+											out.push((mat(4, &|i, j| t[i - 1][j - 1]), 2, 2));
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	out
+}
+/// One `dget34` swap: `DLAEXC` at `j1 = 1` with `Q = I`. An accepted swap
+/// must pass DHST01 and `dget34`'s exact checks (the moved 1x1 value is
+/// copied, the subdiagonal coupling is zero, a 2x2 block is standardized). A
+/// rejected swap must leave T and Q bitwise unchanged, as `DLAEXC` documents
+/// for `INFO = 1`; a 1x1/1x1 swap never rejects. Returns whether it rejected.
+fn get34_case(run: &mut Run, t0: MatRef<'_, Scalar>, n1: usize, n2: usize, index: usize) -> bool {
+	let n = t0.nrows();
+	let mut t = t0.to_owned();
+	let mut q = Mat::<Scalar>::identity(n, n);
+	let ctx = format!("GET34 {n1}x{n2} case={index}");
+	let mut status = 0;
+	if !run.call(&ctx, || {
+		status = adjacent_call(t.as_mut(), Some(q.as_mut()), 0, n1, n2);
+		Ok::<_, ()>(())
+	}) {
+		return false;
+	}
+	if status != 0 {
+		run.require(&ctx, "a 1x1/1x1 swap rejected", n1 + n2 > 2);
+		let identity = Mat::<Scalar>::identity(n, n);
+		run.require(
+			&ctx,
+			"rejected swap changed T or Q",
+			same_bits(t.as_ref(), t0) && same_bits(q.as_ref(), identity.as_ref()),
+		);
+		return true;
+	}
+	run.ratio(&ctx, "similarity", similarity_ratio(t0, q.as_ref(), t.as_ref(), Real::EPSILON), 20.0);
+	run.ratio(&ctx, "Q unitary", unitary_ratio(q.as_ref(), Real::EPSILON), 20.0);
+	let at = |i: usize, j: usize| real(&t[(i, j)]);
+	let standard = |i: usize| at(i + 1, i) == 0.0 || (at(i, i) == at(i + 1, i + 1) && at(i, i + 1).signum() != at(i + 1, i).signum());
+	let exact = match (n1, n2) {
+		(1, 1) => at(0, 0) == real(&t0[(1, 1)]) && at(1, 1) == real(&t0[(0, 0)]) && at(1, 0) == 0.0,
+		(1, 2) => at(2, 2) == real(&t0[(0, 0)]) && at(2, 0) == 0.0 && at(2, 1) == 0.0 && standard(0),
+		(2, 1) => at(0, 0) == real(&t0[(2, 2)]) && at(1, 0) == 0.0 && at(2, 0) == 0.0 && standard(1),
+		_ => (0..2).all(|j| at(2, j) == 0.0 && at(3, j) == 0.0) && standard(0) && standard(2),
+	};
+	run.require(&ctx, "swapped blocks not exact or not standardized", exact);
+	false
 }

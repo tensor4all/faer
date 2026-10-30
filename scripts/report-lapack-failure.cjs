@@ -1,9 +1,11 @@
 // Called only by the scheduled/manual workflow; offline tests mock every API.
-module.exports = async ({github, context, result, server, unexpected = '', stale = ''}) => {
+module.exports = async ({
+  github, context, result, server, unexpected = '', stale = '',
+  title = 'Scheduled LAPACK numerical validation is failing',
+}) => {
   if (!['failure', 'cancelled'].includes(result)) return;
   const repo = context.repo;
   const label = 'scheduled-lapack-validation';
-  const title = 'Scheduled LAPACK numerical validation is failing';
   try {
     await github.rest.issues.getLabel({...repo, name: label});
   } catch (error) {

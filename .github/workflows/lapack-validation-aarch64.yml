@@ -1,0 +1,98 @@
+name: Weekly aarch64 LAPACK numerical validation
+
+# The nightly validation (lapack-validation.yml) runs on x86_64 only, where the matrix product is
+# `private-gemm-x86`. On aarch64 it is the `gemm` crate, so this lane runs the same families there
+# once a week, plus the checks that are specific to that path: the per-call allocation of the
+# `gemm` fallback (#58, to be replaced by #56) and the three strict-triangle matmul tests that the
+# first validation run recorded as failing on macOS arm64 (docs/lapack-bug-inventory.md).
+
+on:
+  schedule:
+    - cron: '41 4 * * 0' # weekly, Sunday 04:41 UTC / 13:41 JST
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/lapack-validation-aarch64.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-lapack-validation-aarch64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Check validation selection and reporting logic offline
+        run: |
+          python3 scripts/test-lapack-validation.py
+          node --test scripts/test-lapack-reporter.cjs
+      - name: Build once and run all numerical families
+        timeout-minutes: 60 # the hosted arm64 runners are slower than the x86_64 ones
+        run: scripts/run-lapack-validation.sh --limit-scale 3
+      - name: Summarize known and new failures
+        if: always()
+        run: python3 scripts/summarize-lapack-failures.py --output target/lapack-validation | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Strict-triangle matmul tests (recorded failing on macOS arm64 in the first run)
+        if: always()
+        run: cargo test --locked -p t4a-faer --lib strict_triangle
+      - name: gemm fallback allocation (#58, known until #56)
+        if: always()
+        run: |
+          # Ignored off x86_64 because the `gemm` crate allocates per call; a failure here is the
+          # known defect and is reported, not fatal. A pass means #56 landed: drop the `ignore`.
+          if cargo test --locked -p t4a-faer --test evd_svd_vectors_no_alloc -- --ignored 2>&1 | tee alloc.log; then
+            echo "::warning title=#58 passes on ${{ matrix.os }}::evd_svd_vectors_no_alloc passes off x86_64; drop its ignore (#58, #56)."
+          else
+            echo "::warning title=#58 known on ${{ matrix.os }}::the gemm crate fallback still allocates per call (#58, #56)."
+          fi
+          grep -E "\(n, evd c64" alloc.log | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Preserve validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lapack-validation-aarch64-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/lapack-validation/
+          retention-days: 14
+
+  report-failure:
+    needs: validation
+    if: ${{ github.event_name != 'pull_request' && always() && (needs.validation.result == 'failure' || needs.validation.result == 'cancelled') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update the weekly aarch64 validation issue
+        uses: actions/github-script@v9
+        env:
+          VALIDATION_RESULT: ${{ needs.validation.result }}
+        with:
+          script: |
+            const report = require(`${process.env.GITHUB_WORKSPACE}/scripts/report-lapack-failure.cjs`);
+            await report({
+              github, context, server: process.env.GITHUB_SERVER_URL,
+              result: process.env.VALIDATION_RESULT,
+              title: 'Weekly aarch64 LAPACK numerical validation is failing',
+              unexpected: 'see the per-host lapack-validation-aarch64 artifacts and the job summaries',
+            });

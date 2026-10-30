@@ -264,6 +264,18 @@ fn lahqr_schur22<T: RealField>(
 				temp = &cs * cs1 - &sn * sn1;
 				sn = &cs * sn1 + &sn * cs1;
 				cs = temp;
+			} else if c != zero() && b == zero() {
+				// `dlanv2`'s `B = 0` case: the rotation left a lower
+				// triangular block with equal diagonal entries (a double
+				// real eigenvalue). Swap rows and columns so that it is
+				// upper triangular, as LAPACK does; without this the block
+				// was returned with `c != 0` and `b == 0`, which is not in
+				// standard form.
+				b = -c;
+				c = zero();
+				temp = cs.copy();
+				cs = -sn;
+				sn = temp;
 			}
 		}
 	}
@@ -977,16 +989,18 @@ pub(crate) fn schur_swap_checked<T: RealField>(
 	if n1 == 2 && (a[(j1, j0)] == zero()) {
 		let first =
 			schur_swap_checked(a.rb_mut(), q.rb_mut(), j1, 1, n2, laexc);
-		let second =
-			schur_swap_checked(a.rb_mut(), q.rb_mut(), j0, 1, n2, laexc);
-		return if first != 0 { first } else { second };
+		if first != 0 {
+			return first;
+		}
+		return schur_swap_checked(a.rb_mut(), q.rb_mut(), j0, 1, n2, laexc);
 	}
 	if n2 == 2 && (a[(j0 + n1 + 1, j0 + n1)] == zero()) {
 		let first =
 			schur_swap_checked(a.rb_mut(), q.rb_mut(), j0, n1, 1, laexc);
-		let second =
-			schur_swap_checked(a.rb_mut(), q.rb_mut(), j1, n1, 1, laexc);
-		return if first != 0 { first } else { second };
+		if first != 0 {
+			return first;
+		}
+		return schur_swap_checked(a.rb_mut(), q.rb_mut(), j1, n1, 1, laexc);
 	}
 	let schur_swap_impl = match (n1, n2) {
 		(1, 1) => schur_swap_11::<T>,
@@ -998,6 +1012,13 @@ pub(crate) fn schur_swap_checked<T: RealField>(
 		_ => panic!(),
 	};
 	let status = schur_swap_impl(a.rb_mut(), q.rb_mut(), j0);
+	if status != 0 {
+		// DLAEXC: a rejected swap returns with T and Q unchanged. The kernels
+		// reject before writing, so the standardization below must not run
+		// either: it re-standardized both unswapped blocks of a rejected 2x2
+		// swap (LAPACK `dget34`, tensor4all/faer#31).
+		return status;
+	}
 	if n2 == 2 {
 		let ((a00, a01, a10, a11), _, _, (cs, sn)) = lahqr_schur22(
 			a[(j0, j0)].copy(),
@@ -3117,6 +3138,66 @@ mod tests {
 		/// The `dlanv2` branch of `lahqr_schur22` for real eigenvalues with an
 		/// off-diagonal near overflow: `sqrt(c^2 + z^2)` and faer's `hypot`
 		/// overflow and made `cs = sn = 0`.
+		/// `lahqr_schur22` returns a standardized block (`c == 0`, or equal
+		/// diagonal entries and off-diagonal entries of opposite signs) that
+		/// is the rotation of its input. `[[0, -1], [1, 2]]`, a double
+		/// eigenvalue 1, came back as `[[1, 0], [2, 1]]` before `dlanv2`'s
+		/// `B = 0` case was added; LAPACK's `dget34` 2x2 swaps reach it.
+		#[test]
+		fn lahqr_schur22_standardizes_a_lower_triangular_result() {
+			let vals = [
+				0.0f64, 1.0, -1.0, 2.0, 0.5, 1e-8, -1e-8, 1e-16, -1e-16, 3.0,
+				1e-300, -1e-300, 1e150,
+			];
+			let mut checked = 0;
+			for &a in &vals {
+				for &b in &vals {
+					for &c in &vals {
+						for &d in &vals {
+							let ((a2, b2, c2, d2), _, _, (cs, sn)) =
+								lahqr_schur22(a, b, c, d);
+							assert!(
+								c2 == 0.0
+									|| (a2 == d2
+										&& b2 != 0.0 && (b2 > 0.0) != (c2 > 0.0)),
+								"({a:e}, {b:e}, {c:e}, {d:e}) -> \
+								 ({a2:e}, {b2:e}, {c2:e}, {d2:e})"
+							);
+							// [a b; c d] = [cs -sn; sn cs] [a2 b2; c2 d2] [cs sn; -sn cs]
+							let r = [[cs, -sn], [sn, cs]];
+							let m = [[a2, b2], [c2, d2]];
+							let input = [[a, b], [c, d]];
+							let scale = f64::max(
+								f64::max(f64::abs(a), f64::abs(b)),
+								f64::max(f64::abs(c), f64::abs(d)),
+							);
+							for i in 0..2 {
+								for j in 0..2 {
+									let mut x = 0.0;
+									for k in 0..2 {
+										for l in 0..2 {
+											x += r[i][k] * m[k][l] * r[j][l];
+										}
+									}
+									assert!(
+										f64::abs(x - input[i][j])
+											<= 16.0 * f64::EPSILON * scale,
+										"({a:e}, {b:e}, {c:e}, {d:e}): \
+										 entry ({i}, {j}) {x:e}"
+									);
+								}
+							}
+							checked += 1;
+						}
+					}
+				}
+			}
+			assert_eq!(checked, 13 * 13 * 13 * 13);
+			let ((a2, b2, c2, d2), _, _, _) =
+				lahqr_schur22(0.0, -1.0, 1.0, 2.0);
+			assert_eq!((c2, a2 == d2), (0.0, true));
+			assert!(f64::abs(b2 + 2.0) <= 4.0 * f64::EPSILON);
+		}
 		#[test]
 		fn lahqr_schur22_scaled_norm() {
 			fn check<T: RealField>(a: f64, b: f64, c: f64, d: f64) {
