@@ -606,6 +606,24 @@ fn upper_x_lower_into_lower_impl_unchecked<'N, T: ComplexField>(
 		);
 	}
 }
+/// Whether a team's product into a lower triangle is cut by area
+/// (`utils::partition::lower_area_split`); probes can switch back to the
+/// kernel's own split (`cost::trace::LOWER_SPLIT`, 1).
+#[cfg(all(target_arch = "x86_64", feature = "std", feature = "threadteam"))]
+#[inline]
+fn lower_by_area() -> bool {
+	#[cfg(feature = "par-trace")]
+	{
+		crate::utils::cost::trace::LOWER_SPLIT
+			.load(core::sync::atomic::Ordering::Relaxed)
+			== 0
+	}
+	#[cfg(not(feature = "par-trace"))]
+	{
+		true
+	}
+}
+
 fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 	dst: MatMut<'_, T, Dim<'N>, Dim<'N>>,
 	beta: Accum,
@@ -663,6 +681,9 @@ fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 					};
 					macro_rules! go {
 						($call:path, $last:expr) => {
+							go!($call, $last, dst, lhs, rhs)
+						};
+						($call:path, $last:expr, $dst:ident, $lhs:ident, $rhs:ident) => {
 							$call(
 								const {
 									if T::IS_NATIVE_F64 {
@@ -677,12 +698,12 @@ fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 								},
 								const { IType::U32 },
 								feat,
-								dst.nrows(),
-								dst.ncols(),
-								lhs.ncols(),
-								dst.as_ptr_mut() as _,
-								dst.row_stride(),
-								dst.col_stride(),
+								$dst.nrows(),
+								$dst.ncols(),
+								$lhs.ncols(),
+								$dst.as_ptr_mut() as _,
+								$dst.row_stride(),
+								$dst.col_stride(),
 								core::ptr::null(),
 								core::ptr::null(),
 								DstKind::Lower,
@@ -690,15 +711,15 @@ fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 									crate::Accum::Replace => Accum::Replace,
 									crate::Accum::Add => Accum::Add,
 								},
-								lhs.as_ptr() as _,
-								lhs.row_stride(),
-								lhs.col_stride(),
+								$lhs.as_ptr() as _,
+								$lhs.row_stride(),
+								$lhs.col_stride(),
 								conj_lhs == Conj::Yes,
 								core::ptr::null(),
 								0,
-								rhs.as_ptr() as _,
-								rhs.row_stride(),
-								rhs.col_stride(),
+								$rhs.as_ptr() as _,
+								$rhs.row_stride(),
+								$rhs.col_stride(),
 								conj_rhs == Conj::Yes,
 								alpha as *const T as *const (),
 								$last,
@@ -717,6 +738,84 @@ fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 						match crate::utils::team::kernel::kernel_width(
 							&team, estimate,
 						) {
+							Some(width) if lower_by_area() => {
+								// The triangle in `width` column ranges of
+								// equal area, one per participant, each
+								// a sequential kernel call on its trapezoid
+								// (OpenBLAS `syrk_thread`). One section instead
+								// of the kernel's two per cache block,
+								// and no participant idles on the tiles the
+								// triangle leaves out.
+								let (m, n, k) =
+									(dst.nrows(), dst.ncols(), lhs.ncols());
+								let (drs, dcs) =
+									(dst.row_stride(), dst.col_stride());
+								let (lrs, lcs) =
+									(lhs.row_stride(), lhs.col_stride());
+								let (rrs, rcs) =
+									(rhs.row_stride(), rhs.col_stride());
+								let dptr =
+									crate::utils::thread::Ptr(dst.as_ptr_mut());
+								let lptr = crate::utils::thread::Ptr(
+									lhs.as_ptr() as *mut T,
+								);
+								let rptr = crate::utils::thread::Ptr(
+									rhs.as_ptr() as *mut T,
+								);
+								crate::utils::team::stats::bump(
+									&crate::utils::team::stats::GEMM_LOWER_BY_AREA,
+								);
+								crate::utils::team::run(
+									team,
+									width,
+									&|i, parts| {
+										// whole microkernel columns
+										let split = |i| {
+											crate::utils::partition::lower_area_split(
+												m, n, i, parts, 8,
+											)
+										};
+										let (c0, c1) = (split(i), split(i + 1));
+										if c0 == c1 || c0 >= m {
+											return;
+										}
+										let (dptr, lptr, rptr) =
+											(dptr, lptr, rptr);
+										// SAFETY: the pieces are disjoint
+										// column ranges of `dst`
+										// (rows `c0..m`, columns `c0..c1`), and
+										// `lhs`/`rhs` are only read.
+										let dst = MatMut::<T, usize, usize>::from_raw_parts_mut(
+										dptr.0.wrapping_offset(c0 as isize * (drs + dcs)),
+										m - c0,
+										c1 - c0,
+										drs,
+										dcs,
+									);
+										let lhs = MatRef::<T, usize, usize>::from_raw_parts(
+										lptr.0.wrapping_offset(c0 as isize * lrs),
+										m - c0,
+										k,
+										lrs,
+										lcs,
+									);
+										let rhs = MatRef::<T, usize, usize>::from_raw_parts(
+										rptr.0.wrapping_offset(c0 as isize * rcs),
+										k,
+										c1 - c0,
+										rrs,
+										rcs,
+									);
+										go!(
+											private_gemm_x86::gemm,
+											1,
+											dst,
+											lhs,
+											rhs
+										)
+									},
+								);
+							},
 							Some(width) => {
 								crate::utils::team::kernel::with_fork(
 									team,

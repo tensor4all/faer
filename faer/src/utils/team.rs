@@ -164,12 +164,13 @@ pub mod stats {
 	pub(super) static GEMM_ONE_TILE: AtomicUsize = AtomicUsize::new(0);
 	pub(super) static GEMM_TILED: AtomicUsize = AtomicUsize::new(0);
 	pub(super) static GEMM_TEAM_KERNEL: AtomicUsize = AtomicUsize::new(0);
+	pub(crate) static GEMM_LOWER_BY_AREA: AtomicUsize = AtomicUsize::new(0);
 	pub(super) fn hist<const N: usize>(h: &[AtomicUsize; N], n: usize) {
 		if ON.load(Relaxed) {
 			h[n.min(N - 1)].fetch_add(1, Relaxed);
 		}
 	}
-	pub(super) fn bump(c: &AtomicUsize) {
+	pub(crate) fn bump(c: &AtomicUsize) {
 		if ON.load(Relaxed) {
 			c.fetch_add(1, Relaxed);
 		}
@@ -192,6 +193,9 @@ pub mod stats {
 		/// products (plain, triangular or indexed) run by the x86 kernel on the team's own
 		/// members (`gemm_with` on a [`Fork`](private_gemm_x86::Fork) of the team)
 		pub gemm_team_kernel: usize,
+		/// products into a lower triangle cut into equal-area column ranges, one sequential x86
+		/// kernel call per participant
+		pub gemm_lower_by_area: usize,
 	}
 	/// Enables or disables counting.
 	pub fn enable(on: bool) {
@@ -210,6 +214,7 @@ pub mod stats {
 			gemm_one_tile: GEMM_ONE_TILE.swap(0, Relaxed),
 			gemm_tiled: GEMM_TILED.swap(0, Relaxed),
 			gemm_team_kernel: GEMM_TEAM_KERNEL.swap(0, Relaxed),
+			gemm_lower_by_area: GEMM_LOWER_BY_AREA.swap(0, Relaxed),
 		}
 	}
 }
@@ -1693,7 +1698,65 @@ mod tests {
 		assert!(tri(&got_l, &want_l, true) < 1e-9);
 		assert!(tri(&got_u, &want_u, false) < 1e-9);
 		// the work ran as team sections, not as an outside job
-		assert!(st.gemm_tiled > 0 || st.gemm_team_kernel > 0 || st.split.iter().skip(2).any(|&c| c > 0), "{st:?}");
+		assert!(st.gemm_tiled > 0 || st.gemm_team_kernel > 0 || st.gemm_lower_by_area > 0 || st.split.iter().skip(2).any(|&c| c > 0), "{st:?}");
+	}
+
+	/// The product into a lower triangle cut into equal-area column ranges (faer#160): every
+	/// entry equals the sequential product, the strict upper part is left alone, for both
+	/// accumulation modes, a strict triangle, a row-major destination, sizes that are not
+	/// multiples of the boundary rounding, and a complex scalar.
+	#[cfg(all(target_arch = "x86_64", feature = "std"))]
+	#[test]
+	fn lower_product_by_area_matches_sequential() {
+		use crate::linalg::matmul::triangular::{matmul as tri_matmul, BlockStructure};
+		use num_complex::Complex;
+		if crate::utils::team::kernel::available::<f64>().is_none() {
+			return;
+		}
+		for &(n, k) in &[(301usize, 128usize), (700, 128), (517, 61)] {
+			let a = rand_mat(n, k, 40);
+			let b = rand_mat(k, n, 41);
+			for block in [BlockStructure::TriangularLower, BlockStructure::StrictTriangularLower] {
+				for (beta, row_major) in [(Accum::Add, false), (Accum::Replace, false), (Accum::Add, true)] {
+					let run = |par: Par| {
+						let mut c = rand_mat(n, n, 42);
+						let mut ct = c.transpose().to_owned();
+						if row_major {
+							tri_matmul(ct.as_mut().transpose_mut(), block, beta, a.as_ref(), BlockStructure::Rectangular, b.as_ref(), BlockStructure::Rectangular, -1.0, par);
+							c = ct.transpose().to_owned();
+						} else {
+							tri_matmul(c.as_mut(), block, beta, a.as_ref(), BlockStructure::Rectangular, b.as_ref(), BlockStructure::Rectangular, -1.0, par);
+						}
+						c
+					};
+					let want = run(Par::Seq);
+					let (got, st) = counted(6, run);
+					assert!(max_diff(want.as_ref(), got.as_ref()) < 1e-9, "n={n} k={k} {block:?} {beta:?} row_major={row_major}");
+					assert!(st.gemm_lower_by_area >= 1, "n={n} k={k}: {st:?}");
+				}
+			}
+		}
+		let (n, k) = (300usize, 96usize);
+		let cplx = |s: u64, m: usize, c: usize| {
+			let (re, im) = (rand_mat(m, c, s), rand_mat(m, c, s + 100));
+			Mat::<Complex<f64>>::from_fn(m, c, |i, j| Complex::new(re[(i, j)], im[(i, j)]))
+		};
+		let (a, b) = (cplx(50, n, k), cplx(51, n, k));
+		let run = |par: Par| {
+			let mut c = cplx(52, n, n);
+			tri_matmul(c.as_mut(), BlockStructure::TriangularLower, Accum::Add, a.as_ref(), BlockStructure::Rectangular, b.adjoint(), BlockStructure::Rectangular, Complex::new(-1.0, 0.5), par);
+			c
+		};
+		let want = run(Par::Seq);
+		let (got, st) = counted(6, run);
+		let mut d: f64 = 0.0;
+		for j in 0..n {
+			for i in 0..n {
+				d = d.max((want[(i, j)] - got[(i, j)]).norm());
+			}
+		}
+		assert!(d < 1e-9, "{d}");
+		assert!(st.gemm_lower_by_area >= 1, "{st:?}");
 	}
 
 	/// `spicy_matmul` (LDLT, supernodal Cholesky) on a team token: one thread per participant
@@ -1968,7 +2031,7 @@ mod tests {
 			assert!(max_diff(want.as_ref(), got.as_ref()) < 1e-9);
 			assert_eq!(st.gemm_team_kernel, 1, "{st:?}");
 		}
-		// the triangular product into a triangle
+		// the triangular product into a triangle: equal-area column ranges, one kernel call each
 		{
 			let run = |par: Par| {
 				let mut c = rand_mat(n, n, 26);
@@ -1978,7 +2041,7 @@ mod tests {
 			let want = run(Par::Seq);
 			let (got, st) = counted(6, run);
 			assert!(tri_diff(&want, &got, true) < 1e-9);
-			assert!(st.gemm_team_kernel >= 1, "{st:?}");
+			assert!(st.gemm_lower_by_area >= 1, "{st:?}");
 		}
 		// factorizations
 		let n = 640usize;
