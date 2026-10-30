@@ -744,6 +744,26 @@ fn apply_block_householder_on_the_left_in_place_generic<
 			n_tasks = if width > 1 { tasks } else { 1 };
 			split_width = width;
 		}
+		// the row split (`apply_row_split`) for a target with few columns (probe mode 6)
+		#[cfg(all(feature = "std", feature = "threadteam", feature = "par-trace"))]
+		if crate::utils::cost::trace::N_TASKS_MODE.load(core::sync::atomic::Ordering::Relaxed) == 6
+			&& K.unbound() <= crate::utils::cost::trace::ROW_SPLIT_COLS.load(core::sync::atomic::Ordering::Relaxed)
+			&& (T::IS_NATIVE_F64 || T::IS_NATIVE_C64 || T::IS_NATIVE_F32 || T::IS_NATIVE_C32)
+		{
+			let est = crate::utils::cost::block_apply_estimate::<T>(M.unbound(), N.unbound(), K.unbound());
+			let width = crate::utils::cost::par_width_time_upto(&par, est, 3, M.unbound() / 32);
+			if width >= 2 {
+				let basis = householder_basis.as_dyn();
+				let factor = householder_factor.as_dyn();
+				let matrix = matrix.rb_mut().as_dyn_mut();
+				let w = tmp.rb_mut().as_dyn_mut();
+				crate::utils::thread::with_width(par, width, |par| match par {
+					Par::Team(team) => unsafe { apply_row_split(basis, factor, conj_lhs, matrix, w, forward, team) },
+					_ => unreachable!("width >= 2 needs a team"),
+				});
+				return;
+			}
+		}
 		// the owner-packed schedule (`apply_owner_packed`): native types, a basis of two columns
 		// or more (the pointer slots come from `tmp`, `N * K` elements against `n_tasks <= K`
 		// pointers)
@@ -1160,6 +1180,26 @@ mod tests {
 					crate::utils::cost::trace::OWNER_PACKED_CALLS.load(Ordering::Relaxed) > before,
 					"m {m} k {k} cols {cols}: the owner-packed path did not run"
 				);
+				let mut split = target.clone();
+				let before = crate::utils::cost::trace::ROW_SPLIT_CALLS.load(Ordering::Relaxed);
+				crate::utils::cost::trace::ROW_SPLIT_COLS.store(usize::MAX, Ordering::Relaxed);
+				crate::utils::cost::trace::N_TASKS_MODE.store(6, Ordering::Relaxed);
+				crate::team::with_team(4, |par| run(&mut split, par, &mut mem));
+				crate::utils::cost::trace::N_TASKS_MODE.store(0, Ordering::Relaxed);
+				crate::utils::cost::trace::ROW_SPLIT_COLS.store(128, Ordering::Relaxed);
+				assert!(
+					crate::utils::cost::trace::ROW_SPLIT_CALLS.load(Ordering::Relaxed) > before,
+					"m {m} k {k} cols {cols}: the row split did not run"
+				);
+				for i in 0..m {
+					for j in 0..cols {
+						let d = crate::traits::math_utils::abs(&(split[(i, j)] - sequential[(i, j)]));
+						assert!(
+							d <= crate::traits::math_utils::from_f64::<T::Real>((m * k) as f64 * 1e-15),
+							"row split: m {m} k {k} cols {cols} row_major {row_major} transpose {transpose} ({i}, {j})"
+						);
+					}
+				}
 				let scale = (m * k) as f64 * 1e-15;
 				for i in 0..m {
 					for j in 0..cols {
@@ -1816,4 +1856,108 @@ fn owner_packed<T: ComplexField>() -> bool {
 	{
 		false
 	}
+}
+
+#[cfg(all(feature = "std", feature = "threadteam"))]
+std::thread_local! {
+	/// The caller's pointer slots for [`apply_row_split`], grown once to the widest team.
+	static APPLY_SLOTS: core::cell::RefCell<alloc::vec::Vec<core::sync::atomic::AtomicUsize>> = const { core::cell::RefCell::new(alloc::vec::Vec::new()) };
+}
+
+/// The block apply split over the rows of the basis, for a target with few columns (a panel's own
+/// applies): participant `i` packs row slice `i` of `V` (the unit head explicit) into its per-thread
+/// buffer and forms its partial `G_i = P_i^H C_i` (`k x K`, private, same buffer); after a barrier,
+/// participant `i` sums column block `i` of every partial into `W` and solves those columns with `T`;
+/// after a second barrier, `C_i -= P_i W` on its own rows. The basis and the target are each read
+/// once; the partials are `p` blocks of `k x K`, small when `K` is.
+///
+/// # Safety
+///
+/// As [`apply_owner_packed`]; `w` is `k x K`, column-major, not aliased.
+#[cfg(all(feature = "std", feature = "threadteam"))]
+#[allow(clippy::too_many_arguments)]
+unsafe fn apply_row_split<T: ComplexField>(
+	basis: MatRef<'_, T>,
+	factor: MatRef<'_, T>,
+	conj_lhs: Conj,
+	matrix: MatMut<'_, T>,
+	w: MatMut<'_, T>,
+	forward: bool,
+	team: threadteam::TeamExec<'_>,
+) {
+	use core::sync::atomic::{AtomicUsize, Ordering};
+	let (m, k) = basis.shape();
+	let ncols = matrix.ncols();
+	let p = team.size().get();
+	#[cfg(feature = "par-trace")]
+	crate::utils::cost::trace::ROW_SPLIT_CALLS.fetch_add(1, Ordering::Relaxed);
+	let (c_ptr, c_rs, c_cs) = (matrix.as_ptr_mut() as usize, matrix.row_stride(), matrix.col_stride());
+	let (w_ptr, w_cs) = (w.as_ptr_mut() as usize, w.col_stride());
+	APPLY_SLOTS.with(|slots| {
+		let mut slots = slots.borrow_mut();
+		if slots.len() < p {
+			slots.resize_with(p, || AtomicUsize::new(0));
+		}
+		let slots = &slots[..p];
+		team.run_with(|part| {
+			let i = part.index();
+			let (r0, mi) = crate::utils::thread::par_split_indices(m, i, p);
+			APPLY_WORK.with(|work| {
+				let mut work = work.borrow_mut();
+				let elems = mi * k + k * ncols;
+				let lines = (elems * core::mem::size_of::<T>()).div_ceil(64).max(1);
+				if work.len() < lines {
+					work.resize(lines, WorkLine([0; 64]));
+				}
+				let base = work.as_mut_ptr() as *mut T;
+				// SAFETY: this thread's buffer, `mi * k + k * ncols` native elements.
+				let mut packed = unsafe { MatMut::<T>::from_raw_parts_mut(base, mi, k, 1, mi as isize) };
+				for j in 0..k {
+					for r in 0..mi {
+						let g = r0 + r;
+						packed[(r, j)] = if g < j {
+							zero()
+						} else if g == j {
+							one()
+						} else {
+							basis[(g, j)].clone()
+						};
+					}
+				}
+				// SAFETY: rows `r0..r0 + mi` of the target belong to this participant alone.
+				let mut rows = unsafe {
+					MatMut::<T>::from_raw_parts_mut((c_ptr as *mut T).wrapping_offset(r0 as isize * c_rs), mi, ncols, c_rs, c_cs)
+				};
+				// SAFETY: the tail of this thread's buffer.
+				let mut g = unsafe { MatMut::<T>::from_raw_parts_mut(base.add(mi * k), k, ncols, 1, k as isize) };
+				matmul_with_conj(g.rb_mut(), Accum::Replace, packed.rb().transpose(), Conj::Yes.compose(conj_lhs), rows.rb(), Conj::No, one(), Par::Seq);
+				slots[i].store(g.as_ptr_mut() as usize, Ordering::Release);
+				part.barrier().expect("no participant of the block apply panics before the barrier");
+				let (c0, ni) = crate::utils::thread::par_split_indices(ncols, i, p);
+				if ni > 0 {
+					// SAFETY: columns `c0..c0 + ni` of `w` belong to this participant alone.
+					let mut wi = unsafe { MatMut::<T>::from_raw_parts_mut((w_ptr as *mut T).wrapping_offset(c0 as isize * w_cs), k, ni, 1, w_cs) };
+					for t in 0..p {
+						let s = (i + t) % p;
+						// SAFETY: published before the barrier, read-only until the next one.
+						let gs = unsafe { MatRef::<T>::from_raw_parts((slots[s].load(Ordering::Acquire) as *const T).add(c0 * k), k, ni, 1, k as isize) };
+						if t == 0 {
+							wi.copy_from(gs);
+						} else {
+							z!(wi.rb_mut(), gs).for_each(|uz!(a, b)| *a = &*a + b);
+						}
+					}
+					if forward {
+						triangular_solve::solve_lower_triangular_in_place_with_conj(factor.transpose(), Conj::Yes.compose(conj_lhs), wi.rb_mut(), Par::Seq);
+					} else {
+						triangular_solve::solve_upper_triangular_in_place_with_conj(factor, Conj::No.compose(conj_lhs), wi.rb_mut(), Par::Seq);
+					}
+				}
+				part.barrier().expect("no participant of the block apply panics before the barrier");
+				// SAFETY: `w` is complete and read-only from here on.
+				let wf = unsafe { MatRef::<T>::from_raw_parts(w_ptr as *const T, k, ncols, 1, w_cs) };
+				matmul_with_conj(rows.rb_mut(), Accum::Add, packed.rb(), Conj::No.compose(conj_lhs), wf, Conj::No, -one::<T>(), Par::Seq);
+			});
+		});
+	});
 }

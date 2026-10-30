@@ -520,6 +520,11 @@ pub mod trace {
 	pub static N_TASKS_MODE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 	/// Calls of the owner-packed block apply (probe, faer#160).
 	pub static OWNER_PACKED_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+	/// Calls of the row-split block apply (probe, faer#160).
+	pub static ROW_SPLIT_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+	/// Mode 6: the row split takes applies whose target has at most this many columns; the others
+	/// follow the rule.
+	pub static ROW_SPLIT_COLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(128);
 	/// Probe (faer#160): nanoseconds and calls of the stages of the top level of the blocked QR,
 	/// indexed by [`PHASE_PANEL`] and the constants after it. Temporary; not for merging.
 	pub static PHASE_NS: [core::sync::atomic::AtomicU64; 5] = [const { core::sync::atomic::AtomicU64::new(0) }; 5];

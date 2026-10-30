@@ -37,6 +37,9 @@ fn main() {
 	let blocks = arg(&args, "--blocks").map(|s| list(&s)).unwrap_or(vec![0]);
 	let reps: usize = arg(&args, "--reps").map(|s| s.parse().unwrap()).unwrap_or(3);
 	let want_trace = args.iter().any(|a| a == "--trace");
+	if let Some(c) = arg(&args, "--row-split-cols") {
+		trace::ROW_SPLIT_COLS.store(c.parse().unwrap(), Ordering::Relaxed);
+	}
 
 	// seeded, well conditioned: a fixed LCG in [-0.5, 0.5)
 	let mut state = 0x9e3779b97f4a7c15u64 ^ n as u64;
@@ -52,11 +55,26 @@ fn main() {
 			let bs = if block == 0 { qrf::recommended_block_size::<f64>(n, n) } else { block.min(n) };
 			let mut qc = Mat::<f64>::zeros(bs, n);
 			let mut mem = MemBuffer::new(qrf::qr_in_place_scratch::<f64>(n, n, bs, par.shape(), Default::default()));
+			let mut reference: Option<Mat<f64>> = None;
 			for &mode in &modes {
 				trace::N_TASKS_MODE.store(mode, Ordering::Relaxed);
 				// one untimed call: page faults, team warm-up
 				a.copy_from(&a0);
 				qrf::qr_in_place(a.as_mut(), qc.as_mut(), par.reborrow(), MemStack::new(&mut mem), Default::default());
+				// every mode computes the same factorization: R against the first mode's, to rounding
+				match &reference {
+					None => reference = Some(a.clone()),
+					Some(r) => {
+						let mut worst = 0.0f64;
+						for j in 0..n {
+							for i in 0..=j {
+								worst = worst.max((a[(i, j)] - r[(i, j)]).abs() / r[(j, j)].abs().max(1e-300));
+							}
+						}
+						println!("# check,n={n},threads={threads},mode={mode},block={bs},max_rel_r_diff={worst:.3e}");
+						assert!(worst < 1e-8, "mode {mode}: R differs from the first mode's by {worst}");
+					},
+				}
 				for rep in 0..reps {
 					a.copy_from(&a0);
 					trace::phase_reset();
