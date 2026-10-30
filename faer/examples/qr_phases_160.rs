@@ -37,6 +37,12 @@ fn main() {
 	let blocks = arg(&args, "--blocks").map(|s| list(&s)).unwrap_or(vec![0]);
 	let reps: usize = arg(&args, "--reps").map(|s| s.parse().unwrap()).unwrap_or(3);
 	let want_trace = args.iter().any(|a| a == "--trace");
+	if args.iter().any(|a| a == "--lookahead") {
+		trace::LOOKAHEAD.store(true, Ordering::Relaxed);
+	}
+	if let Some(w) = arg(&args, "--lookahead-width") {
+		trace::LOOKAHEAD_PANEL_WIDTH.store(w.parse().unwrap(), Ordering::Relaxed);
+	}
 	if args.iter().any(|a| a == "--panel-seq") {
 		trace::PANEL_SEQ.store(true, Ordering::Relaxed);
 	}
@@ -121,6 +127,7 @@ fn main() {
 			}
 		}
 	});
+	eprintln!("# lookahead_steps={}", trace::LOOKAHEAD_STEPS.load(Ordering::Relaxed));
 	// keep the result observable
 	assert!(a[(0, 0)].is_finite());
 }

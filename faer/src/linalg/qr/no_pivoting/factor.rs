@@ -133,6 +133,7 @@ fn qr_in_place_blocked<T: ComplexField>(
 	mut par: Par,
 	stack: &mut MemStack,
 	params: Spec<QrParams, T>,
+	lookahead: bool,
 ) -> usize {
 	let params = params.config;
 	let (m, n) = A.shape();
@@ -172,6 +173,10 @@ fn qr_in_place_blocked<T: ComplexField>(
 	let mut H = H;
 	let mut col = col_start;
 	let mut row = row_start;
+	// the rank of the next block's panel when the look-ahead below has already factored it (its
+	// own factor complete), so the next iteration starts at its trailing apply
+	let mut prefactored: Option<usize> = None;
+	let block_size_param = block_size;
 	while row < size && col < n {
 		let block_size = Ord::min(block_size, Ord::min(size - row, n - col));
 		let sub_block_size = Ord::min(block_size, sub_block_size);
@@ -188,7 +193,11 @@ fn qr_in_place_blocked<T: ComplexField>(
 			let panel_seq = depth == 0 && crate::utils::cost::trace::PANEL_SEQ.load(core::sync::atomic::Ordering::Relaxed);
 			#[cfg(not(feature = "par-trace"))]
 			let panel_seq = false;
-			let new_row = qr_in_place_blocked(
+			let pre = prefactored.take();
+			let new_row = if let Some(local) = pre {
+				row + local
+			} else {
+				qr_in_place_blocked(
 				A.rb_mut().subcols_mut(0, col + block_size),
 				H.rb_mut().subrows_mut(offset, sub_block_size),
 				row,
@@ -196,7 +205,9 @@ fn qr_in_place_blocked<T: ComplexField>(
 				if panel_seq { Par::Seq } else { par.reborrow() },
 				stack,
 				params.into(),
-			);
+				false,
+			)
+			};
 			#[cfg(feature = "par-trace")]
 			if depth == 0 {
 				crate::utils::cost::trace::phase_add(crate::utils::cost::trace::PHASE_PANEL, t0.elapsed().as_nanos() as u64);
@@ -204,7 +215,7 @@ fn qr_in_place_blocked<T: ComplexField>(
 			#[cfg(feature = "par-trace")]
 			let t0 = std::time::Instant::now();
 			let local = new_row - row;
-			if local > 0 {
+			if local > 0 && pre.is_none() {
 				let mut k = 0;
 				while k < local {
 					let sub_block_size = Ord::min(sub_block_size, local - k);
@@ -270,14 +281,65 @@ fn qr_in_place_blocked<T: ComplexField>(
 			}
 			#[cfg(feature = "par-trace")]
 			let t0 = std::time::Instant::now();
-			let (Q0, A1) = A
-				.rb_mut()
-				.get_mut(row.., ..)
-				.split_at_col_mut(col + block_size);
-			let Q0 = Q0.rb().get(.., row..row + local);
-			let H = H.rb().get(offset..offset + local, row..row + local);
-			if A1.ncols() > 0 {
-				householder::apply_block_householder_transpose_on_the_left_in_place_with_conj(Q0.rb(), H.rb(), Conj::Yes, A1, par.reborrow(), stack);
+			// look-ahead: when this chunk completes a full-rank block (`row == col` throughout) and a
+			// next block follows, apply this block to the next block's columns first, then factor
+			// that panel on one participant while the others apply this block to the rest
+			let next_col = col + block_size;
+			let row2 = row + local;
+			let bs2 = Ord::min(block_size_param, Ord::min(size.saturating_sub(row2), n.saturating_sub(next_col)));
+			let far = n.saturating_sub(next_col + bs2);
+			let sub2 = Ord::min(bs2, sub_block_size);
+			let panel_req = temp_mat_scratch::<T>(bs2, bs2);
+			let far_req = temp_mat_scratch::<T>(local, far);
+			let ahead = lookahead
+				&& offset == 0
+				&& local == block_size
+				&& row == col
+				&& bs2 > 0
+				&& far > 0
+				&& sub2 > 1
+				&& (m - row2) * bs2 >= params.blocking_threshold
+				&& stack.can_hold(StackReq::all_of(&[panel_req, far_req]))
+				&& lookahead_pays::<T>(&par, m - row2, bs2, local, far);
+			#[cfg(feature = "rayon")]
+			if ahead {
+				let (Q0, A1) = A.rb_mut().get_mut(row.., ..).split_at_col_mut(next_col);
+				let Q0 = Q0.rb().get(.., row..row + local);
+				let (Hl, Hr) = H.rb_mut().split_at_col_mut(row2);
+				let Hj = Hl.rb().get(offset..offset + local, row..row + local);
+				let (mut A_next, A_far) = A1.split_at_col_mut(bs2);
+				householder::apply_block_householder_transpose_on_the_left_in_place_with_conj(Q0, Hj, Conj::Yes, A_next.rb_mut(), par.reborrow(), stack);
+				let A_panel = A_next.get_mut(local.., ..);
+				let H_panel = Hr.subcols_mut(0, bs2);
+				let (panel_mem, far_stack) = stack.make_aligned_uninit::<u8>(panel_req.unaligned_bytes_required(), panel_req.align_bytes());
+				let mut local2 = 0usize;
+				let width = lookahead_panel_width();
+				crate::utils::thread::join_sized(
+					par.reborrow(),
+					width,
+					|par| {
+						local2 = factor_panel(A_panel, H_panel, sub2, par, MemStack::new(panel_mem), params.into());
+					},
+					|par| {
+						householder::apply_block_householder_transpose_on_the_left_in_place_with_conj(Q0, Hj, Conj::Yes, A_far, par, far_stack);
+					},
+				);
+				#[cfg(feature = "par-trace")]
+				crate::utils::cost::trace::LOOKAHEAD_STEPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+				prefactored = Some(local2);
+			}
+			#[cfg(not(feature = "rayon"))]
+			let _ = (ahead, panel_req, far_req, sub2, far);
+			if !(ahead && cfg!(feature = "rayon")) {
+				let (Q0, A1) = A
+					.rb_mut()
+					.get_mut(row.., ..)
+					.split_at_col_mut(col + block_size);
+				let Q0 = Q0.rb().get(.., row..row + local);
+				let H = H.rb().get(offset..offset + local, row..row + local);
+				if A1.ncols() > 0 {
+					householder::apply_block_householder_transpose_on_the_left_in_place_with_conj(Q0.rb(), H.rb(), Conj::Yes, A1, par.reborrow(), stack);
+				}
 			}
 			#[cfg(feature = "par-trace")]
 			{
@@ -297,6 +359,67 @@ fn qr_in_place_blocked<T: ComplexField>(
 		}
 	}
 	row
+}
+/// Factors one panel (`A`: its rows from the panel's diagonal down, its columns; `H`: the factor
+/// rows of its block, its columns), with the panel's own coordinates (`row == col == 0`), and
+/// completes the block's factor: exactly what the blocked loop does for a block at `offset == 0`.
+/// Returns the panel's rank.
+fn factor_panel<T: ComplexField>(
+	A: MatMut<'_, T>,
+	H: MatMut<'_, T>,
+	sub_block_size: usize,
+	mut par: Par,
+	stack: &mut MemStack,
+	params: Spec<QrParams, T>,
+) -> usize {
+	let mut A = A;
+	let mut H = H;
+	let local = qr_in_place_blocked(A.rb_mut(), H.rb_mut().subrows_mut(0, sub_block_size), 0, 0, par.reborrow(), stack, params, false);
+	if local > 0 {
+		let mut k = 0;
+		while k < local {
+			let sub_block_size = Ord::min(sub_block_size, local - k);
+			if k > 0 {
+				let mut H = H.rb_mut().subcols_mut(k, sub_block_size);
+				let (H0, H1) = H.rb_mut().split_at_row_mut(k);
+				let H0 = H0.rb().subrows(0, sub_block_size);
+				let H1 = H1.subrows_mut(0, sub_block_size);
+				{ H1 }.copy_from_triangular_upper(H0);
+			}
+			k += sub_block_size;
+		}
+		householder::upgrade_householder_factor(H.rb_mut().get_mut(0..local, 0..local), A.rb().get(.., 0..local), local, sub_block_size, par.reborrow());
+	}
+	local
+}
+
+/// Whether overlapping the next panel with this block's trailing apply pays (probe: forced by
+/// `trace::LOOKAHEAD`).
+fn lookahead_pays<T: ComplexField>(par: &Par, panel_rows: usize, panel_cols: usize, basis_cols: usize, far_cols: usize) -> bool {
+	let _ = (panel_rows, panel_cols, basis_cols, far_cols);
+	if par.degree() < 2 {
+		return false;
+	}
+	#[cfg(feature = "par-trace")]
+	{
+		crate::utils::cost::trace::LOOKAHEAD.load(core::sync::atomic::Ordering::Relaxed)
+	}
+	#[cfg(not(feature = "par-trace"))]
+	{
+		false
+	}
+}
+
+/// Participants of the look-ahead's panel group (probe: `trace::LOOKAHEAD_PANEL_WIDTH`, default 1).
+fn lookahead_panel_width() -> usize {
+	#[cfg(feature = "par-trace")]
+	{
+		crate::utils::cost::trace::LOOKAHEAD_PANEL_WIDTH.load(core::sync::atomic::Ordering::Relaxed)
+	}
+	#[cfg(not(feature = "par-trace"))]
+	{
+		1
+	}
 }
 /// Factors a matrix whose columns are not the contiguous direction by copying
 /// it into a column-major buffer, factoring that, and copying the factor back.
@@ -359,7 +482,7 @@ pub fn qr_in_place<T: ComplexField>(
 	}
 	let mut Q_coeff = Q_coeff;
 	let rank =
-		qr_in_place_blocked(A, Q_coeff.rb_mut(), 0, 0, par, stack, params);
+		qr_in_place_blocked(A, Q_coeff.rb_mut(), 0, 0, par, stack, params, true);
 	Q_coeff.rb_mut().get_mut(.., rank..).fill(zero());
 	let mut col = rank / block_size * block_size;
 	let n = Q_coeff.ncols();
@@ -913,6 +1036,67 @@ mod tests {
 				"3x{n}: relative reconstruction error {relative_error:e}"
 			);
 		}
+	}
+
+	/// The look-ahead factors each next panel on its own participant while the trailing apply runs:
+	/// R, the rank and (for full-rank input) the compact factors must be the sequential ones to
+	/// rounding, across tall, square and wide shapes, a block that does not divide the width, a
+	/// zero column (rank loss, where the look-ahead must stop) and c64. Asserts the path ran.
+	#[cfg(all(feature = "par-trace", feature = "threadteam"))]
+	#[test]
+	fn test_lookahead_matches_sequential() {
+		use core::sync::atomic::Ordering::Relaxed;
+		use crate::utils::cost::trace;
+		fn case<T: ComplexField>(m: usize, n: usize, bs: usize, zero_col: Option<usize>, gen: impl Fn(usize, usize) -> T, mag: fn(&T) -> f64) {
+			let size = Ord::min(m, n);
+			let a = Mat::<T>::from_fn(m, n, |i, j| if Some(j) == zero_col { T::zero_impl() } else { gen(i, j) });
+			let run = |par_team: bool| {
+				let mut a = a.clone();
+				let mut h = Mat::<T>::zeros(bs, size);
+				let mut mem = MemBuffer::new(qr_in_place_scratch::<T>(m, n, bs, crate::ParShape::team(4), default()));
+				let info = if par_team {
+					crate::team::with_team(4, |par| qr_in_place(a.as_mut(), h.as_mut(), par, MemStack::new(&mut mem), default()))
+				} else {
+					qr_in_place(a.as_mut(), h.as_mut(), Par::Seq, MemStack::new(&mut mem), default())
+				};
+				(a, h, info.rank)
+			};
+			let (a0, h0, r0) = run(false);
+			let before = trace::LOOKAHEAD_STEPS.load(Relaxed);
+			trace::LOOKAHEAD.store(true, Relaxed);
+			let (a1, h1, r1) = run(true);
+			trace::LOOKAHEAD.store(false, Relaxed);
+			std::assert!(trace::LOOKAHEAD_STEPS.load(Relaxed) > before, "{m}x{n} block {bs}: the look-ahead did not run");
+			std::assert!(r0 == r1, "{m}x{n} block {bs}: rank {r0} against {r1}");
+			let mx = |x: &Mat<T>| { let mut v = 1.0f64; for j in 0..x.ncols() { for i in 0..x.nrows() { let e = mag(&x[(i, j)]); if e.is_finite() { v = v.max(e); } } } v };
+			let scale = (m + n) as f64 * 1e-13 * mx(&a0);
+			for j in 0..n {
+				for i in 0..Ord::min(m, j + 1) {
+					let d = mag(&(a1[(i, j)].clone() - a0[(i, j)].clone()));
+					std::assert!(d <= scale, "{m}x{n} block {bs}: R({i}, {j}) differs by {d}");
+				}
+			}
+			if zero_col.is_none() {
+				let hs = mx(&h0) * 1e-12 * (m as f64);
+				for j in 0..size {
+					for i in 0..bs {
+						// a reflector with an empty tail stores an infinite `tau` on both sides
+						if !mag(&h0[(i, j)]).is_finite() && !mag(&h1[(i, j)]).is_finite() {
+							continue;
+						}
+						let d = mag(&(h1[(i, j)].clone() - h0[(i, j)].clone()));
+						std::assert!(d <= hs, "{m}x{n} block {bs}: H({i}, {j}) differs by {d}");
+					}
+				}
+			}
+		}
+		let r = |i: usize, j: usize| ((i * 7 + j * 13) % 23) as f64 / 23.0 - 0.5 + if i == j { 2.0 } else { 0.0 };
+		let c = |i: usize, j: usize| c64::new(r(i, j), r(j + 3, i + 1));
+		for &(m, n, bs) in &[(400, 300, 32), (300, 300, 48), (250, 400, 32), (520, 200, 64)] {
+			case::<f64>(m, n, bs, None, r, |x| x.abs());
+			case::<c64>(m, n, bs, None, c, |x| x.norm());
+		}
+		case::<f64>(400, 300, 32, Some(70), r, |x| x.abs());
 	}
 
 	#[test]

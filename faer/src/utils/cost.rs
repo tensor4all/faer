@@ -525,6 +525,12 @@ pub mod trace {
 	/// Probe: run the QR's panel (the recursion below depth 0) sequentially; the trailing apply keeps
 	/// the team.
 	pub static PANEL_SEQ: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+	/// Probe: look-ahead in the blocked QR (overlap the next panel with the trailing apply).
+	pub static LOOKAHEAD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+	/// Probe: participants of the look-ahead's panel group.
+	pub static LOOKAHEAD_PANEL_WIDTH: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(1);
+	/// Probe: look-ahead steps taken.
+	pub static LOOKAHEAD_STEPS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 	/// Probe: ns of the block applies inside the panel by basis width (bin `log2(N)`, last bin 128+),
 	/// and of the factor merges inside the panel (bin 8).
 	pub static PANEL_BY_WIDTH_NS: [core::sync::atomic::AtomicU64; 9] = [const { core::sync::atomic::AtomicU64::new(0) }; 9];
