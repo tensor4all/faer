@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Small offline checks for selection, continuation and status accounting."""
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -87,9 +88,26 @@ class Runner(unittest.TestCase):
         self.assertEqual(v.failed_tests(log), ['linalg::a'])
 
     def test_the_ledger_names_an_issue_for_every_test(self):
+        # An empty ledger (no known failures on main) is the healthy state and
+        # satisfies this vacuously; the load itself still checks the format.
         known = v.load_known(Path(__file__).resolve().parent.parent)
-        self.assertTrue(known)
         self.assertTrue(all(isinstance(issue, int) for issue in known.values()))
+
+    def load_ledger(self, entries):
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / 'scripts').mkdir()
+            (Path(root) / 'scripts' / v.KNOWN_FILE).write_text(json.dumps({'known': entries}))
+            return v.load_known(root)
+
+    def test_ledger_format_is_enforced_whatever_main_lists(self):
+        # These cases do not depend on the repository ledger, which may be empty.
+        self.assertEqual(self.load_ledger([]), {})
+        self.assertEqual(self.load_ledger([{'issue': 7, 'tests': ['linalg::a', 'linalg::b']}]),
+                         {'linalg::a': 7, 'linalg::b': 7})
+        with self.assertRaisesRegex(ValueError, 'without an issue'):
+            self.load_ledger([{'issue': None, 'tests': ['linalg::a']}])
+        with self.assertRaisesRegex(ValueError, 'listed twice'):
+            self.load_ledger([{'issue': 1, 'tests': ['linalg::a']}, {'issue': 2, 'tests': ['linalg::a']}])
 
     def test_case_counts(self):
         row, = v.case_records('LAPACK_CASES family=lu dtype=f32 planned=2 attempted=2 call_failures=1 diagnostics=1 auxiliary_attempted=4')
