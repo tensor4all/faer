@@ -737,6 +737,8 @@ fn apply_block_householder_on_the_left_in_place_generic<
 				},
 				2 => (n_tasks, threads),
 				3 => (1, 1),
+				// probe (faer#160): at most four column tasks on the whole budget (the old cap)
+				4 => (Ord::min(n_tasks, 4), threads),
 				_ => (tasks, width),
 			};
 			n_tasks = if width > 1 { tasks } else { 1 };

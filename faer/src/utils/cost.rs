@@ -518,6 +518,37 @@ pub mod trace {
 	/// Override of the block apply column split gate, for probes: 0 the rule, 1 the previous
 	/// rule (`M * K * 4 * M >= gemm threshold`), 2 always parallel, 3 never.
 	pub static N_TASKS_MODE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+	/// Probe (faer#160): nanoseconds and calls of the stages of the top level of the blocked QR,
+	/// indexed by [`PHASE_PANEL`] and the constants after it. Temporary; not for merging.
+	pub static PHASE_NS: [core::sync::atomic::AtomicU64; 5] = [const { core::sync::atomic::AtomicU64::new(0) }; 5];
+	/// calls per stage, as [`PHASE_NS`]
+	pub static PHASE_CALLS: [core::sync::atomic::AtomicU64; 5] = [const { core::sync::atomic::AtomicU64::new(0) }; 5];
+	/// the recursive panel call at depth 0 (includes the leaves and the panel's own applies)
+	pub const PHASE_PANEL: usize = 0;
+	/// the unblocked leaves, at every depth
+	pub const PHASE_LEAF: usize = 1;
+	/// `upgrade_householder_factor` and the factor merge at depth 0
+	pub const PHASE_FACTOR: usize = 2;
+	/// the trailing block apply at depth 0
+	pub const PHASE_APPLY: usize = 3;
+	/// the block applies inside the panel (depth > 0)
+	pub const PHASE_PANEL_APPLY: usize = 4;
+	std::thread_local! {
+		/// recursion depth of the blocked QR on this thread
+		pub static QR_DEPTH: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+	}
+	/// Add `ns` to stage `phase`.
+	pub fn phase_add(phase: usize, ns: u64) {
+		PHASE_NS[phase].fetch_add(ns, Ordering::Relaxed);
+		PHASE_CALLS[phase].fetch_add(1, Ordering::Relaxed);
+	}
+	/// Zero the stage counters.
+	pub fn phase_reset() {
+		for i in 0..5 {
+			PHASE_NS[i].store(0, Ordering::Relaxed);
+			PHASE_CALLS[i].store(0, Ordering::Relaxed);
+		}
+	}
 	static ON: AtomicBool = AtomicBool::new(false);
 	static LOG: Mutex<Vec<Record>> = Mutex::new(Vec::new());
 	std::thread_local! {
