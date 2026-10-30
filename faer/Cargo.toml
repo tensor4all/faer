@@ -164,3 +164,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(suitesparse)',
     'cfg(docs_rs)',
   ] }
+
+# probe for tensor4all/faer#160 (cholesky item 2), not for merging
+[[example]]
+name = "syrk_probe_160"
+required-features = ["par-trace"]
