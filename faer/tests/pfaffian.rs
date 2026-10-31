@@ -283,6 +283,34 @@ fn finite_range_and_nonfinite_failures() {
 }
 
 #[test]
+fn nonfinite_pivot_candidate_is_not_a_zero_pivot() {
+	let mut a = Mat::<f64>::zeros(8, 8);
+	for (i, j, value) in [
+		(1, 0, 1.0),
+		(3, 0, 1.0),
+		(6, 0, 1.0),
+		(3, 2, 1.0),
+		(3, 1, -1e308),
+		(6, 1, 1e308),
+	] {
+		a[(i, j)] = value;
+	}
+	assert_eq!(
+		compute(a.as_ref(), Par::Seq),
+		Err(PfaffianError::NumericalFailure)
+	);
+	#[cfg(feature = "threadteam")]
+	for width in [3, 8] {
+		faer::team::with_team(width, |par| {
+			assert_eq!(
+				compute(a.as_ref(), par),
+				Err(PfaffianError::NumericalFailure)
+			);
+		});
+	}
+}
+
+#[test]
 fn runtime_selected_lane() {
 	struct Lane;
 	impl pulp::WithSimd for Lane {
@@ -333,7 +361,7 @@ fn generic_extended_precision_real_and_complex() {
 
 #[cfg(feature = "threadteam")]
 #[test]
-fn team_copy_checks_nonleading_columns() {
+fn team_validation_checks_nonleading_columns() {
 	let (mut a, expected) = known_congruence(128, true);
 	faer::team::with_team(8, |mut par| {
 		close(
@@ -354,7 +382,7 @@ fn team_copy_checks_nonleading_columns() {
 
 #[cfg(feature = "threadteam")]
 #[test]
-fn team_agreement_and_actual_column_dispatch() {
+fn team_agreement_and_actual_row_dispatch() {
 	fn check<T: ComplexField>(a: Mat<T>) {
 		use faer::utils::team::stats;
 		let want = compute(a.as_ref(), Par::Seq).unwrap();

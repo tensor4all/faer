@@ -11,15 +11,15 @@
 //! PfaPack or mvmc source code was used.
 //!
 //! The panel and pivot decisions are ordered. Completed panels update disjoint
-//! trailing column blocks on the caller's team. Copies and symmetric swaps also
-//! use that team; sequential execution degenerates to the same kernels.
+//! trailing row blocks on the caller's team using a shared compact panel.
+//! Pivots exchange logical indices only; tile stores maintain both triangles.
+//! Sequential execution degenerates to the same kernels.
 //! Transposes here are **not conjugate transposes**.
 
 use crate::internal_prelude::*;
 use crate::utils::cost::{ParThreshold, rate};
 use crate::utils::partition::lower_area_split;
 use crate::utils::thread::{Ptr, with_width};
-use faer_traits::RealReg;
 use pulp::Simd;
 
 /// Failure to compute a finite, nonzero Pfaffian.
@@ -74,8 +74,24 @@ impl core::error::Error for PfaffianError {}
 /// assert!(!memory.is_empty());
 /// ```
 pub fn pfaffian_scratch<T: ComplexField>(dim: usize) -> StackReq {
-	linalg::temp_mat_scratch::<T>(work_rows::<T>(dim), dim)
-		.and(linalg::temp_mat_scratch::<T>(dim / 2, 1))
+	linalg::temp_mat_scratch::<T>(
+		work_rows::<T>(dim),
+		if dim > PANEL { dim } else { 0 },
+	)
+	.and(linalg::temp_mat_scratch::<T>(
+		work_rows::<T>(dim),
+		PANEL.min(dim),
+	))
+	.and(linalg::temp_mat_scratch::<T>(
+		work_rows::<T>(dim),
+		if dim > PANEL { PANEL } else { 0 },
+	))
+	.and(linalg::temp_mat_scratch::<T>(
+		work_rows::<T>(PANEL),
+		tile_columns(dim),
+	))
+	.and(linalg::temp_mat_scratch::<T>(dim / 2, 1))
+	.and(StackReq::new::<usize>(dim))
 }
 
 // Like SVD's work matrix, avoid cache-set aliasing in strided row accesses.
@@ -137,41 +153,91 @@ pub fn pfaffian<T: ComplexField>(
 	if n == 0 {
 		return Ok(one());
 	}
-	// SAFETY: copy_input initializes all logical rows, including stride
-	// padding, before any entry is read or a nonfinite-input error is returned.
-	let (mut work, stack) = unsafe {
-		linalg::temp_mat_uninit::<T, _, _>(work_rows::<T>(n), n, stack)
-	};
-	let mut work = work.as_mat_mut().try_as_col_major_mut().unwrap();
-	if !copy_input(work.rb_mut(), a, par.reborrow()) {
+	if !valid_input(a, par.reborrow()) {
 		return Err(PfaffianError::NumericalFailure);
 	}
-	let mut work = work.subrows_mut(0, n);
-	// SAFETY: each pivot entry is written before utu2pfa reads the column.
-	let (mut pivots, _) =
+	// SAFETY: the first panel reads input. Completed updates initialize both
+	// orientations of surviving pairs; later panels gather only live entries.
+	let (mut work, stack) = unsafe {
+		linalg::temp_mat_uninit::<T, _, _>(
+			work_rows::<T>(n),
+			if n > PANEL { n } else { 0 },
+			stack,
+		)
+	};
+	let mut work = work
+		.as_mat_mut()
+		.subrows_mut(0, n)
+		.try_as_col_major_mut()
+		.unwrap();
+	// SAFETY: every panel column is filled before use; padding is never read.
+	let (mut factors, stack) = unsafe {
+		linalg::temp_mat_uninit::<T, _, _>(
+			work_rows::<T>(n),
+			PANEL.min(n),
+			stack,
+		)
+	};
+	let mut factors = factors
+		.as_mat_mut()
+		.subrows_mut(0, n)
+		.try_as_col_major_mut()
+		.unwrap();
+	// SAFETY: packing fills the complete compact panel before the joined team
+	// reads it. No trailing update is needed when n <= PANEL.
+	let (mut packed, stack) = unsafe {
+		linalg::temp_mat_uninit::<T, _, _>(
+			work_rows::<T>(n),
+			if n > PANEL { PANEL } else { 0 },
+			stack,
+		)
+	};
+	let mut packed = packed
+		.as_mat_mut()
+		.subrows_mut(0, n)
+		.try_as_col_major_mut()
+		.unwrap();
+	// SAFETY: each task gathers its complete tile before GEMM reads it.
+	let (mut tiles, stack) = unsafe {
+		linalg::temp_mat_uninit::<T, _, _>(
+			work_rows::<T>(PANEL),
+			tile_columns(n),
+			stack,
+		)
+	};
+	let mut tiles = tiles.as_mat_mut().try_as_col_major_mut().unwrap();
+	// SAFETY: every pivot is written before utu2pfa reads it.
+	let (mut pivots, stack) =
 		unsafe { linalg::temp_mat_uninit::<T, _, _>(n / 2, 1, stack) };
 	let mut pivots = pivots.as_mat_mut();
+	let (mut perm, _) = stack.make_with(n, |i| i);
 	let mut odd_permutation = false;
 	for start in (0..n).step_by(PANEL) {
 		let end = (start + PANEL).min(n);
 		for k in (start..end).step_by(2) {
-			update_panel_column(work.rb_mut(), start, k);
-			let pivot =
-				k + 1 + pivot_index(work.rb().col(k).subrows(k + 1, n - k - 1));
+			let c = perm[k];
+			let source = if start == 0 {
+				a
+			} else {
+				work.rb().as_dyn_stride()
+			};
+			update_panel_column(
+				factors.rb_mut(),
+				source,
+				c,
+				k - start,
+				&perm[k..],
+				start == 0,
+			);
+			let pivot = k
+				+ 1
+				+ pivot_index(factors.rb().col(k - start), &perm[k + 1..])?;
 			if pivot != k + 1 {
-				// As in LU, a cheap swap must earn back its one dispatch.
-				let width = ParThreshold::Derived.region_width::<T>(
-					&par,
-					n - start - 2,
-					rate::lu_swap(),
-					1,
-				);
-				with_width(par.reborrow(), width, |par| {
-					swap_lower(work.rb_mut(), start, k + 1, pivot, par);
-				});
+				perm.swap(k + 1, pivot);
 				odd_permutation = !odd_permutation;
 			}
-			let d = work[(k + 1, k)].copy();
+			let q = perm[k + 1];
+			let d = factors[(q, k - start)].copy();
 			if !d.is_finite() {
 				return Err(PfaffianError::NumericalFailure);
 			}
@@ -179,59 +245,78 @@ pub fn pfaffian<T: ComplexField>(
 				return Err(PfaffianError::ZeroPivot { index: k });
 			}
 			pivots[(k / 2, 0)] = -&d;
-			update_panel_column(work.rb_mut(), start, k + 1);
-			for i in k + 2..n {
-				work[(i, k)] = &work[(i, k)] / &d;
+			update_panel_column(
+				factors.rb_mut(),
+				source,
+				q,
+				k + 1 - start,
+				&perm[k..],
+				start == 0,
+			);
+			for &i in &perm[k + 2..] {
+				factors[(i, k - start)] = &factors[(i, k - start)] / &d;
 			}
 		}
 		if end < n {
-			let (prefix, trailing) = work.rb_mut().split_at_col_mut(end);
-			let factors = prefix.rb().subcols(start, end - start);
-			let trailing = trailing.subrows_mut(end, n - end);
-			update_trailing(trailing, factors, end, par.reborrow());
+			let remaining = &perm[end..];
+			let mut compact = packed.rb_mut().submatrix_mut(
+				0,
+				0,
+				remaining.len(),
+				end - start,
+			);
+			for j in 0..compact.ncols() {
+				for (i, &physical) in remaining.iter().enumerate() {
+					compact[(i, j)] = factors[(physical, j)].copy();
+				}
+			}
+			if start == 0 {
+				update_trailing::<true, T>(
+					work.rb_mut(),
+					compact.rb(),
+					a,
+					remaining,
+					tiles.rb_mut(),
+					par.reborrow(),
+				);
+			} else {
+				update_trailing::<false, T>(
+					work.rb_mut(),
+					compact.rb(),
+					a,
+					remaining,
+					tiles.rb_mut(),
+					par.reborrow(),
+				);
+			}
 		}
 	}
 	let value = utu2pfa(pivots.col_mut(0));
 	if !value.is_finite() || value == zero() {
 		return Err(PfaffianError::NumericalFailure);
 	}
-	let value = if odd_permutation { -value } else { value };
-	Ok(value)
+	Ok(if odd_permutation { -value } else { value })
 }
 
-fn copy_input<T: ComplexField>(
-	work: MatMut<'_, T, usize, usize, ContiguousFwd>,
-	a: MatRef<'_, T>,
-	par: Par<'_>,
-) -> bool {
+fn tile_columns(n: usize) -> usize {
+	if n > PANEL {
+		n.div_ceil(PANEL) * PANEL
+	} else {
+		0
+	}
+}
+
+fn valid_input<T: ComplexField>(a: MatRef<'_, T>, par: Par<'_>) -> bool {
 	use core::sync::atomic::{AtomicBool, Ordering};
 	let invalid = AtomicBool::new(false);
 	let n = a.nrows();
-	let rows = work.nrows();
-	let stride = work.col_stride();
-	let ptr = Ptr(work.as_ptr_mut());
 	let width = par.degree().min(n);
 	with_width(par, width, |par| {
 		let run = &|rank: usize, parts: usize| {
-			let ptr = ptr;
 			let mut valid = true;
-			// SAFETY: ranks own disjoint complete columns, including extra
-			// rows. temp_mat_uninit initializes drop-requiring T; ordinary T
-			// needs no drop.
-			unsafe {
-				for j in n * rank / parts..n * (rank + 1) / parts {
-					let col = ptr.0.offset(j as isize * stride);
-					for i in 0..=j {
-						*col.add(i) = zero();
-					}
-					for i in j + 1..n {
-						let value = a[(i, j)].copy();
-						valid &= value.is_finite();
-						*col.add(i) = value;
-					}
-					for i in n..rows {
-						*col.add(i) = zero();
-					}
+			for j in n * rank / parts..n * (rank + 1) / parts {
+				for i in j + 1..n {
+					valid &= a[(i, j)].is_finite();
 				}
 			}
 			if !valid {
@@ -249,162 +334,74 @@ fn copy_input<T: ComplexField>(
 	!invalid.load(Ordering::Relaxed)
 }
 
-// Completed panels have been consumed; only the current panel's multipliers
-// and the remaining lower triangle need the symmetric permutation.
-fn swap_lower<T: ComplexField>(
-	mut a: MatMut<'_, T, usize, usize, ContiguousFwd>,
-	start: usize,
-	p: usize,
-	q: usize,
-	par: Par<'_>,
-) {
-	let n = a.nrows();
-	core::debug_assert!(start <= p && p < q && q < n);
-	let width = par.degree().min(n - start - 1);
-	let stride = a.col_stride();
-	let ptr = Ptr(a.as_ptr_mut());
-	with_width(par, width, |par| {
-		let run = &|rank: usize, parts: usize| {
-			let ptr = ptr;
-			let at = |i: usize, j: usize| {
-				ptr.0.wrapping_offset(i as isize + j as isize * stride)
-			};
-			let range = |lo, hi| {
-				lo + (hi - lo) * rank / parts
-					..lo + (hi - lo) * (rank + 1) / parts
-			};
-			// SAFETY: split each segment independently to balance strided work.
-			// Prefix (p,j)/(q,j), middle (j,p)/(q,j), tail (i,p)/(i,q)
-			// pairs are disjoint across segments and ranks; none is the corner
-			// (q,p). Only element references are formed, never overlapping
-			// matrix views.
-			unsafe {
-				for j in range(start, p) {
-					core::ptr::swap(at(p, j), at(q, j));
-				}
-				for j in range(p + 1, q) {
-					let x = (&*at(j, p)).copy();
-					*at(j, p) = -&*at(q, j);
-					*at(q, j) = -x;
-				}
-				for i in range(q + 1, n) {
-					core::ptr::swap(at(i, p), at(i, q));
-				}
-			}
-		};
-		match par {
-			Par::Seq => run(0, 1),
-			#[cfg(feature = "threadteam")]
-			Par::Team(team) => crate::utils::team::run(team, width, run),
-			#[cfg(not(feature = "threadteam"))]
-			Par::__Lifetime(x, _) => match x {},
-		}
-	});
-	a[(q, p)] = -&a[(q, p)];
-}
-
 fn pivot_index<T: ComplexField>(
 	col: ColRef<'_, T, usize, ContiguousFwd>,
-) -> usize {
-	struct Impl<'a, T: ComplexField> {
-		col: ColRef<'a, T, usize, ContiguousFwd>,
-	}
-	impl<T: ComplexField> pulp::WithSimd for Impl<'_, T> {
-		type Output = usize;
-
-		#[inline(always)]
-		fn with_simd<S: Simd>(self, simd: S) -> usize {
-			let col = self.col;
-			if const { T::SIMD_CAPABILITIES.is_simd() } {
-				with_dim!(N, col.nrows());
-				let col = col.as_row_shape(N);
-				let ctx = SimdCtx::<T, S>::new_force_mask(T::simd_ctx(simd), N);
-				let mut largest = RealReg(ctx.zero());
-				let mut at = ctx.izero();
-				let mut visit = |value, offset| {
-					let index = ctx.iadd(
-						T::simd_iota(&ctx.0),
-						ctx.isplat(T::Index::truncate(offset)),
-					);
-					let value = ctx.abs_max(value);
-					let better = (*ctx).gt(value, largest);
-					largest = RealReg(ctx.select(better, value.0, largest.0));
-					at = ctx.iselect(better, index, at);
-				};
-				let (_, body, tail) = ctx.indices();
-				for i in body {
-					visit(ctx.read(col, i), i.offset() as usize);
-				}
-				if let Some(i) = tail {
-					let lanes = core::mem::size_of::<T::SimdVec<S>>()
-						/ core::mem::size_of::<T>();
-					visit(
-						ctx.read(col, i),
-						(col.nrows().unbound() - 1) / lanes * lanes,
-					);
-				}
-				let value = ctx.reduce_max_real(largest);
-				let ties = (*ctx).ge(largest, ctx.splat_real(&value));
-				let at = ctx.iselect(
-					ties,
-					at,
-					ctx.isplat(T::Index::truncate(usize::MAX)),
-				);
-				// The smallest tied row is independent of SIMD width, including
-				// masked tails.
-				bytemuck::cast_slice::<T::SimdIndex<S>, T::Index>(
-					core::slice::from_ref(&at),
-				)
-				.iter()
-				.map(|i| i.zx())
-				.min()
-				.unwrap()
-			} else {
-				let mut at = 0;
-				for i in 1..col.nrows() {
-					if col[i].absmax() > col[at].absmax() {
-						at = i;
-					}
-				}
-				at
-			}
+	perm: &[usize],
+) -> Result<usize, PfaffianError> {
+	let mut at = 0;
+	for i in 0..perm.len() {
+		if !col[perm[i]].is_finite() {
+			return Err(PfaffianError::NumericalFailure);
+		}
+		if col[perm[i]].absmax() > col[perm[at]].absmax() {
+			at = i;
 		}
 	}
-	dispatch!(Impl { col }, Impl, T)
+	Ok(at)
 }
 
 fn update_panel_column<T: ComplexField>(
-	mut work: MatMut<'_, T, usize, usize, ContiguousFwd>,
-	start: usize,
-	col: usize,
+	mut factors: MatMut<'_, T, usize, usize, ContiguousFwd>,
+	a: MatRef<'_, T>,
+	column: usize,
+	at: usize,
+	live: &[usize],
+	lower_only: bool,
 ) {
-	// The odd column must not include its own, not-yet-normalized pivot pair.
-	let pairs_end = col - col % 2;
-	if pairs_end == start {
-		return;
+	let (prefix, remaining) = factors.rb_mut().split_at_col_mut(at);
+	let mut dst = remaining.col_mut(0);
+	dst.rb_mut().fill(zero());
+	if lower_only {
+		for &i in live {
+			dst[i] = if i > column {
+				a[(i, column)].copy()
+			} else if i < column {
+				-&a[(column, i)]
+			} else {
+				zero()
+			};
+		}
+	} else {
+		for &i in live {
+			dst[i] = if i == column {
+				zero()
+			} else {
+				a[(i, column)].copy()
+			};
+		}
 	}
-	let (prefix, remaining) = work.rb_mut().split_at_col_mut(col);
-	update_columns(
-		remaining.subcols_mut(0, 1),
-		prefix.rb().subcols(start, pairs_end - start),
-		col,
-		0,
-	);
+	// The odd column must exclude its own, not-yet-normalized pivot pair.
+	let pairs_end = at - at % 2;
+	if pairs_end > 0 {
+		update_column(dst, prefix.rb().subcols(0, pairs_end), column, 0);
+	}
 }
 
-// Apply the two rank-one terms X Y^T - Y X^T, keeping every entry's sum order
-// fixed.
-fn update_columns<T: ComplexField>(
-	a: MatMut<'_, T, usize, usize, ContiguousFwd>,
+// The dependent panel columns retain the ordered rank-two SIMD recurrence.
+fn update_column<T: ComplexField>(
+	dst: ColMut<'_, T, usize, ContiguousFwd>,
 	factors: MatRef<'_, T, usize, usize, ContiguousFwd>,
-	col_start: usize,
-	row_start: usize,
+	column: usize,
+	first: usize,
 ) {
+	if dst.nrows() == 0 || factors.ncols() == 0 {
+		return;
+	}
 	struct Impl<'a, T: ComplexField> {
-		a: MatMut<'a, T, usize, usize, ContiguousFwd>,
+		dst: ColMut<'a, T, usize, ContiguousFwd>,
 		factors: MatRef<'a, T, usize, usize, ContiguousFwd>,
-		col_start: usize,
-		row_start: usize,
+		column: usize,
+		first: usize,
 	}
 	impl<T: ComplexField> pulp::WithSimd for Impl<'_, T> {
 		type Output = ();
@@ -412,91 +409,77 @@ fn update_columns<T: ComplexField>(
 		#[inline(always)]
 		fn with_simd<S: Simd>(self, simd: S) {
 			let Self {
-				mut a,
+				mut dst,
 				factors,
-				col_start,
-				row_start,
+				column,
+				first,
 			} = self;
-			for j in 0..a.ncols() {
-				let column = col_start + j;
-				let first = column + 1;
-				let len = factors.nrows() - first;
-				if len == 0 {
-					continue;
-				}
-				let mut dst =
-					a.rb_mut().col_mut(j).subrows_mut(first - row_start, len);
-				if const { T::SIMD_CAPABILITIES.is_simd() } {
-					with_dim!(N, len);
-					let mut dst = dst.as_row_shape_mut(N);
-					let ctx =
-						SimdCtx::<T, S>::new_force_mask(T::simd_ctx(simd), N);
-					let (head, body, rest, tail) = ctx.batch_indices::<4>();
-					// Four vectors hide the rank-two FMA dependency chain.
-					for indices in body {
-						let mut values = indices.map(|i| ctx.read(dst.rb(), i));
-						for k in (0..factors.ncols()).step_by(2) {
-							let x = factors
-								.col(k)
-								.subrows(first, len)
-								.as_row_shape(N);
-							let y = factors
-								.col(k + 1)
-								.subrows(first, len)
-								.as_row_shape(N);
-							let alpha = ctx.splat(&factors[(column, k + 1)]);
-							let beta = ctx.splat(&(-&factors[(column, k)]));
-							for b in 0..4 {
-								values[b] = ctx.mul_add(
-									ctx.read(x, indices[b]),
-									alpha,
-									values[b],
-								);
-								values[b] = ctx.mul_add(
-									ctx.read(y, indices[b]),
-									beta,
-									values[b],
-								);
-							}
-						}
+			let len = dst.nrows();
+			if const { T::SIMD_CAPABILITIES.is_simd() } {
+				with_dim!(N, len);
+				let mut dst = dst.as_row_shape_mut(N);
+				let ctx = SimdCtx::<T, S>::new_force_mask(T::simd_ctx(simd), N);
+				let (head, body, rest, tail) = ctx.batch_indices::<4>();
+				// Four vectors hide the rank-two FMA dependency chain.
+				for indices in body {
+					let mut values = indices.map(|i| ctx.read(dst.rb(), i));
+					for k in (0..factors.ncols()).step_by(2) {
+						let x =
+							factors.col(k).subrows(first, len).as_row_shape(N);
+						let y = factors
+							.col(k + 1)
+							.subrows(first, len)
+							.as_row_shape(N);
+						let alpha = ctx.splat(&factors[(column, k + 1)]);
+						let beta = ctx.splat(&(-&factors[(column, k)]));
 						for b in 0..4 {
-							ctx.write(dst.rb_mut(), indices[b], values[b]);
+							values[b] = ctx.mul_add(
+								ctx.read(x, indices[b]),
+								alpha,
+								values[b],
+							);
+							values[b] = ctx.mul_add(
+								ctx.read(y, indices[b]),
+								beta,
+								values[b],
+							);
 						}
 					}
-					simd_iter!(for i in [(head, rest, tail)] {
-						let mut value = ctx.read(dst.rb(), i);
-						for k in (0..factors.ncols()).step_by(2) {
-							let x = factors
-								.col(k)
-								.subrows(first, len)
-								.as_row_shape(N);
-							let y = factors
-								.col(k + 1)
-								.subrows(first, len)
-								.as_row_shape(N);
-							value = ctx.mul_add(
-								ctx.read(x, i),
-								ctx.splat(&factors[(column, k + 1)]),
-								value,
-							);
-							value = ctx.mul_add(
-								ctx.read(y, i),
-								ctx.splat(&(-&factors[(column, k)])),
-								value,
-							);
-						}
-						ctx.write(dst.rb_mut(), i, value);
-					});
-				} else {
-					for i in 0..len {
-						for k in (0..factors.ncols()).step_by(2) {
-							dst[i] = &dst[i]
-								+ &factors[(first + i, k)]
-									* &factors[(column, k + 1)];
-							dst[i] = &dst[i]
-								- &factors[(first + i, k + 1)]
-									* &factors[(column, k)];
-						}
+					for b in 0..4 {
+						ctx.write(dst.rb_mut(), indices[b], values[b]);
+					}
+				}
+				simd_iter!(for i in [(head, rest, tail)] {
+					let mut value = ctx.read(dst.rb(), i);
+					for k in (0..factors.ncols()).step_by(2) {
+						let x =
+							factors.col(k).subrows(first, len).as_row_shape(N);
+						let y = factors
+							.col(k + 1)
+							.subrows(first, len)
+							.as_row_shape(N);
+						value = ctx.mul_add(
+							ctx.read(x, i),
+							ctx.splat(&factors[(column, k + 1)]),
+							value,
+						);
+						value = ctx.mul_add(
+							ctx.read(y, i),
+							ctx.splat(&(-&factors[(column, k)])),
+							value,
+						);
+					}
+					ctx.write(dst.rb_mut(), i, value);
+				});
+			} else {
+				for i in 0..len {
+					for k in (0..factors.ncols()).step_by(2) {
+						dst[i] = &dst[i]
+							+ &factors[(first + i, k)]
+								* &factors[(column, k + 1)];
+						dst[i] = &dst[i]
+							- &factors[(first + i, k + 1)]
+								* &factors[(column, k)];
 					}
 				}
 			}
@@ -504,49 +487,135 @@ fn update_columns<T: ComplexField>(
 	}
 	dispatch!(
 		Impl {
-			a,
+			dst,
 			factors,
-			col_start,
-			row_start
+			column,
+			first
 		},
 		Impl,
 		T
 	)
 }
 
-fn update_trailing<T: ComplexField>(
+fn update_trailing<const INITIAL: bool, T: ComplexField>(
 	a: MatMut<'_, T, usize, usize, ContiguousFwd>,
 	factors: MatRef<'_, T, usize, usize, ContiguousFwd>,
-	origin: usize,
+	input: MatRef<'_, T>,
+	perm: &[usize],
+	tiles: MatMut<'_, T, usize, usize, ContiguousFwd>,
 	par: Par<'_>,
 ) {
-	let n = a.nrows();
-	let units = n.saturating_mul(n).saturating_mul(factors.ncols() / 2);
+	let m = perm.len();
+	let blocks = m.div_ceil(PANEL);
+	let units = m.saturating_mul(m).saturating_mul(factors.ncols() / 2);
 	let width = ParThreshold::Derived
 		.region_width::<T>(&par, units, rate::bunch_kaufman(), 1)
-		.min(n);
+		.min(blocks);
+	// SAFETY: the compact panel is fully initialized, and even/odd views each
+	// select half its columns without extending the underlying allocation.
+	let (x, y) = unsafe {
+		let stride = factors.col_stride();
+		(
+			MatRef::from_raw_parts(
+				factors.as_ptr(),
+				m,
+				factors.ncols() / 2,
+				1,
+				2 * stride,
+			),
+			MatRef::from_raw_parts(
+				factors.as_ptr().offset(stride),
+				m,
+				factors.ncols() / 2,
+				1,
+				2 * stride,
+			),
+		)
+	};
 	with_width(par, width, |par| {
 		let ptr = Ptr(a.as_ptr_mut());
-		let col_stride = a.col_stride();
+		let stride = a.col_stride();
+		let tile_ptr = Ptr(tiles.as_ptr_mut());
+		let tile_stride = tiles.col_stride();
 		let run = &|rank: usize, parts: usize| {
 			let ptr = ptr;
-			let j0 = lower_area_split(n - 1, n, rank, parts, 1);
-			let j1 = lower_area_split(n - 1, n, rank + 1, parts, 1);
-			// SAFETY: monotone column boundaries partition this contiguous-row
-			// matrix. Each joined team member owns distinct columns, disjoint
-			// from `factors`.
-			let block = unsafe {
-				MatMut::from_raw_parts_mut(
-					ptr.0.wrapping_offset(j0 as isize * col_stride),
-					n,
-					j1 - j0,
-					1,
-					col_stride,
-				)
+			let tile_ptr = tile_ptr;
+			// Reverse the decreasing column-area weights for increasing row
+			// work.
+			let first = blocks
+				- lower_area_split(blocks - 1, blocks, rank + 1, parts, 1);
+			let last =
+				blocks - lower_area_split(blocks - 1, blocks, rank, parts, 1);
+			for block in first..last {
+				let i0 = block * PANEL;
+				let rows = PANEL.min(m - i0);
+				for j0 in (0..=i0).step_by(PANEL) {
+					let cols = PANEL.min(m - j0);
+					// SAFETY: a fixed logical row block owns its private
+					// scratch tile and every unordered pair (i,j), i>j, it
+					// scatters. A bijective perm preserves disjoint pair+mirror
+					// ownership. Never lend a whole work view that overlaps
+					// another mirror.
+					unsafe {
+						let mut tile = MatMut::from_raw_parts_mut(
+							tile_ptr
+								.0
+								.offset((block * PANEL) as isize * tile_stride),
+							rows,
+							cols,
+							1,
+							tile_stride,
+						);
+						for j in 0..cols {
+							for i in 0..rows {
+								let (r, c) = (perm[i0 + i], perm[j0 + j]);
+								tile[(i, j)] = if i0 + i <= j0 + j {
+									zero()
+								} else if INITIAL {
+									if r > c {
+										input[(r, c)].copy()
+									} else {
+										-&input[(c, r)]
+									}
+								} else {
+									(&*ptr.0.offset(c as isize * stride).add(r))
+										.copy()
+								};
+							}
+						}
+						linalg::matmul::matmul(
+							tile.rb_mut(),
+							Accum::Add,
+							x.subrows(i0, rows),
+							y.subrows(j0, cols).transpose(),
+							one(),
+							Par::Seq,
+						);
+						linalg::matmul::matmul(
+							tile.rb_mut(),
+							Accum::Add,
+							y.subrows(i0, rows),
+							x.subrows(j0, cols).transpose(),
+							-one::<T>(),
+							Par::Seq,
+						);
+						for j in 0..cols {
+							for i in 0..rows {
+								let (r, c) = (perm[i0 + i], perm[j0 + j]);
+								if i0 + i > j0 + j {
+									*ptr.0.offset(c as isize * stride).add(r) =
+										tile[(i, j)].copy();
+									*ptr.0.offset(r as isize * stride).add(c) =
+										-&tile[(i, j)];
+								} else if i0 + i == j0 + j {
+									*ptr.0.offset(c as isize * stride).add(r) =
+										zero();
+								}
+							}
+						}
+					}
+				}
 			}
-			.try_as_col_major_mut()
-			.unwrap();
-			update_columns(block, factors, origin + j0, origin);
 		};
 		match par {
 			Par::Seq => run(0, 1),
@@ -605,67 +674,155 @@ fn utu2pfa<T: ComplexField>(pivots: ColMut<'_, T>) -> T {
 	dispatch!(Impl { pivots }, Impl, T)
 }
 
-#[cfg(all(test, feature = "threadteam"))]
+#[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::assert;
+	use faer_traits::{cx128, fx128};
 
-	fn check_swaps<T: ComplexField>(entry: impl Fn(f64, f64) -> T) {
-		let n = 128;
-		let original = Mat::from_fn(work_rows::<T>(n), n, |i, j| {
-			entry((i * 13 + j * 7 + 1) as f64, (i * 3 + j * 11 + 2) as f64)
-		});
-		for width in [1, 3, 8, 70] {
-			crate::team::with_team(width, |mut par| {
-				for (start, p, q) in
-					[(0, 1, 2), (32, 33, 127), (64, 95, 96), (96, 125, 127)]
-				{
-					let mut work = original.clone();
-					swap_lower(
-						work.as_mut()
-							.subrows_mut(0, n)
-							.try_as_col_major_mut()
-							.unwrap(),
-						start,
-						p,
-						q,
-						par.reborrow(),
-					);
-					let perm = |i| {
-						if i == p {
-							q
-						} else if i == q {
-							p
-						} else {
-							i
-						}
-					};
-					for j in 0..n {
-						for i in 0..work.nrows() {
-							let want = if i < n && i > j && j >= start {
-								let (pi, pj) = (perm(i), perm(j));
-								if pi > pj {
-									original[(pi, pj)].copy()
+	fn check_updates<T: ComplexField>(
+		entry: impl Fn(f64, f64) -> T,
+		tolerance: f64,
+	) {
+		for n in [6, 34, 36, 64, 66, 258] {
+			let input = Mat::from_fn(n, n, |i, j| {
+				if i > j {
+					entry(
+						(i * 13 + j * 7 + 1) as f64 / 1024.0,
+						(i * 3 + j * 11 + 2) as f64 / 2048.0,
+					)
+				} else {
+					entry(f64::NAN, f64::NAN)
+				}
+			});
+			let perm: Vec<_> = (0..n - 2).map(|i| (i * 5 + 1) % n).collect();
+			let m = perm.len();
+			let owned: Vec<_> = (0..n).map(|i| perm.contains(&i)).collect();
+			let factors = Mat::from_fn(m, PANEL, |i, j| {
+				entry(
+					(i * 7 + j * 11 + 1) as f64 / 1024.0,
+					(i * 3 + j * 5 + 2) as f64 / 2048.0,
+				)
+			});
+			let check = |mut par: Par<'_>| {
+				let mut work = Mat::from_fn(work_rows::<T>(n), n, |i, j| {
+					if i < n && owned[i] && owned[j] {
+						entry(f64::NAN, f64::NAN)
+					} else {
+						entry((i + 1) as f64 / 64.0, (j + 1) as f64 / 128.0)
+					}
+				});
+				let mut tiles = Mat::from_fn(
+					work_rows::<T>(PANEL),
+					m.div_ceil(PANEL) * PANEL,
+					|_, _| entry(f64::NAN, f64::NAN),
+				);
+				for initial in [true, false] {
+					let mut expected = work.clone();
+					for j in 0..m {
+						expected[(perm[j], perm[j])] = zero();
+						for i in j + 1..m {
+							let (r, c) = (perm[i], perm[j]);
+							let mut value = if initial {
+								if r > c {
+									input[(r, c)].copy()
 								} else {
-									-&original[(pj, pi)]
+									-&input[(c, r)]
 								}
 							} else {
-								original[(i, j)].copy()
+								work[(r, c)].copy()
 							};
-							assert_eq!(
-								work[(i, j)],
-								want,
-								"width={width}, start={start}, ({i},{j})"
-							);
+							for k in (0..PANEL).step_by(2) {
+								value = value
+									+ &factors[(i, k)] * &factors[(j, k + 1)];
+								value = value
+									- &factors[(i, k + 1)] * &factors[(j, k)];
+							}
+							expected[(r, c)] = value.copy();
+							expected[(c, r)] = -value;
+						}
+					}
+					let matrix = work
+						.as_mut()
+						.subrows_mut(0, n)
+						.try_as_col_major_mut()
+						.unwrap();
+					let f = factors.as_ref().try_as_col_major().unwrap();
+					let t = tiles.as_mut().try_as_col_major_mut().unwrap();
+					#[cfg(feature = "threadteam")]
+					let trace =
+						n == 258 && T::IS_NATIVE_F64 && par.degree() > 1;
+					#[cfg(feature = "threadteam")]
+					if trace {
+						crate::utils::team::stats::enable(true);
+						let _ = crate::utils::team::stats::take();
+					}
+					if initial {
+						update_trailing::<true, T>(
+							matrix,
+							f,
+							input.as_ref(),
+							&perm,
+							t,
+							par.reborrow(),
+						);
+					} else {
+						update_trailing::<false, T>(
+							matrix,
+							f,
+							input.as_ref(),
+							&perm,
+							t,
+							par.reborrow(),
+						);
+					}
+					#[cfg(feature = "threadteam")]
+					if trace {
+						let stats = crate::utils::team::stats::take();
+						crate::utils::team::stats::enable(false);
+						assert!(
+							stats.run.iter().skip(2).sum::<usize>() > 0,
+							"trailing row blocks were not parallel: {stats:?}"
+						);
+					}
+					for j in 0..n {
+						for i in 0..work.nrows() {
+							let got = &work[(i, j)];
+							let want = &expected[(i, j)];
+							if i < n && owned[i] && owned[j] {
+								assert!(want.is_finite());
+								assert!(got.is_finite());
+								assert!(
+									(got - want).abs()
+										<= from_f64::<T::Real>(tolerance)
+											* (one::<T::Real>() + want.abs()),
+									"n={n}, initial={initial}, ({i},{j})"
+								);
+							} else {
+								assert_eq!(
+									got, want,
+									"unowned/padding entry overwritten"
+								);
+							}
 						}
 					}
 				}
-			});
+			};
+			check(Par::Seq);
+			#[cfg(feature = "threadteam")]
+			for width in [3, 8, 70] {
+				crate::team::with_team(width, |par| check(par));
+			}
 		}
 	}
 
 	#[test]
-	fn swaps_match_dense_symmetric_permutation() {
-		check_swaps(|r, _| r);
-		check_swaps(c64::new);
+	fn mirrored_tiled_updates_match_dense_skew_oracle() {
+		check_updates(|r, _| r, 2e-12);
+		check_updates(|r, _| r as f32, 2e-5);
+		check_updates(c64::new, 2e-12);
+		check_updates(|r, i| c32::new(r as f32, i as f32), 2e-5);
+		check_updates(|r, _| from_f64::<fx128>(r), 1e-25);
+		check_updates(|r, i| cx128::new(from_f64(r), from_f64(i)), 1e-25);
 	}
 }

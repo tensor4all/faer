@@ -60,8 +60,8 @@ gate has changed and two kinds of adoption are now in the ledger.
 
 | Experiment | What | Status | Issues | Notes |
 | --- | --- | --- | --- | --- |
-| Single-matrix Pfaffian | Independent partial, pivoted Parlett–Reid reduction; pulp SIMD pivot search, rank-two updates and product recurrence; caller-held Team column blocks and explicit scratch. | EXPERIMENT | tensor4all/faer#171 | Correctness tests and an unpaired diagnostic, not performance adoption: ten focused tests pass with default and x86-v4 builds (both actually V3/AVX2 here); native/extended oracles, error/layout/scratch contracts, exact Seq/Team agreement, actual dispatch and zero-allocation complete held-team calls. Three doctests, no-std/std-only builds and the inherited library suite (588 passed, 138 ignored) pass. Broccoli comparison at 96c32ab: 84/90 guard-accepted cells, six missing; Seq/Fortran <=1.05 and Team8 >=4x best1T gates not met. No upstream control, Team32 performance or AVX-512 execution claim; hardware follow-up #173. [Decisions and limits](docs/worklogs/2026-10-31-pfaffian.md). |
-| Pfaffian permutation/setup follow-up | Delete consumed-panel prefix swaps; independently partition live swap segments on the caller Team with LU's existing cost gate; pad work stride and fuse parallel lower copy/finite validation. | EXPERIMENT | tensor4all/faer#176 | Partial performance targets, not adoption: f64 n1024 Seq 37.3221 ms / Team8 10.0514 ms, Seq/Fortran 0.353, best1T/Team8 3.713 (<4); n64/f64 still misses. Three-session ungated diagnostics retain all samples, including foreign-build overlap. Focused/no-allocation tests pass; API and numerical kernels unchanged. [Decision, full tables and limits](docs/worklogs/2026-10-31-pfaffian-176.md). |
+| Single-matrix Pfaffian | Independent partial, pivoted Parlett–Reid reduction; SIMD panel updates and product recurrence; logical pivots, shared GEMM panels, caller-held Team row blocks and explicit scratch. | EXPERIMENT | tensor4all/faer#171 | Original-experiment evidence (96c32ab), not current performance adoption: ten focused tests pass with default and x86-v4 builds (both actually V3/AVX2 here); native/extended oracles, error/layout/scratch contracts, exact Seq/Team agreement, actual dispatch and zero-allocation complete held-team calls. Three doctests, no-std/std-only builds and the inherited library suite (588 passed, 138 ignored) pass. Broccoli comparison at 96c32ab: 84/90 guard-accepted cells, six missing; Seq/Fortran <=1.05 and Team8 >=4x best1T gates not met. No upstream control, Team32 performance or AVX-512 execution claim; hardware follow-up #173. [Decisions and limits](docs/worklogs/2026-10-31-pfaffian.md). |
+| Pfaffian byte-traffic follow-up | Remove physical swaps and standalone input copy; compact a shared panel once, apply two GEMMs per private row-block tile, and fuse both skew stores. | EXPERIMENT — acceptance pending | tensor4all/faer#176 | b=32 provisional (existing width, not a measured winner); b=16/32 each pass 48 numerical cases, 12 public tests (including the inherited nonfinite-pivot regression), private native/extended tile oracles and complete-call zero-allocation tests. Scoped independent post-reviews completed; verified findings corrected. Matrix-interface estimate 12/b=.75/.375 bytes/flop excludes panel/cache traffic; evo width scan, timings, profile and unchanged acceptance gates remain unverified. Default lib 589 pass/138 ignored; inherited std-only/clippy failures reproduce on base. No PR/adoption claim. [Current decisions](docs/worklogs/2026-10-31-pfaffian-byte-traffic.md); [superseded #177 diagnostics](docs/worklogs/2026-10-31-pfaffian-176.md). |
 | Triangular solves with subnormal pivots | Use residual-first substitution in non-unit leaves containing a nonzero subnormal pivot; divide real residuals directly and scale complex quotients when the reciprocal is non-finite. Reuse the existing reciprocal for other complex pivots. | EXPERIMENT | tensor4all/faer#74 | All four native scalar types, upper/lower, conjugation, two RHS layouts and coupled tiny/large-pivot systems return the exact known solution; all 11,472 LAPACK triangular calls pass. Normal unrolled arithmetic and unit-diagonal kernels retained; the new per-leaf pivot check is not timed. [Decisions and verification limits](docs/worklogs/2026-10-28-subnormal-triangular-solves.md). Upstream report: [`upstream-reports/faer-014-trsv-subnormal-pivot`](upstream-reports/faer-014-trsv-subnormal-pivot/). |
 | Direct two-by-two exit in bidiagonal SVD QR | Symmetrize and diagonalize each remaining two-by-two block with existing rotations; recover the smaller signed value from the determinant and accumulate both vector factors. Deflation tolerances, iteration budget and scratch query unchanged. | EXPERIMENT | tensor4all/faer#81 | Reduced near-repeated-pair reproducer fails before and passes after; 225 focused sequential calls cover f32/f64 and c32/c64, signs, scaling, output choices and small-value accuracy. The original complex fixture passes on this host before and after, so it is coverage rather than the local failure proof. [Decisions, evidence and limitations](docs/worklogs/2026-10-28-svd-qr-two-by-two.md). Upstream report: [`upstream-reports/faer-026-svd-qr-two-by-two-no-convergence`](upstream-reports/faer-026-svd-qr-two-by-two-no-convergence/). |
 | Divide-and-conquer SVD scratch sizing | Size deflation, secular-merge temporaries and output updates by their live allocation phases, and reserve both recursive halves for the largest child's unaligned requirement. No arithmetic, threshold or schedule change. | EXPERIMENT | tensor4all/faer#73 | Exact-query rank-one regression for all four native scalar types; 4,800 sequential boundary/output-mode calls pass. Ordinary internal tests also cover aligned/odd-address stacks and rayon output updates. The 18,172-call LAPACK SVD suite has no call failures; the separate #75 orthogonality diagnostics remain. Verification and adoption limits: [worklog](docs/worklogs/2026-10-28-svd-scratch-sizing.md). Upstream report: [`upstream-reports/faer-022-svd-scratch-too-small`](upstream-reports/faer-022-svd-scratch-too-small/). |
@@ -298,3 +298,43 @@ merge commit of the version-bump PR, tagged `faer-v0.27.1`. A patch release: `ca
 against 0.27.0 reports no public API change. It carries the QR look-ahead (#160, #165) and the real
 Schur reordering fixes (#167); `CHANGELOG.md` lists them and the evidence lives in their ledger rows
 above. #161 to #164 change only CI, tests and documentation. This release adds no code.
+
+## Pfaffian #176: scoped independent review dispositions (2026-11-01)
+
+Three separate, sequential, read-only gpt-6.1-sol reviews completed with a
+10-tool-call budget each. Reviewed implementation SHA256:
+`d87ca91be08d33e0e291cea4dfe75f1bcecf7eb9ad64e93685cc13dfb7ec9fcf`.
+The earlier 30-call interrupted review remains incomplete; these are bounded
+source reviews, not an unrestricted clean-review verdict.
+
+- **R1 — COMPLETE; adopt the scoped conclusion and its limits.** No corrective
+  finding: initialized panel columns, logical pivot target/parity, boundaries,
+  signed-zero rejection and singular/nonfinite errors agree with the contract
+  (`faer/src/linalg/pfaffian/mod.rs:146–158,215–258,294–298,337–387`). No code
+  remedy is adopted because no concrete defect was established. Later-panel
+  reads rely on the surviving-pair initialization contract; external helpers
+  and runtime behavior were not checked. Exact-zero rejection is not a claim
+  of near-singularity detection.
+- **R2 — COMPLETE; adopt the scoped conclusion and its limits.** No corrective
+  finding: bijective logical permutation, separate row-block scratch, immutable
+  compact factors, and unique unordered-pair/mirror ownership support the
+  in-place split (`faer/src/linalg/pfaffian/mod.rs:215–239,260–271,508–628`).
+  No code remedy is adopted because no conflicting access was established.
+  The verdict assumes the external split and Team join-on-return-and-unwind
+  contracts, which were not inspected. Input remains immutable; private
+  scratch can be partially updated on panic, with no rollback promise.
+- **R3 — COMPLETE; adopt the scoped conclusion and its qualification.** No
+  implementation/ledger mismatch found in the Pfaffian rows (`PATCHSET.md:63–64`;
+  `faer/src/linalg/pfaffian/mod.rs:108,219–273,552–626`). No corrective rewrite
+  is adopted because the mechanisms and pending-adoption status match. The
+  `12/b` figure is an f64 full-tile matrix-interface estimate, not a universal
+  dtype formula or measured cache/DRAM traffic. Test/build counts, allocation,
+  provenance, performance and review-history claims were not independently
+  verified by this source comparison.
+
+**Separate numerical evidence:** the existing 48/48 checks are not results of
+these reviews and were not rerun today. No builds, tests or benchmarks were
+run for this review round. The provisional width and unchanged performance
+acceptance gates remain pending official evo measurement; evo was not accessed.
+Only this ledger addendum changes in this round: no implementation changes,
+commit, push, PR or merge.
