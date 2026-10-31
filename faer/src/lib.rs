@@ -1052,6 +1052,20 @@ impl Conj {
 /// let par = faer::Par::Seq;
 /// faer::utils::thread::join_raw(|_| phase(par), |_| phase(par), faer::Par::Seq);
 /// ```
+///
+/// A nested child cannot also take its borrowed parent:
+///
+/// ```compile_fail,E0505
+/// use faer::Par;
+///
+/// fn nested_work(_child: Par<'_>, _parent: Par<'_>) {}
+///
+/// fn main() {
+///     let mut parent = Par::Seq;
+///     let child = parent.reborrow();
+///     nested_work(child, parent);
+/// }
+/// ```
 #[derive(Debug)]
 pub enum Par<'team> {
 	/// sequential, non portable across different platforms
