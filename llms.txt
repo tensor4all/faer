@@ -1,0 +1,20 @@
+# t4a-faer
+
+> Dense and sparse linear algebra in Rust with caller owned thread teams for scientific and HPC applications.
+
+The tensor4all fork of faer provides the `t4a-faer` library (`faer`) and its scalar traits in
+`t4a-faer-traits` (`faer_traits`). The workspace also contains `faer-macros`.
+
+## Key documentation
+
+- [README](README.md): scope, API status, parallel execution, and upstream provenance.
+- [API reference](https://docs.rs/t4a-faer): public types, operations, and feature flags.
+- [Parallel API migration](docs/par-team-migration.md): changes to `Par` and explicit team ownership.
+- [Benchmarks](https://tensor4all.org/faer-benchmark/): published measurements and their conditions.
+- [PATCHSET](PATCHSET.md): differences from upstream and the status and evidence for each change.
+- [Adoption protocol](docs/adoption-protocol.md): verification and performance acceptance requirements for changes.
+
+## Repository
+
+- GitHub: https://github.com/tensor4all/faer
+- Language: Rust (edition 2021), workspace at the repository root.

@@ -1,24 +1,18 @@
-> **The linear algebra foundation of the tensor4all stack.**
->
-> `t4a-faer` is a tensor4all fork of [faer](https://codeberg.org/sarah-quinones/faer). The crates are
-> published on [crates.io](https://crates.io/crates/t4a-faer) and `tenferro` and the other tensor4all
-> libraries depend on them. The crate body stays `MIT`, keeping the upstream copyright and
-> attribution, and code ported from other projects keeps its own `COPYING` terms (see
-> [`NOTICE`](NOTICE)).
->
-> ### What differs from upstream
->
-> - **Parallelism runs on `threadteam`.** Every parallel region runs on a `Par::Team` token that the
->   caller owns, and `faer::team::with_team(width, |par| ..)` is the helper for a scoped call.
->   `Par::Rayon` and the spindle route are gone.
-> - **Correctness fixes** that upstream has not taken yet, each with its own worklog.
-> - **A nightly LAPACK numerical validation**, whose known failures are listed with the issue that
->   tracks them.
-> - **MSRV 1.89**, and the AVX-512 kernels (`x86-v4`) are an opt-in feature.
->
-> Every change is recorded in [`PATCHSET.md`](PATCHSET.md), one row per experiment, and defects that
-> also reproduce on the published upstream crates are written up in
-> [`upstream-reports/`](upstream-reports/). Published versions follow semver.
+# t4a-faer
+
+`t4a-faer` provides dense and sparse linear algebra in Rust for scientific and HPC applications.
+`tenferro` and other tensor4all libraries use it. It is not API compatible with upstream faer.
+
+The caller owns the `threadteam` team and passes `Par::Team` for parallel work, or `Par::Seq` for sequential work.
+faer does not use an implicit global thread pool. See the [migration guide](docs/par-team-migration.md).
+
+[Benchmarks](https://tensor4all.org/faer-benchmark/): published measurements and their conditions live here.
+**Status:** Published versions follow semver; APIs can change in incompatible releases.
+
+This is a tensor4all fork of [faer](https://codeberg.org/sarah-quinones/faer).
+The [GitHub repository](https://github.com/sarah-quinones/faer-rs) is a mirror of upstream.
+The crate body stays `MIT`, keeping the upstream copyright and attribution, and code ported from
+other projects keeps its own `COPYING` terms (see [`NOTICE`](NOTICE)).
 
 # Community
 
