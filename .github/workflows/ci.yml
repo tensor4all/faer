@@ -15,11 +15,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # The designated lightweight gate: build both crates and test the light
-      # one. The inherited upstream workflows (`run-tests.yml`,
-      # `code-quality.yml`) also run on these events with the heavier upstream
-      # suite.
+      # Build the crates, test the traits and migration guides, and check package layout.
+      # The inherited upstream workflows (`run-tests.yml`, `code-quality.yml`)
+      # also run on these events with the heavier upstream suite.
       - run: cargo build -p t4a-faer-traits -p t4a-faer
       - run: cargo build -p t4a-faer --no-default-features --features std
       - run: cargo test -p t4a-faer-traits
+      - run: python3 scripts/check-migration-examples.py
+      - run: cargo build --examples -j8
+      - run: |
+          for example in migration_overview migration_cpp migration_fortran migration_julia; do
+            cargo run -p t4a-faer --example "$example" -j8
+          done
+      - run: cargo test --doc --workspace -j8 -- --test-threads=4
       - run: cargo package -p t4a-faer-traits -p t4a-faer --no-verify --list

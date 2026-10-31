@@ -9,7 +9,11 @@ The tensor4all fork of faer provides the `t4a-faer` library (`faer`) and its sca
 
 - [README](README.md): scope, API status, parallel execution, and upstream provenance.
 - [API reference](https://docs.rs/t4a-faer): public types, operations, and feature flags.
-- [Parallel API migration](docs/par-team-migration.md): changes to `Par` and explicit team ownership.
+- [Migration overview](docs/migration/README.md): dependency setup, caller owned parallel regions, nested team rules, and a checked example.
+- [C++ migration](docs/migration/cpp.md): Eigen and BLAS constructs mapped to matrix views, factors, and products.
+- [Fortran migration](docs/migration/fortran.md): LAPACK and BLAS calls, leading dimensions, permutations, and scratch memory.
+- [Julia migration](docs/migration/julia.md): LinearAlgebra.jl factorizations, vector products, and ownership differences.
+- [Parallel API history](docs/par-team-migration.md): changes to `Par` and explicit team ownership.
 - [Benchmarks](https://tensor4all.org/faer-benchmark/): published measurements and their conditions.
 - [PATCHSET](PATCHSET.md): differences from upstream and the status and evidence for each change.
 - [Adoption protocol](docs/adoption-protocol.md): verification and performance acceptance requirements for changes.

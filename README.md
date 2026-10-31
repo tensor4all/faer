@@ -9,6 +9,8 @@ faer does not use an implicit global thread pool. See the [migration guide](docs
 [Benchmarks](https://tensor4all.org/faer-benchmark/): published measurements and their conditions live here.
 **Status:** Published versions follow semver; APIs can change in incompatible releases.
 
+See the [migration guides](docs/migration/README.md) for Eigen, BLAS, LAPACK, and Julia users.
+
 This is a tensor4all fork of [faer](https://codeberg.org/sarah-quinones/faer).
 The [GitHub repository](https://github.com/sarah-quinones/faer-rs) is a mirror of upstream.
 The crate body stays `MIT`, keeping the upstream copyright and attribution, and code ported from
@@ -59,9 +61,9 @@ faer::team::with_team(8, |par| {
 A caller that already owns a team lends a sub-team to each call with `par.reborrow()`; a width of one
 is `Par::Seq`.
 
-`with_team` is for a one-off call: every call builds a new pool, so it spawns its worker threads and
-joins them again when the closure ends. Code that runs parallel work repeatedly should own the
-`threadteam` `Pool` and `Team` itself, build them once, and lend a `Par` from the team to each call:
+Each `with_team` call acquires a pool and team for its closure. Threadteam can reuse cached workers
+across calls rather than spawning and joining them each time. Code that runs parallel work repeatedly
+should own the `threadteam` `Pool` and `Team` itself and lend a `Par` from the team to each call:
 
 ```rust
 // once: 8 participants, the calling thread and 7 reserved workers
