@@ -333,7 +333,39 @@ fn update_columns<T: ComplexField>(
 					let mut dst = dst.as_row_shape_mut(N);
 					let ctx =
 						SimdCtx::<T, S>::new_force_mask(T::simd_ctx(simd), N);
-					simd_iter!(for i in [ctx.indices()] {
+					let (head, body, rest, tail) = ctx.batch_indices::<4>();
+					// Four vectors hide the rank-two FMA dependency chain.
+					for indices in body {
+						let mut values = indices.map(|i| ctx.read(dst.rb(), i));
+						for k in (0..factors.ncols()).step_by(2) {
+							let x = factors
+								.col(k)
+								.subrows(first, len)
+								.as_row_shape(N);
+							let y = factors
+								.col(k + 1)
+								.subrows(first, len)
+								.as_row_shape(N);
+							let alpha = ctx.splat(&factors[(column, k + 1)]);
+							let beta = ctx.splat(&(-&factors[(column, k)]));
+							for b in 0..4 {
+								values[b] = ctx.mul_add(
+									ctx.read(x, indices[b]),
+									alpha,
+									values[b],
+								);
+								values[b] = ctx.mul_add(
+									ctx.read(y, indices[b]),
+									beta,
+									values[b],
+								);
+							}
+						}
+						for b in 0..4 {
+							ctx.write(dst.rb_mut(), indices[b], values[b]);
+						}
+					}
+					simd_iter!(for i in [(head, rest, tail)] {
 						let mut value = ctx.read(dst.rb(), i);
 						for k in (0..factors.ncols()).step_by(2) {
 							let x = factors
