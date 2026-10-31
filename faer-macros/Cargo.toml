@@ -4,11 +4,13 @@ version = "0.22.1"
 edition = "2021"
 rust-version = "1.89.0"
 authors = ["sarah quiñones <sarah@veganb.tw>"]
-description = "linear algebra library"
+description = "Procedural macros for scalar arithmetic and API migration in faer's HPC linear algebra routines."
+documentation = "https://docs.rs/faer-macros"
 readme = "../README.md"
 repository = "https://codeberg.org/sarah-quinones/faer"
 license = "MIT"
-keywords = ["math", "linear-algebra"]
+keywords = ["linear-algebra", "math", "macros"]
+categories = ["mathematics"]
 
 [lib]
 proc-macro = true

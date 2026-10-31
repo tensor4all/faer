@@ -4,11 +4,13 @@ version = "0.24.2"
 edition = "2021"
 rust-version = "1.89.0"
 authors = ["sarah quiñones <sarah@veganb.tw>"]
-description = "Temporary tensor4all fork of faer-traits."
+description = "Scalar and SIMD traits for HPC linear algebra in the tensor4all faer fork."
+documentation = "https://docs.rs/t4a-faer-traits"
 readme = "../README.md"
 repository = "https://github.com/tensor4all/faer"
 license = "MIT"
-keywords = ["math", "linear-algebra"]
+keywords = ["linear-algebra", "matrix", "simd", "hpc", "tensor"]
+categories = ["mathematics", "science"]
 
 [lib]
 name = "faer_traits"
