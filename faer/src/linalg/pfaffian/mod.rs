@@ -11,8 +11,9 @@
 //! PfaPack or mvmc source code was used.
 //!
 //! The panel and pivot decisions are ordered. Completed panels update disjoint
-//! trailing column blocks on the caller's team; sequential execution uses the
-//! same update kernel. Transposes here are **not conjugate transposes**.
+//! trailing column blocks on the caller's team. Copies and symmetric swaps also
+//! use that team; sequential execution degenerates to the same kernels.
+//! Transposes here are **not conjugate transposes**.
 
 use crate::internal_prelude::*;
 use crate::utils::cost::{ParThreshold, rate};
@@ -73,8 +74,18 @@ impl core::error::Error for PfaffianError {}
 /// assert!(!memory.is_empty());
 /// ```
 pub fn pfaffian_scratch<T: ComplexField>(dim: usize) -> StackReq {
-	linalg::temp_mat_scratch::<T>(dim, dim)
+	linalg::temp_mat_scratch::<T>(work_rows::<T>(dim), dim)
 		.and(linalg::temp_mat_scratch::<T>(dim / 2, 1))
+}
+
+// Like SVD's work matrix, avoid cache-set aliasing in strided row accesses.
+fn work_rows<T>(n: usize) -> usize {
+	let size = core::mem::size_of::<T>();
+	if size > 0 && (n * size) % 1024 == 0 {
+		n + 64usize.div_ceil(size)
+	} else {
+		n
+	}
 }
 
 // Every other elimination is sufficient for the Pfaffian (Wimmer §II.B).
@@ -126,19 +137,16 @@ pub fn pfaffian<T: ComplexField>(
 	if n == 0 {
 		return Ok(one());
 	}
-	for j in 0..n {
-		for i in j + 1..n {
-			if !a[(i, j)].is_finite() {
-				return Err(PfaffianError::NumericalFailure);
-			}
-		}
+	// SAFETY: copy_input initializes all logical rows, including stride
+	// padding, before any entry is read or a nonfinite-input error is returned.
+	let (mut work, stack) = unsafe {
+		linalg::temp_mat_uninit::<T, _, _>(work_rows::<T>(n), n, stack)
+	};
+	let mut work = work.as_mat_mut().try_as_col_major_mut().unwrap();
+	if !copy_input(work.rb_mut(), a, par.reborrow()) {
+		return Err(PfaffianError::NumericalFailure);
 	}
-	// SAFETY: the input copy initializes every matrix entry before it is read.
-	let (mut work, stack) =
-		unsafe { linalg::temp_mat_uninit::<T, _, _>(n, n, stack) };
-	let mut work = work.as_mat_mut();
-	work.copy_from(a);
-	let mut work = work.try_as_col_major_mut().unwrap();
+	let mut work = work.subrows_mut(0, n);
 	// SAFETY: each pivot entry is written before utu2pfa reads the column.
 	let (mut pivots, _) =
 		unsafe { linalg::temp_mat_uninit::<T, _, _>(n / 2, 1, stack) };
@@ -151,7 +159,16 @@ pub fn pfaffian<T: ComplexField>(
 			let pivot =
 				k + 1 + pivot_index(work.rb().col(k).subrows(k + 1, n - k - 1));
 			if pivot != k + 1 {
-				swap_lower(work.rb_mut(), k + 1, pivot);
+				// As in LU, a cheap swap must earn back its one dispatch.
+				let width = ParThreshold::Derived.region_width::<T>(
+					&par,
+					n - start - 2,
+					rate::lu_swap(),
+					1,
+				);
+				with_width(par.reborrow(), width, |par| {
+					swap_lower(work.rb_mut(), start, k + 1, pivot, par);
+				});
 				odd_permutation = !odd_permutation;
 			}
 			let d = work[(k + 1, k)].copy();
@@ -178,31 +195,112 @@ pub fn pfaffian<T: ComplexField>(
 	if !value.is_finite() || value == zero() {
 		return Err(PfaffianError::NumericalFailure);
 	}
-	Ok(if odd_permutation { -value } else { value })
+	let value = if odd_permutation { -value } else { value };
+	Ok(value)
 }
 
-// A symmetric permutation, including rows of already stored multipliers.
+fn copy_input<T: ComplexField>(
+	work: MatMut<'_, T, usize, usize, ContiguousFwd>,
+	a: MatRef<'_, T>,
+	par: Par<'_>,
+) -> bool {
+	use core::sync::atomic::{AtomicBool, Ordering};
+	let invalid = AtomicBool::new(false);
+	let n = a.nrows();
+	let rows = work.nrows();
+	let stride = work.col_stride();
+	let ptr = Ptr(work.as_ptr_mut());
+	let width = par.degree().min(n);
+	with_width(par, width, |par| {
+		let run = &|rank: usize, parts: usize| {
+			let ptr = ptr;
+			let mut valid = true;
+			// SAFETY: ranks own disjoint complete columns, including extra
+			// rows. temp_mat_uninit initializes drop-requiring T; ordinary T
+			// needs no drop.
+			unsafe {
+				for j in n * rank / parts..n * (rank + 1) / parts {
+					let col = ptr.0.offset(j as isize * stride);
+					for i in 0..=j {
+						*col.add(i) = zero();
+					}
+					for i in j + 1..n {
+						let value = a[(i, j)].copy();
+						valid &= value.is_finite();
+						*col.add(i) = value;
+					}
+					for i in n..rows {
+						*col.add(i) = zero();
+					}
+				}
+			}
+			if !valid {
+				invalid.store(true, Ordering::Relaxed);
+			}
+		};
+		match par {
+			Par::Seq => run(0, 1),
+			#[cfg(feature = "threadteam")]
+			Par::Team(team) => crate::utils::team::run(team, width, run),
+			#[cfg(not(feature = "threadteam"))]
+			Par::__Lifetime(x, _) => match x {},
+		}
+	});
+	!invalid.load(Ordering::Relaxed)
+}
+
+// Completed panels have been consumed; only the current panel's multipliers
+// and the remaining lower triangle need the symmetric permutation.
 fn swap_lower<T: ComplexField>(
 	mut a: MatMut<'_, T, usize, usize, ContiguousFwd>,
+	start: usize,
 	p: usize,
 	q: usize,
+	par: Par<'_>,
 ) {
-	for j in 0..p {
-		let x = a[(p, j)].copy();
-		a[(p, j)] = a[(q, j)].copy();
-		a[(q, j)] = x;
-	}
-	for j in p + 1..q {
-		let x = a[(j, p)].copy();
-		a[(j, p)] = -&a[(q, j)];
-		a[(q, j)] = -x;
-	}
+	let n = a.nrows();
+	core::debug_assert!(start <= p && p < q && q < n);
+	let width = par.degree().min(n - start - 1);
+	let stride = a.col_stride();
+	let ptr = Ptr(a.as_ptr_mut());
+	with_width(par, width, |par| {
+		let run = &|rank: usize, parts: usize| {
+			let ptr = ptr;
+			let at = |i: usize, j: usize| {
+				ptr.0.wrapping_offset(i as isize + j as isize * stride)
+			};
+			let range = |lo, hi| {
+				lo + (hi - lo) * rank / parts
+					..lo + (hi - lo) * (rank + 1) / parts
+			};
+			// SAFETY: split each segment independently to balance strided work.
+			// Prefix (p,j)/(q,j), middle (j,p)/(q,j), tail (i,p)/(i,q)
+			// pairs are disjoint across segments and ranks; none is the corner
+			// (q,p). Only element references are formed, never overlapping
+			// matrix views.
+			unsafe {
+				for j in range(start, p) {
+					core::ptr::swap(at(p, j), at(q, j));
+				}
+				for j in range(p + 1, q) {
+					let x = (&*at(j, p)).copy();
+					*at(j, p) = -&*at(q, j);
+					*at(q, j) = -x;
+				}
+				for i in range(q + 1, n) {
+					core::ptr::swap(at(i, p), at(i, q));
+				}
+			}
+		};
+		match par {
+			Par::Seq => run(0, 1),
+			#[cfg(feature = "threadteam")]
+			Par::Team(team) => crate::utils::team::run(team, width, run),
+			#[cfg(not(feature = "threadteam"))]
+			Par::__Lifetime(x, _) => match x {},
+		}
+	});
 	a[(q, p)] = -&a[(q, p)];
-	for i in q + 1..a.nrows() {
-		let x = a[(i, p)].copy();
-		a[(i, p)] = a[(i, q)].copy();
-		a[(i, q)] = x;
-	}
 }
 
 fn pivot_index<T: ComplexField>(
@@ -505,4 +603,69 @@ fn utu2pfa<T: ComplexField>(pivots: ColMut<'_, T>) -> T {
 		}
 	}
 	dispatch!(Impl { pivots }, Impl, T)
+}
+
+#[cfg(all(test, feature = "threadteam"))]
+mod tests {
+	use super::*;
+
+	fn check_swaps<T: ComplexField>(entry: impl Fn(f64, f64) -> T) {
+		let n = 128;
+		let original = Mat::from_fn(work_rows::<T>(n), n, |i, j| {
+			entry((i * 13 + j * 7 + 1) as f64, (i * 3 + j * 11 + 2) as f64)
+		});
+		for width in [1, 3, 8, 70] {
+			crate::team::with_team(width, |mut par| {
+				for (start, p, q) in
+					[(0, 1, 2), (32, 33, 127), (64, 95, 96), (96, 125, 127)]
+				{
+					let mut work = original.clone();
+					swap_lower(
+						work.as_mut()
+							.subrows_mut(0, n)
+							.try_as_col_major_mut()
+							.unwrap(),
+						start,
+						p,
+						q,
+						par.reborrow(),
+					);
+					let perm = |i| {
+						if i == p {
+							q
+						} else if i == q {
+							p
+						} else {
+							i
+						}
+					};
+					for j in 0..n {
+						for i in 0..work.nrows() {
+							let want = if i < n && i > j && j >= start {
+								let (pi, pj) = (perm(i), perm(j));
+								if pi > pj {
+									original[(pi, pj)].copy()
+								} else {
+									-&original[(pj, pi)]
+								}
+							} else {
+								original[(i, j)].copy()
+							};
+							assert_eq!(
+								work[(i, j)],
+								want,
+								"width={width}, start={start}, ({i},{j})"
+							);
+						}
+					}
+				}
+			});
+		}
+	}
+
+	#[test]
+	fn swaps_match_dense_symmetric_permutation() {
+		check_swaps(|r, _| r);
+		check_swaps(c64::new);
+	}
 }
