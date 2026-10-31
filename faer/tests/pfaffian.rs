@@ -204,7 +204,7 @@ fn known_congruence(n: usize, complex: bool) -> (Mat<c64>, c64) {
 
 #[test]
 fn known_pfaffian_across_panel_and_simd_tail_boundaries() {
-	for n in [6, 30, 32, 34, 62, 64, 66] {
+	for n in [6, 30, 32, 34, 62, 64, 66, 128, 130] {
 		for complex in [false, true] {
 			let (a, expected) = known_congruence(n, complex);
 			close(compute(a.as_ref(), Par::Seq).unwrap(), expected, 2e-11);
@@ -329,6 +329,27 @@ fn generic_extended_precision_real_and_complex() {
 		recursive(a.as_ref(), &(0..8).collect::<Vec<_>>()),
 		1e-28,
 	);
+}
+
+#[cfg(feature = "threadteam")]
+#[test]
+fn team_copy_checks_nonleading_columns() {
+	let (mut a, expected) = known_congruence(128, true);
+	faer::team::with_team(8, |mut par| {
+		close(
+			compute(a.as_ref(), par.reborrow()).unwrap(),
+			expected,
+			2e-11,
+		);
+		// The last worker's lower triangle must be validated even when the
+		// first column would otherwise give an immediate zero pivot.
+		a.fill(c64::new(0.0, 0.0));
+		a[(127, 126)] = c64::new(0.0, f64::NAN);
+		assert_eq!(
+			compute(a.as_ref(), par),
+			Err(PfaffianError::NumericalFailure)
+		);
+	});
 }
 
 #[cfg(feature = "threadteam")]
