@@ -53,6 +53,45 @@ def require(ok, message):
         raise RuntimeError(message)
 
 
+def perf_preflight(out):
+    with (out / 'perf-preflight.log').open('w') as log:
+        if shutil.which('perf') is None:
+            log.write('perf executable not found\n')
+            available = False
+        else:
+            available = subprocess.run(['perf', 'stat', '-e', 'cycles', '--', 'true'], stdout=log, stderr=subprocess.STDOUT).returncode == 0
+    if not available:
+        try:
+            paranoid = Path('/proc/sys/kernel/perf_event_paranoid').read_text().strip()
+        except OSError:
+            paranoid = 'unknown'
+        status = f'perf unavailable (perf_event_paranoid={paranoid})'
+        print(status, flush=True)
+        require(os.environ.get('T4A_ALLOW_NO_PERF') == '1', status + '; see perf-preflight.log')
+        return status
+    return 'perf available'
+
+
+def finish(out, perf_status, guard, bins, env):
+    # Sampling runs are separate from timings. Never treat cache misses as DRAM bytes.
+    if perf_status == 'perf available':
+        matrix = out / 'matrices/n1024-f64.bin'
+        for arm in ('base', 'b16', 'b32'):
+            tag = 'profile-' + arm
+            with (out / (tag + '.stderr')).open('w') as err:
+                run = subprocess.run(['bash', str(guard), '4-11', '--', 'perf', 'record', '-g', '-o', str(out / (tag + '.data')), '--', str(bins[arm]), str(matrix), '1024', 'f64', '8'], env=env, text=True, stdout=subprocess.PIPE, stderr=err)
+            (out / (tag + '.stdout')).write_text(run.stdout)
+            require(run.returncode == 0, f'{tag} failed or guard rejected; no profile-based conclusion')
+            with (out / (tag + '.txt')).open('w') as report:
+                command(['perf', 'report', '--stdio', '--no-children', '-i', out / (tag + '.data')], env=env, stdout=report, stderr=subprocess.STDOUT)
+    profile = 'See profile-*.txt; inspect for permutation work.' if perf_status == 'perf available' else 'not measured'
+    (out / 'REPORT.md').write_text(f'# Pfaffian #176 evidence\n\nSee summary.csv, samples.csv, manifest.json and correctness.json. Timing rows report threshold comparisons, not an adoption decision. The n64/n1024 Seq-versus-base ratios are regression guards requiring review.\n\n## Profile\n{profile}\n\n## Bandwidth\nnot measured\n')
+    print('See', out / 'summary.csv', flush=True)
+    if perf_status == 'perf available':
+        raise RuntimeError('timing and profiles complete, but measured DRAM bandwidth and manual acceptance review remain outstanding')
+    print('Wall-clock timing complete; profile and bandwidth not measured; manual acceptance review remains outstanding.', flush=True)
+
+
 def main():
     require(len(sys.argv) == 2, 'usage: run_acceptance.sh NEW_OUTPUT_DIRECTORY')
     out = Path(sys.argv[1]).expanduser().resolve()
@@ -71,10 +110,7 @@ def main():
     boost = Path('/sys/devices/system/cpu/cpufreq/boost')
     require(boost.is_file() and boost.read_text().strip() == '0', 'CPU boost must be confirmed off before running; do not alter it here')
     require(BENCH.is_dir(), f'missing campaign repository: {BENCH}')
-    require(shutil.which('perf') is not None, 'perf is required for profiles; install/authorize it before launch')
-    with (out / 'perf-preflight.log').open('w') as log:
-        probe = subprocess.run(['perf', 'stat', '-e', 'cycles', '--', 'true'], stdout=log, stderr=subprocess.STDOUT)
-    require(probe.returncode == 0, 'perf counters not available; see perf-preflight.log')
+    perf_status = perf_preflight(out)
     guard = BENCH / 'benchmarks/scripts/pinned.sh'
     require(guard.is_file(), 'missing pinned.sh')
     dirty = output(['git', '-C', ROOT, 'status', '--porcelain', '--untracked-files=no'])
@@ -103,6 +139,7 @@ def main():
             'rustc': output(['rustc', '-Vv']), 'cargo': output(['cargo', '-V']),
             'gfortran': output(['gfortran', '--version']).splitlines()[0],
             'env': {k: env.get(k) for k in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'GOTO_NUM_THREADS', 'MKLROOT', 'RUSTFLAGS')},
+            'perf_status': perf_status, 'allow_no_perf': os.environ.get('T4A_ALLOW_NO_PERF') == '1',
             'prime_seconds': .5, 'warmups': 3, 'samples': 10, 'sessions': 3,
             'protocol': 'custom Pfaffian public-call diagnostic; median of process medians; 1 guarded attempt'}
     (out / 'manifest.json').write_text(json.dumps(meta, indent=2) + '\n')
@@ -225,20 +262,7 @@ def main():
     with (out / 'summary.csv').open('w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=summary[0].keys()); w.writeheader(); w.writerows(summary)
     (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
-    # Sampling runs are separate from timings. Never treat cache misses as DRAM bytes.
-    require(shutil.which('perf') is not None, 'timings saved, but perf is unavailable; profile/bandwidth not measured')
-    matrix = out / 'matrices/n1024-f64.bin'
-    for arm in ('base', 'b16', 'b32'):
-        tag = 'profile-' + arm
-        with (out / (tag + '.stderr')).open('w') as err:
-            run = subprocess.run(['bash', str(guard), '4-11', '--', 'perf', 'record', '-g', '-o', str(out / (tag + '.data')), '--', str(bins[arm]), str(matrix), '1024', 'f64', '8'], env=env, text=True, stdout=subprocess.PIPE, stderr=err)
-        (out / (tag + '.stdout')).write_text(run.stdout)
-        require(run.returncode == 0, f'{tag} failed or guard rejected; no profile-based conclusion')
-        with (out / (tag + '.txt')).open('w') as report:
-            command(['perf', 'report', '--stdio', '--no-children', '-i', out / (tag + '.data')], env=env, stdout=report, stderr=subprocess.STDOUT)
-    (out / 'REPORT.md').write_text('# Pfaffian #176 evidence\n\nSee summary.csv, samples.csv, manifest.json, correctness.json and profile-*.txt. Timing rows report threshold comparisons, not an adoption decision. Inspect profiles for permutation work. Estimated matrix bytes/flop are 0.75 (b16) and 0.375 (b32); no DRAM bandwidth was measured. The n64/n1024 Seq-versus-base ratios are regression guards requiring review. Profile samples are separate from the timings.\n')
-    print('See', out / 'summary.csv', flush=True)
-    raise RuntimeError('timing and profiles complete, but measured DRAM bandwidth and manual acceptance review remain outstanding')
+    finish(out, perf_status, guard, bins, env)
 
 
 if __name__ == '__main__':
