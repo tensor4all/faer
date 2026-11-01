@@ -46,9 +46,9 @@ faer-traits = { package = "t4a-faer-traits", path = "../faer-traits", version = 
 # behind the `apple-sme` feature, which is a no-op outside
 # `target_arch = "aarch64"` + `target_vendor = "apple"` and is additionally gated
 # at run time on macOS >= 26 + FEAT_SME (+ FEAT_SME_F64F64 / FEAT_SME_F32F32).
-# Pinned to a git rev rather than crates.io because the fork is pre-release work;
-# publishing it is a separate step.
-gemm = { package = "t4a-gemm", git = "https://github.com/tensor4all/t4a-gemm", rev = "ae760b30b11ecd6b881a0ce07697377a1e07c6c1", default-features = false }
+# Pinned to the crates.io release of the fork (`t4a-gemm` 0.20.1) so a plain
+# `cargo build` needs no git access.
+gemm = { package = "t4a-gemm", version = "0.20.1", default-features = false }
 nano-gemm = { version = "0.2.2", default-features = false }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
