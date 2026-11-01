@@ -95,7 +95,7 @@ const SWAP_STAGE_SECTIONS: u32 = 4;
 /// Sections of the swap stage when one side holds every column (the first panel of a wide
 /// matrix, the last of a tall one): one split of the columns over the whole budget.
 const SWAP_ONE_SIDE_SECTIONS: u32 = 1;
-use crate::utils::cost::{gemm_ns_per_mac, par_width_time, rate, serial_time};
+use crate::utils::cost::{gemm_ns_per_mac, max_region_width, par_width_time_upto, rate, serial_time};
 use crate::utils::thread::with_width;
 
 pub use crate::utils::cost::ParThreshold;
@@ -119,10 +119,11 @@ fn trailing_update_width<T: ComplexField>(
 			let macs = cols.saturating_mul(
 				b.saturating_mul(b) / 2 + rows.saturating_mul(b),
 			);
-			return par_width_time(
+			return par_width_time_upto(
 				par,
 				serial_time(macs, gemm_ns_per_mac::<T>()),
 				TRAILING_UPDATE_SECTIONS,
+				max_region_width(par.degree()),
 			);
 		},
 	};
@@ -148,10 +149,11 @@ fn swap_stage_width<T: ComplexField>(
 		ParThreshold::Fixed(floor) => {
 			if m.saturating_mul(cols) > floor { par.degree() } else { 1 }
 		},
-		ParThreshold::Derived => par_width_time(
+		ParThreshold::Derived => par_width_time_upto(
 			par,
 			serial_time(n.saturating_mul(cols), rate::lu_swap().of::<T>()),
 			if one_side { SWAP_ONE_SIDE_SECTIONS } else { SWAP_STAGE_SECTIONS },
+			max_region_width(par.degree()),
 		),
 	}
 }
@@ -232,14 +234,8 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 		let mut mat = mat;
 		for j in 0..mat.ncols() {
 			let mut col = mat.rb_mut().col_mut(j);
-			if col.row_stride() == 1 {
-				for (j, &t) in trans[..n].iter().enumerate() {
-					swap_elems(col.rb_mut(), j, t.zx() + j);
-				}
-			} else {
-				for (j, &t) in trans[..n].iter().enumerate() {
-					swap_elems(col.rb_mut(), j, t.zx() + j);
-				}
+			for (j, &t) in trans[..n].iter().enumerate() {
+				swap_elems(col.rb_mut(), j, t.zx() + j);
 			}
 		}
 	};
@@ -321,7 +317,10 @@ pub struct PartialPivLuParams {
 	/// ([`ParShape::dispatch_cost`]), per region: the trailing update of a recursion level
 	/// (2 sections) and the swap stage (4 sections). [`ParThreshold::Fixed`] restores a fixed
 	/// floor, [`ParThreshold::Never`] disables parallelism. The trailing update and the swap
-	/// stage keep separate rules.
+	/// stage keep separate rules. A derived width is also capped at twice the largest width the
+	/// host's dispatch row measures (`cost::max_region_width`): a factorization opens hundreds of
+	/// sections, and past the row's last anchor a section's cost is an extrapolation that
+	/// misses its tail.
 	pub par_threshold: ParThreshold,
 	#[doc(hidden)]
 	pub non_exhaustive: NonExhaustive,

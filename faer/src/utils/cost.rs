@@ -621,6 +621,45 @@ pub(crate) fn par_width_time(par: &crate::Par, estimate: Duration, sections: u32
 	par_width_time_upto(par, estimate, sections, usize::MAX)
 }
 
+/// The widest width a region of a factorization family may run at: twice the largest width the
+/// host's dispatch row measures, and never more than the degree.
+///
+/// The row is measured at widths 2 to 6 on `aarch64-apple` (3.0, 2.3, 1.4 us) and 2 to 8 on
+/// `x86_64-avx512`; above its last anchor the cost is the linear extrapolation of that anchor
+/// (2.8 us at width 12 and 4.2 us at 18 on `aarch64-apple`). Those values price a *steady
+/// state* section -- and they are right about the median: an empty section is 2.5 to 3.0 us at
+/// every width up to 18 on the same host. What they cannot see is the tail, and a factorization
+/// pays the tail hundreds of times: every recursion level opens a swap stage and a trailing
+/// update, `partial_piv_lu` at n = 1024 opens 63 of each. Measured on an Apple M5 Max (18
+/// logical: 6 performance + 12 efficiency cores, macOS 26.7.2, 1 to 6 busy cores of background
+/// load), the worst of 200 empty sections is 64 us at width 16 and 2.1 ms at width 18, and the
+/// two regions at width 18 read 24.8, 31.5 and 38.2 GFLOP/s at n = 512, 1024 and 2048 against
+/// 66.9, 87.3 and 116.9 at width 14: 2.7 to 3.1 times slower than a narrower width.
+///
+/// With the two LU regions capped at 12 (twice the row's last anchor) and everything else
+/// unchanged, the same cases read 36.7, 75.2 and 127.3 GFLOP/s (1.5, 2.4 and 3.3 times the
+/// uncapped run), and every width at or below the cap is unchanged. GEMM is not capped: it
+/// opens one region per call, so the median is what it pays, and it reads 396 GFLOP/s at width
+/// 18 on the same host.
+pub(crate) fn max_region_width(degree: usize) -> usize {
+	/// The largest measured width of the host class's dispatch row, as
+	/// `threadteam::DispatchCosts::for_class` states it: `x86_64-avx512` is measured to 8,
+	/// `x86_64-avx2` to 64, every other class to 6.
+	fn largest_measured_width() -> usize {
+		match HostClass::detect() {
+			HostClass::X86_64Avx512 => 8,
+			HostClass::X86_64Avx2 => 64,
+			HostClass::X86_64Scalar
+			| HostClass::Aarch64Apple
+			| HostClass::Aarch64
+			| HostClass::Generic => 6,
+		}
+	}
+	// one doubling past the measured range: the extrapolation of an extrapolation is not
+	// defended by any measurement
+	degree.min(largest_measured_width() * 2)
+}
+
 /// [`par_width_time`] among the widths up to `max` (a region that cannot use more participants,
 /// such as a split into at most `max` tasks).
 pub(crate) fn par_width_time_upto(par: &crate::Par, estimate: Duration, sections: u32, max: usize) -> usize {
