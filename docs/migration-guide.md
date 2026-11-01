@@ -25,11 +25,11 @@ The table gives comparable operations, not a guarantee that their return types, 
 | :--- | :--- | :--- | :--- |
 | Construct a dense matrix | `DMatrix::from_fn(rows, cols, f)` | `Array2::from_shape_fn((rows, cols), f)` | `Mat::from_fn(rows, cols, f)` |
 | Multiply matrices | `&a * &b` | `a.dot(&b)` | `&a * &b` |
-| Factor for a square solve | `a.lu()` | `a.solve_into(b)` | `a.partial_piv_lu(par)` then `lu.solve(&b, par)` |
+| Square system solve | `a.lu().solve(&b)` | `a.solve_into(b)` | `a.partial_piv_lu(par)` then `lu.solve(&b, par)` |
 | QR factorization | `a.qr()` | `a.qr()` via `QR` | `a.qr(par)` |
 | Singular values and vectors | `a.svd(true, true)` | `a.svd(true, true)` via `SVD` | `a.svd(par)` |
 
-Nalgebra constructors use a closure with two indices; ndarray uses a single tuple. The `Solve` trait must be in scope for the faer solve method. SVD returns a `Result` in t4a faer. Check the dimensions and vector conventions before replacing decomposition consumers: faer represents the SVD as `U S V^H`, while other APIs may return `V^H` directly. Prefer solving a system to explicitly computing its inverse.
+Nalgebra constructors use a closure with two indices; ndarray uses a single tuple. The ndarray-linalg `solve_into` call factors and solves, whereas the t4a faer factor can be retained for further right hand sides. Import the respective library's `Solve` trait for either solve method. SVD returns a `Result` in t4a faer. Check the dimensions and vector conventions before replacing decomposition consumers: faer represents the SVD as `U S V^H`, while other APIs may return `V^H` directly. Prefer solving a system to explicitly computing its inverse.
 
 This complete example constructs and solves a small system. The assertions check the numerical result:
 
@@ -42,6 +42,41 @@ fn main() {
     let b = Mat::from_fn(2, 1, |i, _| [9.0, 8.0][i]);
     let lu = a.partial_piv_lu(Par::Seq);
     let x = lu.solve(&b, Par::Seq);
+    assert!((x[(0, 0)] - 2.0).abs() < 1e-12);
+    assert!((x[(1, 0)] - 3.0).abs() < 1e-12);
+}
+```
+
+## From nalgebra and ndarray
+
+Copy existing values by logical index when moving an owned matrix or a view. This works independently of the input layout, but allocates a new faer matrix. The examples below add `nalgebra = "0.33"` or `ndarray = "0.16"` respectively alongside the faer dependency shown above.
+
+From nalgebra:
+
+```rust
+use faer::Mat;
+use nalgebra::DMatrix;
+
+fn main() {
+    let old = DMatrix::from_row_slice(2, 2, &[3.0_f64, 1.0, 4.0, 2.0]);
+    let a = Mat::from_fn(old.nrows(), old.ncols(), |i, j| old[(i, j)]);
+    assert_eq!(a[(0, 1)], 1.0);
+    assert_eq!(a[(1, 0)], 4.0);
+}
+```
+
+For ndarray-linalg users, its matrices are ndarray arrays. The conversion itself needs only ndarray; the solve below uses faer instead of ndarray-linalg:
+
+```rust
+use faer::{Mat, Par};
+use faer::linalg::solvers::Solve;
+use ndarray::array;
+
+fn main() {
+    let old = array![[3.0_f64, 1.0], [1.0, 2.0]];
+    let a = Mat::from_fn(old.nrows(), old.ncols(), |i, j| old[(i, j)]);
+    let b = Mat::from_fn(2, 1, |i, _| [9.0, 8.0][i]);
+    let x = a.partial_piv_lu(Par::Seq).solve(&b, Par::Seq);
     assert!((x[(0, 0)] - 2.0).abs() < 1e-12);
     assert!((x[(1, 0)] - 3.0).abs() < 1e-12);
 }
@@ -83,7 +118,29 @@ fn main() {
 
 `Par` is consumed by an operation and is neither `Copy` nor `Clone`. `reborrow()` lends its exclusive authority for one call; the parent cannot be used until that borrow ends. A team token is valid only in its scope and cannot escape it. Do not acquire or reuse the same team recursively inside an active team operation; pass the existing authority through the call chain instead. Independent nested pools can oversubscribe the machine. Internal algorithms may split a team into disjoint children; that is not permission to duplicate a parent token.
 
-For repeated parallel calls, construct and retain a `threadteam::Pool` and `Team`, then obtain a fresh execution token for each scope as shown in the [README](../README.md#parallelism). `with_team` acquires a pool and team for each scope; threadteam may reuse cached workers. There is no implicit global faer execution pool or global faer thread setting, but this does not mean threadteam has no process level worker cache. Short or small operations can execute sequentially even with a team when parallel dispatch does not pay.
+For repeated parallel calls, construct and retain a `threadteam::Pool` and `Team`, then obtain a fresh execution token for each scope. Add `threadteam = "0.3"` alongside the faer dependency:
+
+```rust
+use faer::{mat, Accum, Mat, Par};
+use faer::linalg::matmul::matmul;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = threadteam::Pool::builder().threads(4).build()?;
+    let team = pool.into_team(4).ok().expect("a newly built pool is idle");
+    let a = mat![[1.0_f64, 2.0], [3.0, 4.0]];
+    let mut product = Mat::<f64>::zeros(2, 2);
+    for _ in 0..2 {
+        let mut exec = team.exec(4);
+        exec.team(|token| {
+            matmul(product.as_mut(), Accum::Replace, &a, &a, 1.0, Par::Team(token));
+        }).ok().expect("the team is idle between calls");
+    }
+    assert!((product[(1, 1)] - 22.0).abs() < 1e-12);
+    Ok(())
+}
+```
+
+`with_team` acquires a pool and team for each scope; threadteam may reuse cached workers. There is no implicit global faer execution pool or global faer thread setting, but this does not mean threadteam has no process level worker cache. Short or small operations can execute sequentially even with a team when parallel dispatch does not pay.
 
 ## Migration pitfalls
 
