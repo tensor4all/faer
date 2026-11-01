@@ -41,7 +41,14 @@ equator = { version = "0.6.0" }
 
 faer-traits = { package = "t4a-faer-traits", path = "../faer-traits", version = "0.24.2", default-features = false }
 
-gemm = { version = "0.19.0", default-features = false }
+# tensor4all fork of gemm: same [lib] name (`gemm`), so every `use gemm::...` in
+# this crate is unchanged. The fork adds the Apple SME microkernels (f64/c64/f32/c32)
+# behind the `apple-sme` feature, which is a no-op outside
+# `target_arch = "aarch64"` + `target_vendor = "apple"` and is additionally gated
+# at run time on macOS >= 26 + FEAT_SME (+ FEAT_SME_F64F64 / FEAT_SME_F32F32).
+# Pinned to a git rev rather than crates.io because the fork is pre-release work;
+# publishing it is a separate step.
+gemm = { package = "t4a-gemm", git = "https://github.com/tensor4all/t4a-gemm", rev = "f906e3495704707e18979fc0304f163341118684", default-features = false }
 nano-gemm = { version = "0.2.2", default-features = false }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
@@ -65,6 +72,13 @@ std = [
   "faer-traits/std",
   "pulp/std",
   "gemm/std",
+  # Apple SME (aarch64 + Apple + macOS >= 26) microkernels for f64/c64/f32/c32.
+  # The feature is inert everywhere else: every crate gates it on
+  # `target_arch = "aarch64"` + `target_vendor = "apple"`, and the kernel is
+  # selected at run time by a `sysctl` probe, so a host without SME keeps the
+  # NEON/generic path and there is no regression. `sysctl` is only pulled in for
+  # `target_vendor = "apple"`, so Linux and Windows builds are untouched.
+  "gemm/apple-sme",
   "nano-gemm/std",
   "libm/arch",
   "dep:t4a-private-gemm-x86",
