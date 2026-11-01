@@ -525,6 +525,16 @@ pub(crate) fn cholesky_block_left_looking<T: ComplexField>(
 				par,
 			)
 		};
+	// The left-looking driver below is switched off on purpose, not by an oversight: it arrived
+	// with this file's blocked driver in sarah-quinones/faer-rs#253 (`009d916`), already written
+	// as `true || ..`, and upstream has shipped it that way since. Measured on this fork's M5 Max
+	// (f64, 2048, median of seven calls of each, interleaved; `true ||` against
+	// `n < right_looking_threshold`) the left-looking path is never the faster one: LLT 8T
+	// 14.4 -> 17.1 ms and 1T 67.2 -> 71.1 ms, LDLT 8T 24.3 -> 26.3 ms, LDLT 1T unchanged within
+	// noise; both reconstruct to the same relative residual (1.6e-15). Nothing in the suite covers
+	// it either: the only test that reaches a factorization of `n >= block_size` compares a team
+	// against `Par::Seq` through this same driver, so no test would notice a broken left-looking
+	// branch. Keep the right-looking recursion until someone has both a reason and numbers.
 	if true || n < right_looking_threshold {
 		cholesky(A, D, signs, par)
 	} else {
