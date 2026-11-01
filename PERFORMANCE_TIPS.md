@@ -28,26 +28,52 @@ SVD driver pads its work copy by 64 bytes per column when the stride would be a 
 (`svd/mod.rs` `work_rows`): 18.6 -> 15.3 ms at eight threads. Benchmark shapes are powers of two,
 so this is where it shows; a vendor's `?gebrd` at 512 matches our 500.
 
-## The worker group is the caller's
+## The team is the caller's, and it is held across the work
 
-`spindle::for_each` outside `spindle::with_lock` is a plain rayon fork/join: workers woken per
-region, partition chosen afresh. Inside a held group they spin between regions and worker `k`
-keeps part `k`, so a core's L2 keeps its slice of the trailing block across regions. An algorithm
-of many short regions (two vector products per step) is a third slower without it (25.5 vs 19.2 ms,
-512, 8T). The library does **not** take the lock: the owner of parallelism policy does, once per
-session or region (`faer::spindle::with_lock`, re-exported; crate docs, *parallelism*). The
-campaign harness holds it around a faer row's timed loop for the same reason.
+`Par::Team` is the exclusive authority over the reserved members of a `threadteam` team. The members
+spin while the reservation is held and each keeps the range it had in the previous region, so a
+sequence of short regions pays no wake per region and a core's L2 keeps its slice of the trailing
+block across them: the blocked bidiagonalisation's two products per step went 10.3 and 10.6 ms to 2.7
+and 3.7 ms at 512, 8T, with nothing but the reservation (`docs/worklogs/2026-10-23-blocked-bidiag.md`;
+the reservation was a spindle group there, the mechanism threadteam kept when it replaced it).
 
-Corollary: never use a raw rayon iterator (`par_chunks_mut`, `par_iter`, `rayon::join`) in this
-crate. Under a held group the pool's threads are occupied and the raw iterator runs starved
-(block-apply split, 4096x256 at 8T: 28.9 ms raw, 17.5 through `spindle::for_each`).
+The library never builds a team; the width, the lifetime and the thread count are the caller's
+(`faer::team` is the route, not the policy). A caller that runs parallel work repeatedly owns the
+`threadteam::Pool` and `Team` once and lends a `Par` from the team to each call:
 
-## A region costs about 2 us held, 4 us plain, and a threaded gemv of 512 is 6 us
+```rust
+// once: 8 participants, the calling thread and 7 reserved workers
+let pool = threadteam::Pool::builder().threads(8).build()?;
+let team = pool.into_team(8).ok().expect("an idle pool");
+// per call: the reservation is already held, the call gets the authority
+for (a, h) in work {
+    let mut exec = team.exec(8);
+    exec.team(|t| qr_in_place(a.as_mut(), h.as_mut(), Par::Team(t), stack, params))
+        .ok().expect("a team token for an idle team");
+}
+```
 
-Measured with `probes/gemv-threads` (faer-benchmark, diagnostic). Below `256 * 256` elements the
-matvec is sequential by its own threshold. A step that issues two regions pays about 4 us of
-synchronisation; 384 steps are 1.5 ms. Design the loop so that the regions are the big products,
-not the short ones.
+`faer::team::with_team(width, ..)` is the one-off form: it builds a pool and acquires its members
+inside the closure, measured at 50 us to 5 ms per call on the M5 depending on whether the threads
+came back from threadteam's cache of idle pools, against 0.6-1 us for a token taken from a team the
+caller already owns. On a call of tens of milliseconds that is lost in the work; in a loop of short
+calls it is the difference, and no measurement here shows `with_team` buying anything back.
+
+Corollary: a region runs on the members of the token it was handed, never on a runtime outside it.
+The entry points of `utils::thread` (`for_each`, `for_each_with_par`, `join_raw`, `join_sized`,
+`split`, `with_width`) divide the token and deal the work to its members; a raw rayon iterator
+(`par_chunks_mut`, `par_iter`, `rayon::join`) instead takes its threads from rayon's global pool,
+which the caller's budget does not contain. The work leaves the team, the machine runs `width` more
+threads than the caller granted, and the region's own members sit parked at the section barrier while
+it happens.
+
+## A region costs about 1.5 us on a team, and a threaded gemv of 512 is 6 us
+
+Measured with `probes/gemv-threads` (faer-benchmark, diagnostic): one 8-job region on a held team
+costs 1.75 us, and `threadteam`'s `aarch64-apple` row puts a section at 1.4 us at width 6 and 3.0 us
+at width 2. Below `256 * 256` elements the matvec is sequential by its own threshold. A step that
+issues two regions pays about 3-4 us of synchronisation; 384 steps are 1.5 ms. Design the loop so
+that the regions are the big products, not the short ones.
 
 ## Short products are bandwidth-bound in L2, not call-bound
 

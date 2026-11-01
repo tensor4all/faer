@@ -23,8 +23,9 @@ reached through `skills/faer-optimization/SKILL.md` and the per-harness links be
    `faer-benchmark/probes/` drivers are the pattern: `svd-phases` splits `svd_values` into
    bidiagonalisation and the rest; `qr-phases` splits `qr_in_place` by recursion depth). Then put
    temporary timers around the steps of the loop you are about to change, at 1T and 8T, with the
-   caller holding the worker group (`faer::spindle::with_lock`) as the harness does. Two design
-   reviews did not predict what one such pass showed. Remove the timers before committing.
+   caller holding a team (`faer::team::with_team`, or a `threadteam::Pool`/`Team` it owns, as the
+   harness does). Two design reviews did not predict what one such pass showed. Remove the timers
+   before committing.
 2. **Hypotheses, each with a probe.** Write them down with the measurement that would decide each
    (a 500-vs-512 run for cache aliasing, an isolated call for overhead, a region microbenchmark for
    synchronisation), run the probes, and keep the one that moved. Probes are untracked diagnostics
