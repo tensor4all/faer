@@ -88,8 +88,6 @@ pub fn spicy_matmul<I: Index, T: ComplexField>(
 	let team_gate_pending = matches!(&par, Par::Team(_)) && par.degree() >= 2;
 	#[cfg(not(feature = "threadteam"))]
 	let team_gate_pending = false;
-	// a token that is not a team is sequential: nothing to decide before the kernel
-	let mut par = par;
 	if let Some(row_idx) = row_idx {
 		for &i in row_idx {
 			assert!(i.zx() < C.nrows());
