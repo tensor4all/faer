@@ -737,9 +737,12 @@ mod tests {
 	use crate::assert;
 	use faer_traits::{cx128, fx128};
 
+	/// `slots` is how many tile scratch slots the caller offers, which is what
+	/// caps the trailing update's split; `usize::MAX` offers the whole triangle.
 	fn check_updates<T: ComplexField>(
 		entry: impl Fn(f64, f64) -> T,
 		tolerance: f64,
+		slots: usize,
 	) {
 		for n in [6, 34, 36, 64, 66, 258] {
 			let input = Mat::from_fn(n, n, |i, j| {
@@ -769,10 +772,22 @@ mod tests {
 						entry((i + 1) as f64 / 64.0, (j + 1) as f64 / 128.0)
 					}
 				});
+				// Every slot the region could possibly ask for is present and holds
+				// a finite canary, but only `offered` of them are handed to the
+				// update: a rank that escapes the clamp overwrites a canary instead
+				// of unrelated memory, and the assertion below catches it.
+				let total = m.div_ceil(PANEL).max(1);
+				let offered = slots.min(total).max(1);
+				let canary = entry(7.0, -3.0);
+				// Enough canary slots for the widest split the region could pick on
+				// this shape, so a missing clamp fails the assertion below instead of
+				// writing outside the allocation.
+				let tiles_total = total * (total + 1) / 2;
+				let spare = offered.max(tiles_total.min(par.degree()).max(1));
 				let mut tiles = Mat::from_fn(
 					work_rows::<T>(PANEL),
-					m.div_ceil(PANEL) * PANEL,
-					|_, _| entry(f64::NAN, f64::NAN),
+					spare * PANEL,
+					|_, _| canary.copy(),
 				);
 				for initial in [true, false] {
 					let mut expected = work.clone();
@@ -805,10 +820,22 @@ mod tests {
 						.try_as_col_major_mut()
 						.unwrap();
 					let f = factors.as_ref().try_as_col_major().unwrap();
-					let t = tiles.as_mut().try_as_col_major_mut().unwrap();
+					let t = tiles
+						.as_mut()
+						.submatrix_mut(
+							0,
+							0,
+							work_rows::<T>(PANEL),
+							offered * PANEL,
+						)
+						.try_as_col_major_mut()
+						.unwrap();
+					// Only the whole-triangle case has enough slots for every rank.
 					#[cfg(feature = "threadteam")]
-					let trace =
-						n == 258 && T::IS_NATIVE_F64 && par.degree() > 1;
+					let trace = n == 258
+						&& T::IS_NATIVE_F64
+						&& par.degree() > 1
+						&& slots == usize::MAX;
 					#[cfg(feature = "threadteam")]
 					if trace {
 						crate::utils::team::stats::enable(true);
@@ -841,6 +868,16 @@ mod tests {
 							stats.run.iter().skip(2).sum::<usize>() > 0,
 							"trailing row blocks were not parallel: {stats:?}"
 						);
+					}
+					for j in offered * PANEL..spare * PANEL {
+						for i in 0..work_rows::<T>(PANEL) {
+							assert_eq!(
+								tiles[(i, j)],
+								canary,
+								"rank escaped its tile scratch slot \
+								 (offered {offered}, n {n}, initial {initial})"
+							);
+						}
 					}
 					for j in 0..n {
 						for i in 0..work.nrows() {
@@ -899,13 +936,108 @@ mod tests {
 		}
 	}
 
+	/// Fewer tile scratch slots than the team has ranks: the split must stay
+	/// inside the slots it was given. The offered slots hold the real work, the
+	/// slot after them is a finite canary that a rank escaping the clamp would
+	/// overwrite, and the numbers must still be right at that narrower width.
+	#[test]
+	fn trailing_update_keeps_ranks_inside_the_offered_slots() {
+		for offered in [1usize, 2, 3] {
+			check_updates(|r, _| r, 2e-12, offered);
+			check_updates(c64::new, 2e-12, offered);
+		}
+	}
+
+	/// A permutation that parks the partner of the first block at the far corner
+	/// makes every pivot of the first panel land outside that panel: column 0 has
+	/// a single nonzero entry, at row `n - 1`, so the first exchange brings in the
+	/// last physical column and each later pair jumps the same way. The matrix is
+	/// a permuted direct sum of `2x2` blocks with exact power-of-two entries, so
+	/// the Pfaffian is `sign(P) * (-1)^pairs * prod(t)` in exact arithmetic.
+	#[test]
+	fn outside_panel_exchange_returns_the_exact_pfaffian() {
+		let n = 2 * PANEL + 2;
+		assert!(
+			n - 1 >= PANEL,
+			"the forced exchange must leave the first panel"
+		);
+		let pairs = n / 2;
+		let t: Vec<f64> =
+			(0..pairs).map(|k| 2.0f64.powi(-(k as i32))).collect();
+		// position 0 and the far corner take the first block; the rest are spread
+		// by the smallest stride coprime with the number of remaining labels.
+		let rest = n - 2;
+		let stride = (3..).find(|s| gcd(*s, rest) == 1).unwrap();
+		let mut order = vec![0usize; n];
+		order[n - 1] = 1;
+		for (step, label) in (2..n).enumerate() {
+			order[1 + (step * stride) % rest] = label;
+		}
+		let mut seen = order.clone();
+		seen.sort_unstable();
+		assert_eq!(seen, (0..n).collect::<Vec<_>>(), "not a permutation");
+		let mut inversions = 0usize;
+		for i in 0..n {
+			for j in i + 1..n {
+				if order[i] > order[j] {
+					inversions += 1;
+				}
+			}
+		}
+		let sign = if inversions % 2 == 0 { 1.0 } else { -1.0 };
+		// A block `[[0, -t], [t, 0]]` has Pfaffian `-t`, this module's convention
+		// (see its 2x2 doctest), so a direct sum of `pairs` blocks is
+		// `(-1)^pairs * prod(t)`.
+		let expected =
+			sign * (-1.0f64).powi(pairs as i32) * t.iter().product::<f64>();
+		let block = |r: usize, c: usize| {
+			let (p, q) = (order[r], order[c]);
+			if p / 2 == q / 2 && p != q {
+				let value = t[p / 2];
+				if p > q { value } else { -value }
+			} else {
+				0.0
+			}
+		};
+		// column 0 is the forced far-corner pivot and nothing else
+		assert!(block(n - 1, 0) != 0.0);
+		assert!((1..n - 1).all(|r| block(r, 0) == 0.0));
+		let a = Mat::<f64>::from_fn(n, n, |i, j| block(i, j));
+		let mut memory = dyn_stack::MemBuffer::new(pfaffian_scratch::<f64>(n));
+		let mut check = |mut par: Par<'_>| {
+			let value = pfaffian(
+				a.as_ref(),
+				par.reborrow(),
+				dyn_stack::MemStack::new(&mut memory),
+			)
+			.unwrap();
+			assert!(
+				(value - expected).abs() <= 1e-14 * expected.abs(),
+				"{value} != {expected} at n={n}"
+			);
+		};
+		check(Par::Seq);
+		#[cfg(feature = "threadteam")]
+		for width in [2, 3, 8] {
+			crate::team::with_team(width, |par| check(par));
+		}
+	}
+
+	fn gcd(a: usize, b: usize) -> usize {
+		if b == 0 { a } else { gcd(b, a % b) }
+	}
+
 	#[test]
 	fn mirrored_tiled_updates_match_dense_skew_oracle() {
-		check_updates(|r, _| r, 2e-12);
-		check_updates(|r, _| r as f32, 2e-5);
-		check_updates(c64::new, 2e-12);
-		check_updates(|r, i| c32::new(r as f32, i as f32), 2e-5);
-		check_updates(|r, _| from_f64::<fx128>(r), 1e-25);
-		check_updates(|r, i| cx128::new(from_f64(r), from_f64(i)), 1e-25);
+		check_updates(|r, _| r, 2e-12, usize::MAX);
+		check_updates(|r, _| r as f32, 2e-5, usize::MAX);
+		check_updates(c64::new, 2e-12, usize::MAX);
+		check_updates(|r, i| c32::new(r as f32, i as f32), 2e-5, usize::MAX);
+		check_updates(|r, _| from_f64::<fx128>(r), 1e-25, usize::MAX);
+		check_updates(
+			|r, i| cx128::new(from_f64(r), from_f64(i)),
+			1e-25,
+			usize::MAX,
+		);
 	}
 }
