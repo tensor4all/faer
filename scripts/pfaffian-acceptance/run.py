@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import statistics
+import struct
 import subprocess
 import sys
 import time
@@ -17,7 +18,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 ASSETS = Path(__file__).resolve().parent
 BENCH = Path.home() / 'projects/tensor4all/faer-benchmark'
-BASE = '71b25ffb7ae3ce038ec25b35c91e526be41b9a63'
+BASE = 'e765e0a9702cb355e421d8e77ba5f20a82cf0ea1'
 PFA = '5ad8a9b11020db5ac6acc9705408213ee67a1294'
 SIZES = (2, 64, 128, 256, 512, 1024)
 TYPES = ('f64', 'c64')
@@ -136,6 +137,7 @@ def main():
             'benchmark_sha': output(['git', '-C', BENCH, 'rev-parse', 'HEAD']),
             'guard_sha256': digest(guard), 'idle_guard_sha256': digest(guard.parent / 'idle_cpus.py'),
             'measured_cpus': sorted(measured), 'measured_l3': sorted(l3), 'observer_affinity': sorted(affinity), 'cpufreq_boost': boost.read_text().strip(),
+            'cpufreq_governor': output(['bash', '-c', 'cat /sys/devices/system/cpu/cpu{4,5,6,7,8,9,10,11}/cpufreq/scaling_governor']).split(),
             'rustc': output(['rustc', '-Vv']), 'cargo': output(['cargo', '-V']),
             'gfortran': output(['gfortran', '--version']).splitlines()[0],
             'env': {k: env.get(k) for k in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'GOTO_NUM_THREADS', 'MKLROOT', 'RUSTFLAGS')},
@@ -145,7 +147,12 @@ def main():
     (out / 'manifest.json').write_text(json.dumps(meta, indent=2) + '\n')
     print('building isolated copies', flush=True)
     copies = {}
-    for name, revision in (('base', BASE), ('b16', head), ('b32', head)):
+    for name, revision in (
+        ('base', BASE),
+        ('cand', head),
+        ('b16', head),
+        ('b32', head),
+    ):
         dest = out / ('src-' + name)
         dest.mkdir()
         archive = subprocess.Popen(['git', '-C', str(ROOT), 'archive', revision], stdout=subprocess.PIPE)
@@ -153,10 +160,15 @@ def main():
         archive.stdout.close()
         require(archive.wait() == 0, 'git archive failed')
         mod = dest / 'faer/src/linalg/pfaffian/mod.rs'
-        if name == 'b16':
+        # The candidate's default width is 24; the two alternates are the same
+        # source at 16 and 32, so the width scan does not need two branches.
+        if name in ('b16', 'b32'):
+            width = name[1:]
             s = mod.read_text()
-            require(s.count('const PANEL: usize = 32;') == 1, 'cannot derive b16')
-            mod.write_text(s.replace('const PANEL: usize = 32;', 'const PANEL: usize = 16;'))
+            require(s.count('const PANEL: usize = 24;') == 1,
+                    f'cannot derive {name}')
+            mod.write_text(s.replace('const PANEL: usize = 24;',
+                                     f'const PANEL: usize = {width};'))
         copies[name] = dest
         meta[name + '_source_sha256'] = digest(mod)
     pfadir = out / 'pfapack'
@@ -198,20 +210,21 @@ def main():
             row = json.loads(output(['taskset', '-c', '4', fbin, matrix, n, dtype, 1, '--smoke'], env=env))
             references[n, dtype] = complex(row['pf_re'], row['pf_im'])
     checks = []
-    for name in ('base', 'b16', 'b32'):
+    for name in ('base', 'cand', 'b16', 'b32'):
         for n in SIZES:
             for dtype in TYPES:
                 matrix = out / f'matrices/n{n}-{dtype}.bin'
                 mode_values = []
                 for width in (0, 1, 4, 8):
                     row = json.loads(output(['taskset', '-c', '4-11', bins[name], matrix, n, dtype, width, '--smoke'], env=env))
-                    actual = complex(row['pf_re'], row['pf_im']); ref = references[n, dtype]
+                    bits = (row['pf_re'], row['pf_im'])
+                    actual = complex(*bits); ref = references[n, dtype]
                     require(abs(actual - ref) <= 5e-10 * max(abs(actual), abs(ref), 1e-300), f'{name} n={n} {dtype} width={width}: numerical mismatch {actual} != {ref}')
-                    mode_values.append(actual)
+                    mode_values.append(struct.pack('<dd', *bits))
                     checks.append({'arm': name, 'n': n, 'dtype': dtype, 'width': width, 'actual': [actual.real, actual.imag], 'reference': [ref.real, ref.imag]})
-                require(all(x == mode_values[0] for x in mode_values), f'{name} n={n} {dtype}: team result differs from Seq')
+                require(all(x == mode_values[0] for x in mode_values), f'{name} n={n} {dtype}: team result differs from Seq (bitwise)')
     (out / 'correctness.json').write_text(json.dumps(checks, indent=2) + '\n')
-    require(len(checks) == 144, 'incomplete correctness checks')
+    require(len(checks) == 192, 'incomplete correctness checks')
     rows = []
     with (out / 'samples.csv').open('w', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=['session', 'arm', 'n', 'dtype', 'width', 'median_seconds', 'samples_seconds', 'batch_iterations'])
@@ -220,7 +233,7 @@ def main():
             for n in (64, 256, 512, 1024):
                 for dtype in TYPES:
                     matrix = out / f'matrices/n{n}-{dtype}.bin'
-                    schedule = [('fortran', 1), ('base', 0), ('b16', 0), ('b32', 0)] + ([] if n == 64 else [('base', 8), ('b16', 8), ('b32', 8)])
+                    schedule = [('fortran', 1), ('base', 0), ('cand', 0), ('b16', 0), ('b32', 0)] + ([] if n == 64 else [('base', 8), ('cand', 8), ('b16', 8), ('b32', 8)])
                     shift = (session - 1) * 2 % len(schedule)
                     for arm, width in schedule[shift:] + schedule[:shift]:
                         tag = f's{session}-n{n}-{dtype}-{arm}-{width}'
@@ -252,7 +265,7 @@ def main():
                 require(len(xs) == 3, 'missing session')
                 return statistics.median(xs)
             ref = median('fortran', 1); base = median('base', 0)
-            for arm in ('b16', 'b32'):
+            for arm in ('cand', 'b16', 'b32'):
                 seq = median(arm, 0); team = median(arm, 8) if n != 64 else None
                 summary.append({'n': n, 'dtype': dtype, 'arm': arm, 'fortran_s': ref, 'base_seq_s': base, 'seq_s': seq, 'team8_s': team,
                     'seq_over_fortran': seq / ref, 'fortran_over_team8': ref / team if team else None,

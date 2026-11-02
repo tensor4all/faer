@@ -73,7 +73,7 @@ class NoPerfTests(unittest.TestCase):
                 if args[0] == 'tar':
                     p = Path(args[-1]) / 'faer/src/linalg/pfaffian/mod.rs'
                     p.parent.mkdir(parents=True)
-                    p.write_text('const PANEL: usize = 32;')
+                    p.write_text('const PANEL: usize = 24;')
                 elif args[0] == 'cargo':
                     p = Path(args[-1]).parent / 'target/release/pfaffian-faer-probe'
                     p.parent.mkdir(parents=True)
@@ -126,9 +126,9 @@ class NoPerfTests(unittest.TestCase):
                  patch.object(acceptance.subprocess, 'run', side_effect=run):
                 acceptance.main()
             rows = json.loads((out / 'summary.json').read_text())
-            self.assertEqual(len(rows), 16)
+            self.assertEqual(len(rows), 24)
             self.assertFalse(any(r['formal_thresholds_met'] for r in rows if r['n'] >= 256))
-            self.assertEqual(len((out / 'samples.csv').read_text().splitlines()), 151)
+            self.assertEqual(len((out / 'samples.csv').read_text().splitlines()), 193)
             self.assertIn('perf unavailable (perf_event_paranoid=4)', (out / 'manifest.json').read_text())
             self.assertIn('## Profile\nnot measured\n', (out / 'REPORT.md').read_text())
             self.assertIn('## Bandwidth\nnot measured\n', (out / 'REPORT.md').read_text())

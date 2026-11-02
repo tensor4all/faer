@@ -18,7 +18,6 @@
 
 use crate::internal_prelude::*;
 use crate::utils::cost::{ParThreshold, rate};
-use crate::utils::partition::lower_area_split;
 use crate::utils::thread::{Ptr, with_width};
 use pulp::Simd;
 
@@ -83,10 +82,6 @@ pub fn pfaffian_scratch<T: ComplexField>(dim: usize) -> StackReq {
 		PANEL.min(dim),
 	))
 	.and(linalg::temp_mat_scratch::<T>(
-		work_rows::<T>(dim),
-		if dim > PANEL { PANEL } else { 0 },
-	))
-	.and(linalg::temp_mat_scratch::<T>(
 		work_rows::<T>(PANEL),
 		tile_columns(dim),
 	))
@@ -105,7 +100,7 @@ fn work_rows<T>(n: usize) -> usize {
 }
 
 // Every other elimination is sufficient for the Pfaffian (Wimmer §II.B).
-const PANEL: usize = 32;
+const PANEL: usize = 24;
 
 /// Computes the Pfaffian without modifying `a` or allocating working memory.
 ///
@@ -170,7 +165,13 @@ pub fn pfaffian<T: ComplexField>(
 		.subrows_mut(0, n)
 		.try_as_col_major_mut()
 		.unwrap();
-	// SAFETY: every panel column is filled before use; padding is never read.
+	// The panel is held in compact order: row `i` of the working panel is the
+	// physical row `perm[start + i]`, so a step only touches the rows that are
+	// still live and both the pivot search and the rank-two recurrence run over
+	// contiguous memory. The trailing rows of the panel (`cols..`) are already
+	// the shared compact panel the update reads, so no second gather is needed.
+	// SAFETY: a panel column is gathered over the live rows it is read at, and
+	// dead rows are never read; padding is never read.
 	let (mut factors, stack) = unsafe {
 		linalg::temp_mat_uninit::<T, _, _>(
 			work_rows::<T>(n),
@@ -179,20 +180,6 @@ pub fn pfaffian<T: ComplexField>(
 		)
 	};
 	let mut factors = factors
-		.as_mat_mut()
-		.subrows_mut(0, n)
-		.try_as_col_major_mut()
-		.unwrap();
-	// SAFETY: packing fills the complete compact panel before the joined team
-	// reads it. No trailing update is needed when n <= PANEL.
-	let (mut packed, stack) = unsafe {
-		linalg::temp_mat_uninit::<T, _, _>(
-			work_rows::<T>(n),
-			if n > PANEL { PANEL } else { 0 },
-			stack,
-		)
-	};
-	let mut packed = packed
 		.as_mat_mut()
 		.subrows_mut(0, n)
 		.try_as_col_major_mut()
@@ -214,30 +201,57 @@ pub fn pfaffian<T: ComplexField>(
 	let mut odd_permutation = false;
 	for start in (0..n).step_by(PANEL) {
 		let end = (start + PANEL).min(n);
+		let cols = end - start;
+		let live = n - start;
+		let lower_only = start == 0;
+		let source = if lower_only {
+			a
+		} else {
+			work.rb().as_dyn_stride()
+		};
 		for k in (start..end).step_by(2) {
-			let c = perm[k];
-			let source = if start == 0 {
-				a
-			} else {
-				work.rb().as_dyn_stride()
+			let ki = k - start;
+			{
+				let mut pf =
+					factors.rb_mut().subrows_mut(0, live).subcols_mut(0, cols);
+				let (prefix, rest) = pf.rb_mut().split_at_col_mut(ki);
+				let mut col = rest.col_mut(0);
+				let dst = col.rb_mut().subrows_mut(ki, live - ki);
+				let dst = gather_panel_column(
+					dst,
+					source,
+					perm[k],
+					&perm[k..],
+					lower_only,
+				);
+				if ki > 0 {
+					update_column(dst, prefix.rb(), ki, ki);
+				}
+			}
+			let pivot = {
+				let pf = factors.rb().subrows(0, live).subcols(0, cols);
+				k + 1 + pivot_index(pf.col(ki).subrows(ki + 1, live - ki - 1))?
 			};
-			update_panel_column(
-				factors.rb_mut(),
-				source,
-				c,
-				k - start,
-				&perm[k..],
-				start == 0,
-			);
-			let pivot = k
-				+ 1
-				+ pivot_index(factors.rb().col(k - start), &perm[k + 1..])?;
 			if pivot != k + 1 {
 				perm.swap(k + 1, pivot);
 				odd_permutation = !odd_permutation;
+				// Relabel the finished panel columns: compact row `i` must stay
+				// the physical row `perm[start + i]`. Rows `ki + 1..` of those
+				// columns are initialized, so nothing uninitialized moves.
+				let mut pf = factors
+					.rb_mut()
+					.subrows_mut(0, live)
+					.subcols_mut(0, ki + 1);
+				let (mut lo, mut hi) =
+					pf.rb_mut().two_rows_mut(ki + 1, pivot - start);
+				for j in 0..=ki {
+					core::mem::swap(&mut lo[j], &mut hi[j]);
+				}
 			}
 			let q = perm[k + 1];
-			let d = factors[(q, k - start)].copy();
+			let d = factors.rb().subrows(0, live).subcols(0, cols)
+				[(ki + 1, ki)]
+				.copy();
 			if !d.is_finite() {
 				return Err(PfaffianError::NumericalFailure);
 			}
@@ -245,35 +259,60 @@ pub fn pfaffian<T: ComplexField>(
 				return Err(PfaffianError::ZeroPivot { index: k });
 			}
 			pivots[(k / 2, 0)] = -&d;
-			update_panel_column(
-				factors.rb_mut(),
-				source,
-				q,
-				k + 1 - start,
-				&perm[k..],
-				start == 0,
-			);
-			for &i in &perm[k + 2..] {
-				factors[(i, k - start)] = &factors[(i, k - start)] / &d;
+			{
+				let mut pf =
+					factors.rb_mut().subrows_mut(0, live).subcols_mut(0, cols);
+				let (prefix, rest) = pf.rb_mut().split_at_col_mut(ki + 1);
+				let mut col = rest.col_mut(0);
+				let dst = col.rb_mut().subrows_mut(ki, live - ki);
+				// `q` carries the exchange, so this column is re-read from the
+				// source rather than moved.
+				let dst =
+					gather_panel_column(dst, source, q, &perm[k..], lower_only);
+				// The pair being completed is excluded from the recurrence.
+				if ki > 0 {
+					update_column(dst, prefix.rb().subcols(0, ki), ki + 1, ki);
+				}
+			}
+			// One reciprocal per step instead of one division per entry, as
+			// LAPACK's unblocked `getf2` does, for the native scalars. The
+			// extended-precision scalars keep the exactly rounded division their
+			// accuracy contract is written against, and so does a reciprocal
+			// that would itself overflow, which keeps the reachable exponent
+			// range unchanged.
+			let native = const {
+				T::IS_NATIVE_F32
+					|| T::IS_NATIVE_F64
+					|| T::IS_NATIVE_C32
+					|| T::IS_NATIVE_C64
+			};
+			let inv = crate::math_utils::recip(&d);
+			let mut pf =
+				factors.rb_mut().subrows_mut(0, live).subcols_mut(0, cols);
+			let mut dst = pf.rb_mut().col_mut(ki);
+			if native && inv.is_finite() {
+				for i in ki + 2..live {
+					dst[i] = &dst[i] * &inv;
+				}
+			} else {
+				for i in ki + 2..live {
+					dst[i] = &dst[i] / &d;
+				}
 			}
 		}
 		if end < n {
 			let remaining = &perm[end..];
-			let mut compact = packed.rb_mut().submatrix_mut(
-				0,
-				0,
-				remaining.len(),
-				end - start,
-			);
-			for j in 0..compact.ncols() {
-				for (i, &physical) in remaining.iter().enumerate() {
-					compact[(i, j)] = factors[(physical, j)].copy();
-				}
-			}
-			if start == 0 {
+			// Rows `cols..live` of the compact panel are the trailing rows in
+			// pivot order: exactly the shared panel the tiled update reads.
+			let compact = factors
+				.rb()
+				.subrows(0, live)
+				.subcols(0, cols)
+				.subrows(cols, live - cols);
+			if lower_only {
 				update_trailing::<true, T>(
 					work.rb_mut(),
-					compact.rb(),
+					compact,
 					a,
 					remaining,
 					tiles.rb_mut(),
@@ -282,7 +321,7 @@ pub fn pfaffian<T: ComplexField>(
 			} else {
 				update_trailing::<false, T>(
 					work.rb_mut(),
-					compact.rb(),
+					compact,
 					a,
 					remaining,
 					tiles.rb_mut(),
@@ -296,6 +335,17 @@ pub fn pfaffian<T: ComplexField>(
 		return Err(PfaffianError::NumericalFailure);
 	}
 	Ok(if odd_permutation { -value } else { value })
+}
+
+/// The contiguous tile range `[first, last)` of the lower triangle, in row-major
+/// tile order, that rank `rank` of `parts` owns.
+///
+/// Tiles are equal cost, so an equal number of them per rank is the balanced
+/// split. The row-block split this replaces could not go below one row block per
+/// rank, and one row block of a shallow trailing block is a large share of the
+/// triangle, so the widest rank could not be helped.
+fn tile_range(tiles: usize, rank: usize, parts: usize) -> (usize, usize) {
+	(tiles * rank / parts, tiles * (rank + 1) / parts)
 }
 
 fn tile_columns(n: usize) -> usize {
@@ -336,55 +386,45 @@ fn valid_input<T: ComplexField>(a: MatRef<'_, T>, par: Par<'_>) -> bool {
 
 fn pivot_index<T: ComplexField>(
 	col: ColRef<'_, T, usize, ContiguousFwd>,
-	perm: &[usize],
 ) -> Result<usize, PfaffianError> {
 	let mut at = 0;
-	for i in 0..perm.len() {
-		if !col[perm[i]].is_finite() {
+	for i in 0..col.nrows() {
+		if !col[i].is_finite() {
 			return Err(PfaffianError::NumericalFailure);
 		}
-		if col[perm[i]].absmax() > col[perm[at]].absmax() {
+		if col[i].absmax() > col[at].absmax() {
 			at = i;
 		}
 	}
 	Ok(at)
 }
 
-fn update_panel_column<T: ComplexField>(
-	mut factors: MatMut<'_, T, usize, usize, ContiguousFwd>,
+/// Fills one pending panel column with the current source entries of the live
+/// rows, in compact order, and returns it for the rank-two recurrence.
+fn gather_panel_column<'a, T: ComplexField>(
+	mut dst: ColMut<'a, T, usize, ContiguousFwd>,
 	a: MatRef<'_, T>,
 	column: usize,
-	at: usize,
 	live: &[usize],
 	lower_only: bool,
-) {
-	let (prefix, remaining) = factors.rb_mut().split_at_col_mut(at);
-	let mut dst = remaining.col_mut(0);
-	dst.rb_mut().fill(zero());
-	if lower_only {
-		for &i in live {
-			dst[i] = if i > column {
-				a[(i, column)].copy()
-			} else if i < column {
-				-&a[(column, i)]
+) -> ColMut<'a, T, usize, ContiguousFwd> {
+	for i in 0..dst.nrows() {
+		let row = live[i];
+		dst[i] = if lower_only {
+			if row > column {
+				a[(row, column)].copy()
+			} else if row < column {
+				-&a[(column, row)]
 			} else {
 				zero()
-			};
-		}
-	} else {
-		for &i in live {
-			dst[i] = if i == column {
-				zero()
-			} else {
-				a[(i, column)].copy()
-			};
-		}
+			}
+		} else if row == column {
+			zero()
+		} else {
+			a[(row, column)].copy()
+		};
 	}
-	// The odd column must exclude its own, not-yet-normalized pivot pair.
-	let pairs_end = at - at % 2;
-	if pairs_end > 0 {
-		update_column(dst, prefix.rb().subcols(0, pairs_end), column, 0);
-	}
+	dst
 }
 
 // The dependent panel columns retain the ordered rank-two SIMD recurrence.
@@ -507,10 +547,20 @@ fn update_trailing<const INITIAL: bool, T: ComplexField>(
 ) {
 	let m = perm.len();
 	let blocks = m.div_ceil(PANEL);
+	// Every trailing tile is one job, so the split follows the tile count
+	// rather than the row-block count: at small `m` one row block still holds
+	// most of the triangle, and splitting only rows leaves the widest rank with
+	// a quarter of the work while the others idle.
+	let tile_count = blocks.saturating_mul(blocks + 1) / 2;
 	let units = m.saturating_mul(m).saturating_mul(factors.ncols() / 2);
+	// The tile scratch holds one slot per `PANEL`-wide strip of the original
+	// `n`, and that is what caps the split; the row-block count is much smaller
+	// than the tile count once the trailing block gets shallow, and using it as
+	// the cap left most of the team idle in the last panels.
 	let width = ParThreshold::Derived
 		.region_width::<T>(&par, units, rate::bunch_kaufman(), 1)
-		.min(blocks);
+		.min(tile_count)
+		.min(tiles.ncols() / PANEL);
 	// SAFETY: the compact panel is fully initialized, and even/odd views each
 	// select half its columns without extending the underlying allocation.
 	let (x, y) = unsafe {
@@ -540,27 +590,34 @@ fn update_trailing<const INITIAL: bool, T: ComplexField>(
 		let run = &|rank: usize, parts: usize| {
 			let ptr = ptr;
 			let tile_ptr = tile_ptr;
-			// Reverse the decreasing column-area weights for increasing row
-			// work.
-			let first = blocks
-				- lower_area_split(blocks - 1, blocks, rank + 1, parts, 1);
-			let last =
-				blocks - lower_area_split(blocks - 1, blocks, rank, parts, 1);
-			for block in first..last {
+			// The lower triangle in row-major tile order: rank `r` owns the
+			// contiguous tile range `[tiles r / parts, tiles (r+1) / parts)`.
+			// Row block `i` holds tiles `i (i+1) / 2 .. (i+1) (i+2) / 2`.
+			let (first, last) = tile_range(tile_count, rank, parts);
+			let mut row_at = 0usize;
+			for block in 0..blocks {
+				let row_first = row_at;
+				row_at += block + 1;
+				let lo = first.max(row_first);
+				let hi = last.min(row_at);
+				if lo >= hi {
+					continue;
+				}
 				let i0 = block * PANEL;
 				let rows = PANEL.min(m - i0);
-				for j0 in (0..=i0).step_by(PANEL) {
+				for jb in lo - row_first..hi - row_first {
+					let j0 = jb * PANEL;
 					let cols = PANEL.min(m - j0);
-					// SAFETY: a fixed logical row block owns its private
-					// scratch tile and every unordered pair (i,j), i>j, it
-					// scatters. A bijective perm preserves disjoint pair+mirror
-					// ownership. Never lend a whole work view that overlaps
-					// another mirror.
+					// SAFETY: each rank owns a private scratch slot, and the
+					// tiles it owns are disjoint from every other rank's, so
+					// every unordered pair (i,j), i>j, and its mirror have one
+					// writer. A bijective perm preserves that ownership. Never
+					// lend a whole work view that overlaps another mirror.
 					unsafe {
 						let mut tile = MatMut::from_raw_parts_mut(
 							tile_ptr
 								.0
-								.offset((block * PANEL) as isize * tile_stride),
+								.offset((rank * PANEL) as isize * tile_stride),
 							rows,
 							cols,
 							1,
@@ -812,6 +869,32 @@ mod tests {
 			#[cfg(feature = "threadteam")]
 			for width in [3, 8, 70] {
 				crate::team::with_team(width, |par| check(par));
+			}
+		}
+	}
+
+	#[test]
+	fn trailing_tiles_have_one_owner_each_and_a_balanced_split() {
+		for tiles in [1usize, 3, 6, 10, 15, 21, 28, 36, 45, 55] {
+			for parts in 1..=8 {
+				let ranges: Vec<_> =
+					(0..parts).map(|r| tile_range(tiles, r, parts)).collect();
+				assert_eq!(ranges[0].0, 0, "tiles={tiles} parts={parts}");
+				assert_eq!(ranges[parts - 1].1, tiles);
+				assert!(
+					ranges.windows(2).all(|w| w[0].1 == w[1].0),
+					"tiles={tiles} parts={parts}: {ranges:?}"
+				);
+				let counts: Vec<usize> =
+					ranges.iter().map(|&(a, b)| b - a).collect();
+				assert!(
+					counts.iter().max().unwrap() - counts.iter().min().unwrap()
+						<= 1,
+					"tiles={tiles} parts={parts}: {counts:?}"
+				);
+				if parts <= tiles {
+					assert!(counts.iter().all(|&count| count >= 1));
+				}
 			}
 		}
 	}
