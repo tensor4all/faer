@@ -11,7 +11,7 @@
 //! $$A = B U S U^{-1}$$
 //!
 //! if $A$ is self-adjoint and $B$ is positive definite, then $U$ can be made
-//! unitary ($U^{-1} = U^H$), and $S$ is real valued.
+//! $B$-orthonormal ($U^H B U = I$), and $S$ is real valued.
 //!
 //! the implementation can choose to compute the left and/or right generalized
 //! eigenvectors separately, and the generalized eigenvalues (diagonal of $S$)

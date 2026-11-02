@@ -485,6 +485,60 @@ impl<
 	}
 
 	#[track_caller]
+	/// returns the generalized eigendecomposition of `(self, b)`, assuming
+	/// `self` is self-adjoint and `b` is self-adjoint positive definite
+	///
+	/// only the lower triangles of `self` and `b` are read, and the columns of
+	/// $U$ satisfy $U^H B U = I$
+	///
+	/// eigenvalues sorted in nondecreasing order. `NonPositiveDefinite` is
+	/// returned if `b` is not positive definite. The reduced matrix is a
+	/// congruence of `self`, so a wildly scaled `b` can overflow even for a
+	/// well posed pair
+	pub fn self_adjoint_generalized_eigen(
+		&self,
+		b: impl AsMatRef<T = C::Canonical>,
+		mut par: Par<'_>,
+	) -> Result<SelfAdjointGeneralizedEigen<C::Canonical>, SelfAdjointGevdError>
+	{
+		let (l, c) = self_adjoint_gevd_reduce(
+			self.rb(),
+			b.as_mat_ref().as_dyn(),
+			par.reborrow(),
+		)?;
+		let eigen = c
+			.self_adjoint_eigen(Side::Lower, par.reborrow())
+			.map_err(|_| SelfAdjointGevdError::NoConvergence)?;
+		let values = eigen.S.column_vector().iter().map(|x| x.real()).collect();
+		let mut U = eigen.U;
+		l.L().adjoint().solve_upper_triangular_in_place(&mut U, par);
+		Ok(SelfAdjointGeneralizedEigen { U, values })
+	}
+
+	#[track_caller]
+	/// returns the eigenvalues of `(self, b)`, assuming `self` is self-adjoint
+	/// and `b` is self-adjoint positive definite
+	///
+	/// only the lower triangles of `self` and `b` are read
+	///
+	/// eigenvalues sorted in nondecreasing order. `NonPositiveDefinite` is
+	/// returned if `b` is not positive definite, and the same overflow caveat
+	/// as [`Self::self_adjoint_generalized_eigen`] applies
+	pub fn self_adjoint_generalized_eigenvalues(
+		&self,
+		b: impl AsMatRef<T = C::Canonical>,
+		mut par: Par<'_>,
+	) -> Result<Vec<Real<C>>, SelfAdjointGevdError> {
+		let (_, c) = self_adjoint_gevd_reduce(
+			self.rb(),
+			b.as_mat_ref().as_dyn(),
+			par.reborrow(),
+		)?;
+		c.self_adjoint_eigenvalues(Side::Lower, par)
+			.map_err(|_| SelfAdjointGevdError::NoConvergence)
+	}
+
+	#[track_caller]
 	/// returns the eigenvalues of `self`, assuming it is self-adjoint
 	///
 	/// eigenvalues sorted in nondecreasing order
@@ -564,6 +618,33 @@ impl<
 		}
 		imp(self.rb().canonical(), par)
 	}
+}
+/// factors $B = L L^H$ and returns $(L, L^{-1} A L^{-H})$
+#[track_caller]
+fn self_adjoint_gevd_reduce<C: Conjugate>(
+	a: MatRef<'_, C>,
+	b: MatRef<'_, C::Canonical>,
+	mut par: Par<'_>,
+) -> Result<(Llt<C::Canonical>, Mat<C::Canonical>), SelfAdjointGevdError> {
+	let n = a.nrows();
+	assert!(a.ncols() == n && b.nrows() == n && b.ncols() == n);
+	let l = Llt::new(b, Side::Lower, par.reborrow())
+		.map_err(|_| SelfAdjointGevdError::NonPositiveDefinite)?;
+	let mut c = Mat::zeros(n, n);
+	c.copy_from_triangular_lower(a);
+	for j in 0..n {
+		for i in 0..j {
+			c[(i, j)] = c[(j, i)].conj();
+		}
+	}
+	l.L()
+		.solve_lower_triangular_in_place(&mut c, par.reborrow());
+	// the right solve becomes a left solve on the transposed matrix, and the
+	// conjugation is what turns the stored transpose back into $C$
+	l.L()
+		.conjugate()
+		.solve_lower_triangular_in_place(c.as_mut().transpose_mut(), par);
+	Ok((l, c))
 }
 impl<C: Conjugate> MatRef<'_, C> {
 	#[track_caller]
@@ -861,6 +942,23 @@ pub struct Svd<T> {
 pub struct SelfAdjointEigen<T> {
 	U: Mat<T>,
 	S: Diag<T>,
+}
+/// self-adjoint definite generalized eigendecomposition
+#[derive(Clone, Debug)]
+pub struct SelfAdjointGeneralizedEigen<T: ComplexField> {
+	U: Mat<T>,
+	values: Vec<T::Real>,
+}
+impl<T: ComplexField> SelfAdjointGeneralizedEigen<T> {
+	/// returns the factor $U$, whose columns satisfy $U^H B U = I$
+	pub fn U(&self) -> MatRef<'_, T> {
+		self.U.as_ref()
+	}
+
+	/// returns the eigenvalues, sorted in nondecreasing order
+	pub fn values(&self) -> &[T::Real] {
+		&self.values
+	}
 }
 /// eigendecomposition
 #[derive(Clone, Debug)]

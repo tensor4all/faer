@@ -9,6 +9,8 @@ The Rust package is `t4a-faer`, imported as `faer`. These are mathematical mappi
 | `DGETRS('T', ...)` | `lu.solve_transpose(&b, par)`; the low level module also provides `solve_transpose_in_place` |
 | `DSYEVD('V', 'L', ...)` | `a.self_adjoint_eigen(Side::Lower, par)?`; `U()` holds eigenvectors and `S().column_vector()` holds ascending eigenvalues |
 | `DSYEVD('N', 'U', ...)` | `a.self_adjoint_eigenvalues(Side::Upper, par)?` |
+| `DSYGV(1, 'V', 'L', N, A, LDA, B, LDB, W, WORK, LWORK, INFO)` | `a.self_adjoint_generalized_eigen(&b, par)?` for self-adjoint `a` and positive definite self-adjoint `b`; `U()` holds the $B$-orthonormal eigenvectors and `values()` the ascending eigenvalues |
+| `DSYGV(1, 'N', 'L', ...)` | `a.self_adjoint_generalized_eigenvalues(&b, par)?`; `ZHEGV` maps to the same two calls for `c64`. Both entry points read the lower triangles only, so an `UPLO = 'U'` call has to be transposed first |
 | `DGEMM('N', 'N', ..., ALPHA, A, ..., B, ..., BETA, C, ...)` | `linalg::matmul::matmul(&mut c, Accum::Replace, &a, &b, alpha, par)` for `beta = 0`; `Accum::Add` for `beta = 1` |
 | `DGEMM` transpose flags | Pass `a.transpose()` or `b.transpose()`; for complex conjugate transpose use `adjoint()` |
 | `A(LDA, N)` with padding between columns | `MatRef::from_column_major_slice_with_stride(&data, m, n, lda)`; use the matching `MatMut` constructor to write |
@@ -144,3 +146,4 @@ fn main() -> Result<(), EvdError> {
 - There is no direct `IPIV` interchange API in the factorization calls above. Retain faer's permutation pair when using its low level factor and solve routines.
 - `Accum` accepts replace or add, not an arbitrary BLAS `beta`. For other values, scale `c` explicitly before adding the product.
 - `self_adjoint_eigen` computes the mathematical result of the mapped `DSYEVD` call, not a promise to use LAPACK's driver or workspace layout.
+- Only `itype = 1` (`A x = lambda B x`) is provided. The `itype = 2` and `itype = 3` forms (`A B x = lambda x` and `B A x = lambda x`) have no equivalent yet; with `B = L L^H` they reduce to `L^H A L`, a congruence of `A` by `L^H` instead of `L^-1`.
