@@ -748,6 +748,16 @@ fn mat_x_mat_into_lower_impl_unchecked<'N, 'K, T: ComplexField>(
 								// triangle leaves out.
 								let (m, n, k) =
 									(dst.nrows(), dst.ncols(), lhs.ncols());
+								// fewer parts than the width when the block is
+								// too small to give every part a strip of its
+								// own: the boundaries would collapse and the
+								// section would wake participants that do
+								// nothing
+								let width =
+									crate::utils::partition::lower_area_parts(
+										m, n, 8,
+									)
+									.min(width);
 								let (drs, dcs) =
 									(dst.row_stride(), dst.col_stride());
 								let (lrs, lcs) =
