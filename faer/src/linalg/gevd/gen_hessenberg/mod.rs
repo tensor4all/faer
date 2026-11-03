@@ -683,12 +683,15 @@ pub fn generalized_hessenberg<T: ComplexField>(
 				}
 			}
 		} else {
-			// no right-hand side transformation is needed, but the rotations that
-			// were stored below the subdiagonal of the current block still have to
-			// be cleared. clear exactly the entries the branch above consumes: the
-			// rows strictly below the subdiagonal of each column in the block. the
-			// subdiagonal itself, and every entry of the columns that come after
-			// this block, must be left untouched.
+			// no right-hand side transformation is needed, but the rotations
+			// that were stored below the subdiagonal of the current block still
+			// have to be cleared. clear exactly the entries the branch above
+			// consumes: the rows strictly below the subdiagonal of each column
+			// in the block. the subdiagonal itself, and every entry of the
+			// columns that come after this block, must be left untouched.
+			// LAPACK `DGGHD3` stores the same rotations and zeroes them as it
+			// applies them, so this is that loop without the apply and it must
+			// clear the same positions, one column of the block at a time.
 			for j in jcol..jcol + nnb {
 				zip!(A.rb_mut().get_mut(j + 2.., j))
 					.for_each(|unzip!(x)| *x = zero());

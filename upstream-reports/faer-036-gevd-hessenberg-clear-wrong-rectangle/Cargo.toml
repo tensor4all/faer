@@ -1,0 +1,12 @@
+[package]
+name = "faer-031-gevd-hessenberg-clear-wrong-rectangle"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Not part of the t4a-faer workspace: this reproduces the published crate on its own.
+[workspace]
+
+[dependencies]
+# local run used the 0.24.4 checkout at faer-benchmark/extern/upstream-faer
+faer = { version = "=0.24.4", default-features = false, features = ["std", "linalg"] }

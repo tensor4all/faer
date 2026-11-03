@@ -49,6 +49,7 @@ The program prints the expected and the actual value, and exits with status 1 wh
 | [faer-033](faer-033-complex-jacobi-rotg-zero-q/) | Complex `JacobiRotation::rotg(p, 0)` returns `r = 1` instead of `p` | `faer` 0.24.4 | wrong value | tensor4all/faer#208 (`7cdf90f`) | not yet | 2026-11-03 |
 | [faer-034](faer-034-jacobi-right-2x2-conjugate/) | `JacobiRotation::apply_on_the_right_2x2` applies `conj(J)`, not `J` | `faer` 0.24.4 | wrong value | tensor4all/faer#208 (`7cdf90f`) | not yet | 2026-11-03 |
 | [faer-035](faer-035-lsmr-abs-tolerance-ignored/) | LSMR never reads `abs_tolerance` | `faer` 0.24.4 | no convergence | tensor4all/faer#208 (`7cdf90f`) | not yet | 2026-11-03 |
+| [faer-036](faer-036-gevd-hessenberg-clear-wrong-rectangle/) | The generalized Hessenberg reduction clears the reduced columns when no right transformation is requested | `faer` 0.24.4 | NaN | tensor4all/faer#219 (`8d8b648`) | not yet | 2026-11-03 |
 | [gemm-001](gemm-001-per-call-allocation/) | Every matrix product allocates on the heap | `gemm` 0.19.0 | heap allocation per call | not fixed (tensor4all/faer#56 planned) | not yet | 2026-10-30 |
 | [gemm-x86-001](gemm-x86-001-diag-negative-stride/) | A product with a diagonal gives a wrong value when the left matrix is stored backwards | `private-gemm-x86` 0.1.22 | wrong value | tensor4all/t4a-private-gemm-x86#5 (`84ca6db`) | not yet | 2026-10-29 |
 
