@@ -336,11 +336,12 @@ fn solve_shifted_1x1<T: ComplexField>(
 	let CR = A.mul_real(ca) - w * d0;
 	let cmax = CR.abs();
 	if cmax < *smin {
-		let smin_inv = smin.recip();
-		*B = B.mul_real(smin_inv);
+		// protected denominator: `d = max(|d|, smin)` instead of dividing by
+		// the shift twice (LAPACK `dtgevc`: `IF( ABS( D ).LE.DMIN ) D = DMIN`)
+		*B = B.mul_real(smin.recip());
+		return;
 	}
-	let C = CR.recip();
-	*B *= C;
+	*B *= CR.recip();
 }
 fn solve_complex_shifted_1x1<T: RealField>(
 	smin: T,
@@ -359,8 +360,12 @@ fn solve_complex_shifted_1x1<T: RealField>(
 	let CI = -wi * d0;
 	let cmax = CR.abs().fmax(CI.abs());
 	if cmax < *smin {
+		// protected denominator, as in `solve_shifted_1x1` (LAPACK `ztgevc`:
+		// `IF( CABS1( D ).LE.DMIN ) D = CMPLX( DMIN )`); dividing by the
+		// complex shift afterwards would scale it twice
 		let ref smin_inv = smin.recip();
 		zip!(B.rb_mut()).for_each(|unzip!(x)| *x *= smin_inv);
+		return;
 	}
 	if nw == 1 {
 		let ref C = CR.recip();
@@ -1419,6 +1424,81 @@ mod tests {
 	use crate::utils;
 	use dyn_stack::MemBuffer;
 	use equator::assert;
+
+	/// faer#217: a zero shift with a zero right hand side must not produce `0 *
+	/// inf`. The protected branch replaces the denominator with `smin`, so the
+	/// result is zero.
+	#[test]
+	fn shifted_1x1_zero_shift_zero_rhs_stays_finite() {
+		let smin = 1e-30_f64;
+		// ca*A - w*d0 == 0
+		for (ca, a, w, d0) in [
+			(1.0_f64, 1.0_f64, 1.0_f64, 1.0_f64),
+			(1.0, 0.0, 3.0, 0.0),
+			(2.0, 1.0, 1.0, 2.0),
+		] {
+			let mut b = 0.0_f64;
+			solve_shifted_1x1(smin, ca, a, d0, &mut b, w);
+			core::assert!(b.is_finite(), "ca={ca} a={a} w={w} d0={d0}: {b}");
+			core::assert_eq!(b, 0.0);
+		}
+		// a nonzero right hand side in the same branch stays finite as well
+		let mut b = 1.0_f64;
+		solve_shifted_1x1(smin, 1.0, 1.0, 1.0, &mut b, 1.0);
+		core::assert!(b.is_finite(), "{b}");
+		core::assert!(b > 0.0, "{b}");
+		// a subnormal, nonzero shift: dividing by it *and* by `smin` used to
+		// overflow
+		let mut b = 1.0_f64;
+		solve_shifted_1x1(smin, 1.0, 1.0, 1.0, &mut b, 1.0 + 1e-16);
+		core::assert!(b.is_finite(), "{b}");
+	}
+
+	/// The complex helper has the same protected branch, for a real right hand
+	/// side and for a complex one (two columns).
+	#[test]
+	fn complex_shifted_1x1_zero_shift_zero_rhs_stays_finite() {
+		use crate::mat::Mat;
+		let smin = 1e-30_f64;
+		let a = Mat::<f64>::from_fn(1, 1, |_, _| 1.0);
+		// real right hand side: ca*1 - wr*1 == 0, wi == 0
+		let mut b = Mat::<f64>::zeros(2, 1);
+		solve_complex_shifted_1x1(
+			smin,
+			1.0,
+			a.as_ref(),
+			1.0,
+			b.as_mut(),
+			1.0,
+			0.0,
+		);
+		core::assert!(b.is_all_finite(), "{b:?}");
+		core::assert_eq!(b[(0, 0)], 0.0);
+		// two columns: the complex case, CR == CI == 0
+		let mut b = Mat::<f64>::zeros(2, 2);
+		solve_complex_shifted_1x1(
+			smin,
+			1.0,
+			a.as_ref(),
+			1.0,
+			b.as_mut(),
+			1.0,
+			0.0,
+		);
+		core::assert!(b.is_all_finite(), "{b:?}");
+		// nonzero right hand side in the same branch
+		let mut b = Mat::<f64>::from_fn(2, 2, |i, j| (i + j + 1) as f64);
+		solve_complex_shifted_1x1(
+			smin,
+			1.0,
+			a.as_ref(),
+			1.0,
+			b.as_mut(),
+			1.0,
+			0.0,
+		);
+		core::assert!(b.is_all_finite(), "{b:?}");
+	}
 	#[test]
 	fn test_lishen_() {
 		let approx_eq = utils::approx::CwiseMat(
