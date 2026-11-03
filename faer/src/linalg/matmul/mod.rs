@@ -1677,6 +1677,18 @@ fn matmul_uninit_imp<T: ComplexField>(
 		fill_zero();
 		return;
 	}
+	if m == 1 {
+		// `matmul_imp` sends a one-row product to its `matvec_*` kernels. The x86 native block
+		// below would run its full GEMM kernel instead, which is 2.2x slower and accumulates in
+		// a different order (tensor4all/faer#200). Initialize the O(n) destination and take the
+		// same route; its prior contents are still never read, and a non-x86 target already
+		// reaches this path through the native fallback below.
+		fill_zero();
+		// SAFETY: `fill_zero` wrote every logical element, so the destination is initialized.
+		let dst = unsafe { MatMut::from_raw_parts_mut(ptr as *mut T, m, n, dst_rs, dst_cs) };
+		matmul_with_conj(dst, Accum::Replace, lhs, conj_lhs, rhs, conj_rhs, alpha, par);
+		return;
+	}
 	// The native types on x86_64 with AVX2 or AVX-512: `t4a-private-gemm-x86` with
 	// `Accum::Replace`, which writes every element in its first depth block and never loads the
 	// destination before that (on a `Par::Team`, `gemm_team` takes the same kernel). The `gemm`
@@ -2290,6 +2302,54 @@ mod tests {
 		let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, Par::Seq);
 		assert!(result[(0, 0)] == 5.0);
 		assert!(result[(1, 0)] == 11.0);
+	}
+
+	/// A one-row destination must take the same `matvec` route as the replace entry and
+	/// produce its bits. The x86 AVX2 native block used to run the full GEMM kernel for one
+	/// row, which is 2.2x slower and accumulates in a different order (tensor4all/faer#200).
+	#[test]
+	fn test_matmul_with_conj_uninit_thin_matches_replace_bits() {
+		let value = |i: usize, j: usize| {
+			let x = (i.wrapping_mul(2_654_435_761).wrapping_add(j * 40_503)) % 1009;
+			x as f64 / 503.0 - 1.0
+		};
+		for (m, k, n) in [(1usize, 141, 282), (1, 141, 141)] {
+			let lhs = Mat::<f64>::from_fn(m, k, &value);
+			let rhs = Mat::<f64>::from_fn(k, n, |i, j| value(i + 17, j + 31));
+			let mut expected = Mat::<f64>::zeros(m, n);
+			matmul_with_conj(expected.as_mut(), Accum::Replace, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, Par::Seq);
+			let mut data = alloc::vec![MaybeUninit::<f64>::uninit(); m * n];
+			let dst = MatUninitMut::from_column_major_slice_mut(&mut data, m, n);
+			let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, Par::Seq);
+			for j in 0..n {
+				for i in 0..m {
+					::core::assert_eq!(
+						result[(i, j)].to_bits(),
+						expected[(i, j)].to_bits(),
+						"{m}x{k}x{n} f64 ({i}, {j})"
+					);
+				}
+			}
+		}
+		let value = |i: usize, j: usize| {
+			let x = (i.wrapping_mul(2_654_435_761).wrapping_add(j * 40_503)) % 1009;
+			c64::new(x as f64 / 503.0 - 1.0, ((x * 7 + i) % 211) as f64 / 105.0 - 1.0)
+		};
+		for (m, k, n) in [(1usize, 141, 282), (1, 141, 141)] {
+			let lhs = Mat::<c64>::from_fn(m, k, &value);
+			let rhs = Mat::<c64>::from_fn(k, n, |i, j| value(i + 17, j + 31));
+			let mut expected = Mat::<c64>::zeros(m, n);
+			matmul_with_conj(expected.as_mut(), Accum::Replace, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, c64::new(1.0, 0.0), Par::Seq);
+			let mut data = alloc::vec![MaybeUninit::<c64>::uninit(); m * n];
+			let dst = MatUninitMut::from_column_major_slice_mut(&mut data, m, n);
+			let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, c64::new(1.0, 0.0), Par::Seq);
+			for j in 0..n {
+				for i in 0..m {
+					::core::assert_eq!(result[(i, j)].re.to_bits(), expected[(i, j)].re.to_bits(), "{m}x{k}x{n} c64 ({i}, {j}) re");
+					::core::assert_eq!(result[(i, j)].im.to_bits(), expected[(i, j)].im.to_bits(), "{m}x{k}x{n} c64 ({i}, {j}) im");
+				}
+			}
+		}
 	}
 
 	#[test]
