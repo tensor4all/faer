@@ -311,7 +311,9 @@ fn bidiag_blocked_panel<T: ComplexField>(
 		// 3. Y[i+1.., i] = A_i[i.., i+1..]^H u_i / tl_i, with A_i expressed through the stored
 		//    A and the corrections:
 		//    A[i.., i+1..]^H u - Y[i+1.., ..i] (V[i.., ..i]^H u) - R[..i, i+1..]^H (X[i.., ..i]^H u)
-	#[cfg(feature = "rayon")]
+		// The step is not parallel -- every `matmul` below is `Par::Seq` -- so the `rayon`
+		// gate that used to sit here silently dropped the whole Y update from non-`rayon`
+		// builds, leaving `Y[i+1.., i]` at whatever the caller's scratch held (#203).
 		{
 			let u = A.rb().col(i).get(i..);
 			let (y_prev, y_i) = Y.rb_mut().split_at_col_mut(i);

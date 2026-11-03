@@ -92,12 +92,14 @@ impl<T: ComplexField> JacobiRotation<T> {
 			let a = p;
 			let b = q;
 			if b == zero::<T>() {
+				// `J = I` maps `[a, 0]` to `[a, 0]`, so the returned `r` is `a`,
+				// not the constant one.
 				return (
 					Self {
 						c: one::<T>(),
 						s: zero::<T>(),
 					},
-					one::<T>(),
+					a,
 				);
 			}
 			let ref eps = eps::<T::Real>();
@@ -210,7 +212,7 @@ impl<T: ComplexField> JacobiRotation<T> {
 		m11: T,
 	) -> (T, T, T, T) {
 		let (r00, r01, r10, r11) =
-			self.adjoint().apply_on_the_left_2x2(m00, m10, m01, m11);
+			self.transpose().apply_on_the_left_2x2(m00, m10, m01, m11);
 		(r00, r10, r01, r11)
 	}
 
@@ -335,7 +337,7 @@ impl<T: ComplexField> JacobiRotation<T> {
 		});
 	}
 
-	/// returns the adjoint of `self`
+	/// returns the transpose of `self`
 	#[inline]
 	pub fn transpose(&self) -> Self {
 		Self {
@@ -353,12 +355,116 @@ impl<T: ComplexField> JacobiRotation<T> {
 		}
 	}
 
-	/// returns the transpose of `self`
+	/// returns the adjoint of `self`
 	#[inline]
 	pub fn adjoint(&self) -> Self {
 		Self {
 			c: self.c.copy(),
 			s: -&self.s,
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::{assert, c64};
+
+	fn assert_close(actual: c64, expected: c64) {
+		let tol = 1e-14 * actual.abs().max(expected.abs()).max(1.0);
+		if (actual - expected).abs() > tol {
+			panic!("actual={actual:?} expected={expected:?}");
+		}
+	}
+
+	/// `rotg(p, 0)` must return the rotation that leaves `p` alone and report
+	/// `r == p`; for complex coefficients the constant one is wrong.
+	#[test]
+	fn complex_rotg_with_zero_q_returns_p() {
+		for (re, im) in [(3.0, 2.0), (-1.5, 0.75), (0.0, 2.0), (0.0, 0.0)] {
+			let p = c64::new(re, im);
+			let (j, r) = JacobiRotation::rotg(p, c64::new(0.0, 0.0));
+			assert_close(r, p);
+			// `J * [p, 0] = [r, 0]`
+			let (x, y, _, _) = j.apply_on_the_left_2x2(
+				p,
+				c64::new(0.0, 0.0),
+				c64::new(0.0, 0.0),
+				c64::new(0.0, 0.0),
+			);
+			assert_close(x, r);
+			assert_close(y, c64::new(0.0, 0.0));
+		}
+	}
+
+	/// `A * J` has to apply `J` itself, not its conjugate.
+	#[test]
+	fn complex_apply_on_the_right_2x2_matches_explicit_product() {
+		let rotations = [
+			JacobiRotation {
+				c: c64::new(0.6, 0.0),
+				s: c64::new(0.0, 0.8),
+			},
+			JacobiRotation {
+				c: c64::new(0.0, 0.0),
+				s: c64::new(1.0, 0.0),
+			},
+			JacobiRotation {
+				c: c64::new(0.6, 0.0),
+				s: c64::new(0.3, -0.7),
+			},
+		];
+		let blocks = [
+			[
+				c64::new(1.0, 0.0),
+				c64::new(0.0, 0.0),
+				c64::new(0.0, 0.0),
+				c64::new(1.0, 0.0),
+			],
+			[
+				c64::new(1.0, 2.0),
+				c64::new(-0.5, 0.25),
+				c64::new(3.0, -1.0),
+				c64::new(0.75, 0.0),
+			],
+		];
+		for j in rotations {
+			// `J = [[c, -conj(s)], [s, c]]` by the convention of
+			// `apply_on_the_left_2x2`.
+			let jm = [[j.c, -j.s.conj()], [j.s, j.c]];
+			for [m00, m01, m10, m11] in blocks {
+				let (r00, r01, r10, r11) =
+					j.apply_on_the_right_2x2(m00, m01, m10, m11);
+				let expected = [
+					[
+						m00 * jm[0][0] + m01 * jm[1][0],
+						m00 * jm[0][1] + m01 * jm[1][1],
+					],
+					[
+						m10 * jm[0][0] + m11 * jm[1][0],
+						m10 * jm[0][1] + m11 * jm[1][1],
+					],
+				];
+				assert_close(r00, expected[0][0]);
+				assert_close(r01, expected[0][1]);
+				assert_close(r10, expected[1][0]);
+				assert_close(r11, expected[1][1]);
+			}
+		}
+	}
+
+	/// The real path is unaffected by the complex-only fix.
+	#[test]
+	fn real_apply_on_the_right_2x2_matches_explicit_product() {
+		let j = JacobiRotation {
+			c: 0.6 as f64,
+			s: 0.8 as f64,
+		};
+		let (m00, m01, m10, m11) = (1.0, 2.0, 3.0, 4.0);
+		let (r00, r01, r10, r11) = j.apply_on_the_right_2x2(m00, m01, m10, m11);
+		assert!((r00 - (m00 * j.c + m01 * j.s)).abs() <= 1e-14);
+		assert!((r01 - (-m00 * j.s + m01 * j.c)).abs() <= 1e-14);
+		assert!((r10 - (m10 * j.c + m11 * j.s)).abs() <= 1e-14);
+		assert!((r11 - (-m10 * j.s + m11 * j.c)).abs() <= 1e-14);
 	}
 }
