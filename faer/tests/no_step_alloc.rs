@@ -120,6 +120,25 @@ fn parallel_regions_allocate_nothing() {
 			assert!(parallel > 0, "Pfaffian, width {width}: no parallel region");
 			assert_eq!(allocs, 0, "Pfaffian, width {width}");
 
+			// a plain product on the team: the x86 kernel's parallel job tables come from the
+			// calling thread's workspace (faer#223), so the same shape again allocates nothing,
+			// and so does a larger shape once the workspace has grown to it
+			#[cfg(target_arch = "x86_64")]
+			if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") {
+				// the same shape again, a larger one (the workspace grows), then one below the
+				// grown size
+				for &(m, n, k) in &[(384usize, 320usize, 448usize), (768, 320, 448), (384, 320, 448)] {
+					let a = sample(m, k, 31);
+					let b = sample(k, n, 32);
+					let mut c = sample(m, n, 33);
+					let (allocs, parallel) = counted(|| {
+						faer::linalg::matmul::matmul(c.as_mut(), faer::Accum::Replace, a.as_ref(), b.as_ref(), 1.0, par.reborrow());
+					});
+					assert!(parallel > 0, "matmul {m}x{n}x{k}, width {width}: no parallel region");
+					assert_eq!(allocs, 0, "matmul {m}x{n}x{k}, width {width}");
+				}
+			}
+
 			// `join_sized`, the LU swap stage's split, with closures that capture
 			let mut left = vec![0usize; 4];
 			let mut right = vec![0usize; 4];

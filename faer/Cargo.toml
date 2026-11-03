@@ -56,8 +56,10 @@ nano-gemm = { version = "0.2.2", default-features = false }
 # DstKind::Upper/Lower writes below the diagonal on the 256-bit path (the library keeps the
 # name `private_gemm_x86`, so no `use` changes). 0.1.25 and later add `gemm_with(.., &dyn Fork)`,
 # so a `Par::Team` runs the kernel on its own members. 0.1.27 reverses the diagonal with a
-# negative depth stride (faer#113), which `spicy_matmul` relies on.
-t4a-private-gemm-x86 = { version = "0.1.27", default-features = false, optional = true }
+# negative depth stride (faer#113), which `spicy_matmul` relies on. 0.1.28 adds
+# `gemm_with_scratch`, which takes the kernel's parallel job tables from caller memory
+# (faer#223): `gemm_team` lends it this thread's workspace, so a warm product allocates nothing.
+t4a-private-gemm-x86 = { version = "0.1.28", default-features = false, optional = true }
 
 [features]
 default = [

@@ -550,11 +550,40 @@ pub(crate) mod kernel {
 	}
 }
 
+/// The x86 kernel's job tables, per calling thread: grown on demand to
+/// [`MilliScratch::required`](private_gemm_x86::MilliScratch::required) and reused by every
+/// product the thread runs, so a warm product allocates nothing (faer#223). Only the bytes
+/// survive the call: nothing is stored in the team, and the borrow ends with `f`.
+///
+/// `None` when the tables are already lent out, which is what a product nested on this thread
+/// sees; the kernel then allocates its own tables for that call.
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
+fn job_tables<R>(m: usize, n: usize, f: impl FnOnce(Option<private_gemm_x86::MilliScratch<'_>>) -> R) -> R {
+	use private_gemm_x86::MilliScratch;
+	thread_local! {
+		static TABLES: core::cell::RefCell<Vec<u8>> = const { core::cell::RefCell::new(Vec::new()) };
+	}
+	TABLES.with(|cell| match cell.try_borrow_mut() {
+		Ok(mut tables) => {
+			let need = MilliScratch::required(m, n);
+			if tables.len() < need {
+				tables.resize(need, 0);
+			}
+			f(Some(MilliScratch::new(&mut tables[..])))
+		},
+		Err(_) => f(None),
+	})
+}
+
 /// A plain product on a team token (`dst := alpha * dst + beta * lhs * rhs`, the contract of
 /// `gemm::gemm` as [`gemm_tiled`]): on x86_64 with AVX2 the `private_gemm_x86` kernel on the
 /// team's members ([`kernel::with_fork`], width from the gate [`kernel::kernel_width`], two
 /// sections); below the gate the same kernel on the calling thread. Other targets and dtypes
 /// take [`gemm_tiled`].
+///
+/// The kernel's parallel job tables come from [`job_tables`], the calling thread's reusable
+/// workspace, so a warm product allocates nothing (faer#223); a product that finds that
+/// workspace lent out (a nested one) has the kernel allocate the tables instead.
 ///
 /// # Safety
 ///
@@ -588,7 +617,7 @@ pub(crate) unsafe fn gemm_team<E: 'static + Copy + Send + Sync>(
 		// `dst := (beta == Add ? dst : 0) + alpha * lhs * rhs`: `alpha` of the call is the
 		// identity whenever `read_dst` holds (the plain entry only passes 0 or 1)
 		macro_rules! go {
-			($call:path, $last:expr) => {
+			($call:path, $($tail:expr),* $(,)?) => {
 				$call(
 					dtype,
 					IType::U64,
@@ -614,13 +643,16 @@ pub(crate) unsafe fn gemm_team<E: 'static + Copy + Send + Sync>(
 					rhs_cs,
 					conj_rhs,
 					&raw const beta as *const (),
-					$last,
+					$($tail),*
 				)
 			};
 		}
 		let call = |fork: Option<&dyn Fork>| unsafe {
 			match fork {
-				Some(fork) => go!(gemm_with, fork),
+				Some(fork) => job_tables(m, n, |tables| match tables {
+					Some(tables) => go!(gemm_with_scratch, fork, tables),
+					None => go!(gemm_with, fork),
+				}),
 				None => go!(gemm, 1),
 			}
 		};
@@ -1363,6 +1395,100 @@ mod tests {
 				}
 			}
 			assert!(d < 1e-9);
+		});
+	}
+
+	/// faer#223: the kernel's parallel job tables come from the calling thread's workspace, which
+	/// grows with the product and is reused afterwards. A grow -> shrink sequence on one thread
+	/// still matches the sequential route, and the workspace only moves where the tables live, so
+	/// each dtype keeps the precision its own route has.
+	#[test]
+	fn gemm_team_reuses_its_workspace_across_shapes() {
+		// grow, then shrink below the first product, on the thread that holds the team
+		let shapes = [(96usize, 128usize, 64usize), (384, 320, 256), (48, 32, 16)];
+
+		/// The largest entry-wise difference, refusing a non-finite one: `max` would drop a NaN
+		/// and let it pass.
+		fn spread(diffs: impl Iterator<Item = (f64, f64)>) -> (f64, f64) {
+			let mut d: f64 = 0.0;
+			let mut scale: f64 = 0.0;
+			for (diff, want) in diffs {
+				assert!(diff.is_finite(), "non-finite difference");
+				d = d.max(diff);
+				scale = scale.max(want);
+			}
+			(d, scale)
+		}
+
+		with_par(4, |mut par| {
+			for &(m, n, k) in &shapes {
+				let a = rand_mat(m, k, 1);
+				let b = rand_mat(k, n, 2);
+				let mut want = rand_mat(m, n, 3);
+				let mut got = want.clone();
+				matmul(want.as_mut(), Accum::Replace, a.as_ref(), b.as_ref(), 1.0, Par::Seq);
+				matmul(got.as_mut(), Accum::Replace, a.as_ref(), b.as_ref(), 1.0, par.reborrow());
+				let (d, scale) = spread((0..n).flat_map(|j| (0..m).map(move |i| (i, j))).map(|(i, j)| {
+					((want[(i, j)] - got[(i, j)]).abs(), want[(i, j)].abs())
+				}));
+				assert!(d <= 1e-13 * (1.0 + scale) * (k as f64).sqrt().max(1.0), "f64 {m}x{n}x{k}: {d}");
+			}
+
+			// complex, the same bound on the magnitude of the difference
+			for &(m, n, k) in &shapes {
+				let a = Mat::<c64>::from_fn(m, k, |i, j| c64::new(i as f64 * 0.01 - j as f64 * 0.003, (i + j) as f64 * 0.002));
+				let b = Mat::<c64>::from_fn(k, n, |i, j| c64::new((i * j % 7) as f64 * 0.1, i as f64 * 0.01 - j as f64 * 0.01));
+				let mut want = Mat::<c64>::zeros(m, n);
+				let mut got = Mat::<c64>::zeros(m, n);
+				matmul(want.as_mut(), Accum::Replace, a.as_ref(), b.as_ref(), c64::new(1.0, 0.0), Par::Seq);
+				matmul(got.as_mut(), Accum::Replace, a.as_ref(), b.as_ref(), c64::new(1.0, 0.0), par.reborrow());
+				let (d, scale) = spread((0..n).flat_map(|j| (0..m).map(move |i| (i, j))).map(|(i, j)| {
+					((want[(i, j)] - got[(i, j)]).norm_sqr().sqrt(), want[(i, j)].norm_sqr().sqrt())
+				}));
+				assert!(d <= 1e-13 * (1.0 + scale) * (k as f64).sqrt().max(1.0), "c64 {m}x{n}x{k}: {d}");
+			}
+
+			// single precision: its own epsilon, not the double one
+			for &(m, n, k) in &shapes {
+				let a = Mat::<f32>::from_fn(m, k, |i, j| (i as f32 * 0.01 - j as f32 * 0.003).sin());
+				let b = Mat::<f32>::from_fn(k, n, |i, j| ((i * j % 7) as f32 * 0.1).cos());
+				let mut want = Mat::<f32>::zeros(m, n);
+				let mut got = Mat::<f32>::zeros(m, n);
+				matmul(want.as_mut(), Accum::Replace, a.as_ref(), b.as_ref(), 1.0, Par::Seq);
+				matmul(got.as_mut(), Accum::Replace, a.as_ref(), b.as_ref(), 1.0, par.reborrow());
+				let (d, scale) = spread((0..n).flat_map(|j| (0..m).map(move |i| (i, j))).map(|(i, j)| {
+					((want[(i, j)] - got[(i, j)]).abs() as f64, want[(i, j)].abs() as f64)
+				}));
+				assert!(d <= 2e-5 * (1.0 + scale) * (k as f64).sqrt().max(1.0), "f32 {m}x{n}x{k}: {d}");
+			}
+
+			// complex single precision, at the same epsilon
+			for &(m, n, k) in &shapes {
+				let a = Mat::<crate::c32>::from_fn(m, k, |i, j| crate::c32::new(i as f32 * 0.01, (i + j) as f32 * 0.002));
+				let b = Mat::<crate::c32>::from_fn(k, n, |i, j| crate::c32::new((i * j % 7) as f32 * 0.1, i as f32 * 0.01 - j as f32 * 0.01));
+				let mut want = Mat::<crate::c32>::zeros(m, n);
+				let mut got = Mat::<crate::c32>::zeros(m, n);
+				matmul(want.as_mut(), Accum::Replace, a.as_ref(), b.as_ref(), crate::c32::new(1.0, 0.0), Par::Seq);
+				matmul(got.as_mut(), Accum::Replace, a.as_ref(), b.as_ref(), crate::c32::new(1.0, 0.0), par.reborrow());
+				let (d, scale) = spread((0..n).flat_map(|j| (0..m).map(move |i| (i, j))).map(|(i, j)| {
+					(
+						(want[(i, j)] - got[(i, j)]).norm_sqr().sqrt() as f64,
+						want[(i, j)].norm_sqr().sqrt() as f64,
+					)
+				}));
+				assert!(d <= 2e-5 * (1.0 + scale) * (k as f64).sqrt().max(1.0), "c32 {m}x{n}x{k}: {d}");
+			}
+		});
+	}
+
+	/// faer#223: a product nested on the thread that already holds the workspace gets no tables
+	/// from it (the kernel allocates its own for that call) instead of panicking on the borrow.
+	#[test]
+	#[cfg(all(target_arch = "x86_64", feature = "std"))]
+	fn job_tables_are_not_lent_twice() {
+		super::job_tables(8, 8, |outer| {
+			assert!(outer.is_some(), "the first product gets the workspace");
+			super::job_tables(8, 8, |inner| assert!(inner.is_none(), "a nested product must fall back"));
 		});
 	}
 
