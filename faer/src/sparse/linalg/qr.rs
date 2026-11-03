@@ -2123,6 +2123,32 @@ impl<'a, I: Index, T> QrRef<'a, I, T> {
 	}
 }
 impl<I: Index> SymbolicQr<I> {
+	/// Returns the selected symbolic factorization and its structure.
+	///
+	/// The reference borrows this analysis; it does not copy or expose mutable
+	/// access to the symbolic storage.
+	///
+	/// # Examples
+	/// ```
+	/// use faer::sparse::{SparseColMat, Triplet};
+	/// use faer::sparse::linalg::qr::{factorize_symbolic_qr, QrSymbolicParams, SymbolicQrRaw};
+	/// use faer::sparse::linalg::SupernodalThreshold;
+	/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+	/// let a = SparseColMat::<usize, f64>::try_new_from_triplets(
+	///     1, 1, &[Triplet { row: 0, col: 0, val: 2.0 }],
+	/// )?;
+	/// let symbolic = factorize_symbolic_qr(a.symbolic(), QrSymbolicParams {
+	///     supernodal_flop_ratio_threshold: SupernodalThreshold::FORCE_SIMPLICIAL,
+	///     ..Default::default()
+	/// })?;
+	/// assert!(matches!(symbolic.raw(), SymbolicQrRaw::Simplicial(_)));
+	/// # Ok(())
+	/// # }
+	/// ```
+	#[inline]
+	pub fn raw(&self) -> &SymbolicQrRaw<I> {
+		&self.raw
+	}
 	/// number of rows of $A$
 	#[inline]
 	pub fn nrows(&self) -> usize {

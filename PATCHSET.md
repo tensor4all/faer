@@ -3,6 +3,14 @@
 The ledger of the experiments this fork runs. It records the diff against
 upstream `faer`.
 
+## Pending public API extension
+
+- EXPERIMENT: `SymbolicQr::raw()` exposes a read-only borrowed reference to the
+  already public symbolic variant, enabling downstream algorithm inspection
+  without private-layout assumptions (AtelierArith/Colmat.jl#2). This adds no
+  numerical dispatch or allocation; focused public API and doctest validation
+  are recorded in the proposing PR. No performance claim or adoption is made.
+
 ## Status legend
 
 - **TODO** — not started. The issue column names the driving issue, or `—`.
