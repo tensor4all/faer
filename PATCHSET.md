@@ -33,7 +33,6 @@ gate has changed and two kinds of adoption are now in the ledger.
   the tridiagonal QR sweep's diagonal update (`#76`), and the native indexed/diagonal GEMM extents fix. A performance claim for the last one would need a
   declared cell that executes it, and there is none.
 
-
 ## Held and dropped candidates (2026-10-19)
 
 | Candidate | State | Why it stays there |

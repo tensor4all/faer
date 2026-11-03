@@ -23,8 +23,9 @@
 - Paired probe (replace vs fresh, same buffers, one process, per-iteration interleave, median of 200,
   three alternating process rounds), broccoli EPYC 7702P, measured CPU 30 at 1T, 28-31 at 4T (one
   L3 domain) and 28-35 at 8T (two 4-core L3 domains, the topology limit), observer 12-15, load
-  8.96-12.86 on 64 cores. At every thread count, the `m = 1` cells moved from fresh/replace
-  0.45-0.70 with 1-50 of 282 bits equal to 1.12-2.03 with all bits equal; `m = 2/8/16` and
+  8.96-12.86 on 64 cores. The ratio is `replace_ns / fresh_ns`, so below 1 means fresh is slower. At
+  every thread count, the `m = 1` cells moved from 0.45-0.70 with 1-50 of 282 bits equal to
+  1.12-2.03 with all bits equal; `m = 2/8/16` and
   `141x282x141` are unchanged (ratios within 3%, all bits equal in both builds).
 - Apple M5 Max (aarch64), `Par::Seq`: unchanged within noise, all bits equal, because that target
   already took the same path.
