@@ -321,7 +321,15 @@ fn partial_schur_real_imp<T: RealField>(
 			let f = n.sqrt().recip();
 			zip!(V.rb_mut().col_mut(0)).for_each(|unzip!(y)| *y = f.copy());
 		}
-		iterate_arnoldi(A, H.as_mut(), V.as_mut(), 1, min_dim, par.reborrow(), stack);
+		iterate_arnoldi(
+			A,
+			H.as_mut(),
+			V.as_mut(),
+			1,
+			min_dim,
+			par.reborrow(),
+			stack,
+		);
 		let mut k = min_dim;
 		for iter in 0..restarts {
 			_ = iter;
@@ -634,7 +642,12 @@ fn partial_schur_real_imp<T: RealField>(
 	let H = H.rb().get(..n, ..n);
 	let V = V.rb().get(.., ..n);
 	let mut X = X.rb_mut().get_mut(..n, ..n);
-	linalg::evd::evd_from_real_schur_imp(H, X.as_mut(), par.reborrow(), auto!(T));
+	linalg::evd::evd_from_real_schur_imp(
+		H,
+		X.as_mut(),
+		par.reborrow(),
+		auto!(T),
+	);
 	let mut vecs = tmp.rb_mut().get_mut(.., ..n);
 	matmul(vecs.rb_mut(), Accum::Replace, V, X.rb(), one(), par);
 	let V = vecs.rb();
@@ -773,7 +786,15 @@ fn partial_schur_cplx_imp<T: ComplexField>(
 			let f = n.sqrt().recip();
 			zip!(V.rb_mut().col_mut(0)).for_each(|unzip!(y)| *y = f.copy());
 		}
-		iterate_arnoldi(A, H.as_mut(), V.as_mut(), 1, min_dim, par.reborrow(), stack);
+		iterate_arnoldi(
+			A,
+			H.as_mut(),
+			V.as_mut(),
+			1,
+			min_dim,
+			par.reborrow(),
+			stack,
+		);
 		let mut k = min_dim;
 		for iter in 0..restarts {
 			_ = iter;
@@ -1245,6 +1266,28 @@ pub fn partial_svd_scratch<T: ComplexField>(
 		Ord::max(params.max_dim, Ord::max(2 * MIN_DIM, 2 * n_sval)),
 		k,
 	);
+	if max_dim >= k {
+		// full-subspace branch: materialise the operator, then run the dense svd
+		return StackReq::all_of(&[
+			temp_mat_scratch::<T>(m, n),
+			temp_mat_scratch::<T>(n, 1),
+			temp_mat_scratch::<T>(m, k),
+			temp_mat_scratch::<T>(n, k),
+			StackReq::new::<T>(k),
+			StackReq::new::<usize>(k),
+			StackReq::all_of(&[
+				A.apply_scratch(1, par),
+				linalg::svd::svd_scratch::<T>(
+					m,
+					n,
+					linalg::svd::ComputeSvdVectors::Thin,
+					linalg::svd::ComputeSvdVectors::Thin,
+					par,
+					default(),
+				),
+			]),
+		]);
+	}
 
 	let H = temp_mat_scratch::<T>(max_dim, max_dim + 1);
 	let P = temp_mat_scratch::<T>(m, max_dim);

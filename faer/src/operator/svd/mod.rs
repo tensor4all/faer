@@ -1,4 +1,4 @@
-use crate::assert;
+mod full;
 use crate::internal_prelude::*;
 use crate::matrix_free::BiLinOp;
 use linalg::matmul::matmul;
@@ -130,6 +130,17 @@ pub fn partial_svd_imp<T: ComplexField>(
 ) -> usize {
 	let m = A.nrows();
 	let n = A.ncols();
+	if max_dim >= Ord::min(m, n) {
+		return full::partial_full_svd(
+			left_singular_vecs,
+			right_singular_vecs,
+			singular_vals,
+			A,
+			n_eigval,
+			par,
+			stack,
+		);
+	}
 	let (mut H, stack) =
 		temp_mat_zeroed::<T, _, _>(max_dim, max_dim + 1, stack);
 	let mut H = H.as_mat_mut();
@@ -141,7 +152,6 @@ pub fn partial_svd_imp<T: ComplexField>(
 		temp_mat_zeroed::<T, _, _>(Ord::max(m, n), max_dim, stack);
 	let mut tmp = tmp.as_mat_mut();
 	let mut active = 0usize;
-	assert!(max_dim < Ord::min(m, n));
 
 	let (mut X, stack) = temp_mat_zeroed::<T, _, _>(max_dim, max_dim, stack);
 	let mut X = X.as_mat_mut();
