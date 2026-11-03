@@ -483,3 +483,148 @@ fn complex_identity_pencil_both_sides_are_finite() {
 		assert!(rr < 1e-12, "right column {j} residual {rr:e}");
 	}
 }
+
+/// A regular real pencil whose eigenvalues are known in closed form:
+/// `B = X X^T + I` is symmetric positive definite and `C` is the tridiagonal
+/// 1-D Laplacian, so `A = B*C` has the `n` real, distinct eigenvalues
+/// `2 - 2*cos(k*pi/(n+1))`.
+fn laplacian_pencil(n: usize) -> (Mat<f64>, Mat<f64>) {
+	let x = Mat::<f64>::from_fn(n, n, |i, j| (1 + i + j * n) as f64 / (n * n) as f64);
+	let b = &x * x.transpose() + Mat::<f64>::identity(n, n);
+	let c = Mat::<f64>::from_fn(n, n, |i, j| {
+		if i == j {
+			2.0
+		} else if i.abs_diff(j) == 1 {
+			-1.0
+		} else {
+			0.0
+		}
+	});
+	(&b * &c, b)
+}
+
+/// Same as [`gevd_real_parts`], but also returns `beta`, which the eigenvalue
+/// is `alpha / beta` for. The pencils in this file are not normalized, so the
+/// callers cannot assume `beta == 1`.
+fn gevd_real_with_beta(
+	a: &Mat<f64>,
+	b: &Mat<f64>,
+	left: bool,
+	right: bool,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Mat<f64>, Mat<f64>) {
+	let n = a.nrows();
+	let mut a = a.clone();
+	let mut b = b.clone();
+	let mut s_re = Diag::<f64>::zeros(n);
+	let mut s_im = Diag::<f64>::zeros(n);
+	let mut beta = Diag::<f64>::zeros(n);
+	let mut u_left = Mat::<f64>::zeros(n, n);
+	let mut u_right = Mat::<f64>::zeros(n, n);
+	let mut mem = MemBuffer::new(gevd_scratch::<f64>(
+		n,
+		pair(left),
+		pair(right),
+		ParShape::Seq,
+		Spec::<GevdParams, f64>::default(),
+	));
+	gevd_real(
+		a.as_mut(),
+		b.as_mut(),
+		s_re.as_mut(),
+		s_im.as_mut(),
+		beta.as_mut(),
+		if left { Some(u_left.as_mut()) } else { None },
+		if right { Some(u_right.as_mut()) } else { None },
+		Par::Seq,
+		MemStack::new(&mut mem),
+		Spec::<GevdParams, f64>::default(),
+	)
+	.unwrap();
+	let s_re: Vec<f64> = s_re.column_vector().iter().copied().collect();
+	let s_im: Vec<f64> = s_im.column_vector().iter().copied().collect();
+	let beta: Vec<f64> = beta.column_vector().iter().copied().collect();
+	(s_re, s_im, beta, u_left, u_right)
+}
+
+/// faer#219: requesting only the left eigenvectors changed the finite spectrum
+/// into nonfinite values, while the right-only and the both-sides requests
+/// succeeded on the same pencil.
+///
+/// The generalized Hessenberg reduction cleared the stored rotations of the
+/// first block with a rectangle that also covered the already reduced columns,
+/// whenever no right-hand side output (`Z`) was requested. `A` and `B` reached
+/// the QZ iteration with that data destroyed, so the iteration never deflated
+/// and `alpha`/`beta` kept their initial zeros for most indices.
+#[test]
+fn spectrum_does_not_depend_on_which_eigenvectors_are_requested() {
+	// 24 exercises the unblocked reduction, 64 and 96 the blocked one.
+	for n in [24usize, 64, 96] {
+		let (a, b) = laplacian_pencil(n);
+		let scale = a.norm_max() + b.norm_max();
+		let mut expected: Vec<f64> = (0..n)
+			.map(|k| {
+				let theta = std::f64::consts::PI * (k + 1) as f64 / (n + 1) as f64;
+				2.0 - 2.0 * theta.cos()
+			})
+			.collect();
+		expected.sort_by(f64::total_cmp);
+
+		let modes = [
+			(false, false),
+			(true, false),
+			(false, true),
+			(true, true),
+		];
+		let mut spectra: Vec<Vec<f64>> = Vec::new();
+		for (left, right) in modes {
+			let (s_re, s_im, beta, u_left, u_right) = gevd_real_with_beta(&a, &b, left, right);
+			for j in 0..n {
+				assert!(
+					s_re[j].is_finite() && s_im[j].is_finite() && beta[j].is_finite(),
+					"n={n} left={left} right={right}: index {j} is not finite",
+				);
+				assert!(
+					beta[j] != 0.0,
+					"n={n} left={left} right={right}: index {j} has beta == 0",
+				);
+			}
+			let mut eig: Vec<f64> = (0..n).map(|j| s_re[j] / beta[j]).collect();
+			eig.sort_by(f64::total_cmp);
+			for j in 0..n {
+				let err = (eig[j] - expected[j]).abs();
+				assert!(
+					err < 1e-8 * scale,
+					"n={n} left={left} right={right}: eigenvalue {j} is {} not {} ({err:e})",
+					eig[j],
+					expected[j],
+				);
+			}
+			if left {
+				assert!(u_left.is_all_finite(), "n={n}: left vectors are not finite");
+				for j in 0..n {
+					let y = u_left.col(j);
+					assert!(y.norm_l2() > 0.0, "n={n}: left column {j} is zero");
+					assert_eq!(s_im[j], 0.0, "n={n}: column {j} must be real");
+					let r = residual_left_real(&a, &b, y, s_re[j], beta[j]);
+					assert!(
+						r < 1e-8 * scale,
+						"n={n}: left column {j} residual {r:e}",
+					);
+				}
+			}
+			if right {
+				assert!(u_right.is_all_finite(), "n={n}: right vectors are not finite");
+			}
+			spectra.push(eig);
+		}
+		for s in &spectra[1..] {
+			for j in 0..n {
+				let err = (s[j] - spectra[0][j]).abs();
+				assert!(
+					err < 1e-8 * scale,
+					"n={n}: eigenvalue {j} depends on the requested side ({err:e})",
+				);
+			}
+		}
+	}
+}

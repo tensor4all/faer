@@ -683,10 +683,18 @@ pub fn generalized_hessenberg<T: ComplexField>(
 				}
 			}
 		} else {
-			zip!(A.rb_mut().get_mut(jcol + 2.., jcol..n - jcol - 2))
-				.for_each(|unzip!(x)| *x = zero());
-			zip!(B.rb_mut().get_mut(jcol + 2.., jcol..n - jcol - 2))
-				.for_each(|unzip!(x)| *x = zero());
+			// no right-hand side transformation is needed, but the rotations that
+			// were stored below the subdiagonal of the current block still have to
+			// be cleared. clear exactly the entries the branch above consumes: the
+			// rows strictly below the subdiagonal of each column in the block. the
+			// subdiagonal itself, and every entry of the columns that come after
+			// this block, must be left untouched.
+			for j in jcol..jcol + nnb {
+				zip!(A.rb_mut().get_mut(j + 2.., j))
+					.for_each(|unzip!(x)| *x = zero());
+				zip!(B.rb_mut().get_mut(j + 2.., j))
+					.for_each(|unzip!(x)| *x = zero());
+			}
 		}
 		if top > 0 {
 			for mut M in [A.rb_mut(), B.rb_mut()] {
