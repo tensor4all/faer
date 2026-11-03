@@ -48,9 +48,10 @@ takes them from caller memory; this is the faer side that supplies them.
 - aarch64: `cargo check -p t4a-faer --lib --target aarch64-unknown-linux-gnu` passes. The whole
   change is inside `cfg(all(target_arch = "x86_64", feature = "std"))`, the crate's gemm-x86
   dependency is x86_64-only, and `gemm_tiled` / `Par` are untouched.
-- Constraints: `t4a-private-gemm-x86` 0.1.28 is not on crates.io yet (0.1.27 is the newest
-  published), so this branch requires the publish and its `Cargo.lock` entry cannot be
-  regenerated before it; the local verification patched the dependency to the merged commit with
-  `--config 'patch.crates-io...'`, which is not part of the change.
+- Constraints: `t4a-private-gemm-x86` 0.1.28 was not on crates.io when this branch was written
+  (0.1.27 was the newest published), so the local verification patched the dependency to the
+  merged commit with `--config 'patch.crates-io...'`, which is not part of the change. 0.1.28 was
+  published on 2026-11-03 before the merge; `origin/main` pins it from the registry, and the
+  merge commit's `Cargo.lock` carries that entry.
 - Upstream: the team route and `gemm_with_scratch` are fork-only. Nothing was prepared for or sent
   upstream.

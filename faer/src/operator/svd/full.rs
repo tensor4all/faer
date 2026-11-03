@@ -313,4 +313,56 @@ mod tests {
 		core::assert!(V[(0, 0)] == 7.0);
 		core::assert!(s[0] == 7.0);
 	}
+
+	// the boundary of the full-projection clip: at `min(m, n) == 2 * MIN_DIM`
+	// the driver clips `max_dim` to `min(m, n)` and takes the dense branch; one
+	// larger keeps `max_dim` below it and takes the iterative branch (#229)
+	#[test]
+	fn projection_clip_boundary() {
+		// `MIN_DIM` is private to `operator::eigen` and is 32, so the boundary
+		// is 64 here
+		let n = 64;
+		let A = Mat::<f64>::identity(n, n);
+		let s = check(A.as_ref(), 1, default());
+		core::assert!((s[0] - 1.0).abs() < 1e-12);
+
+		// one larger: `max_dim` stays at 64 and the iterative branch runs
+		let n = 65;
+		let A = Mat::<f64>::from_fn(n, n, |i, j| {
+			if i == j {
+				(n - i) as f64
+			} else {
+				0.0
+			}
+		});
+		let s = check(A.as_ref(), 1, default());
+		core::assert!((s[0] - n as f64).abs() < 1e-9);
+	}
+
+	// an empty operator has `min(m, n) == 0`: the driver must return a zero
+	// count before the clipped `max_dim` can violate the projection assert, and
+	// must leave the outputs untouched (#229)
+	#[test]
+	fn empty_shape_is_reported() {
+		let A = Mat::<f64>::zeros(0, 0);
+		let mut U = Mat::<f64>::zeros(0, 1);
+		let mut V = Mat::<f64>::zeros(0, 1);
+		let mut s = [7.0f64];
+		let v0 = Col::<f64>::zeros(0);
+		let params: PartialEigenParams = default();
+		let mut mem = MemBuffer::new(partial_svd_scratch(&A, 1, Par::Seq.shape(), params));
+		let info = partial_svd(
+			U.as_mut(),
+			V.as_mut(),
+			&mut s,
+			&A,
+			v0.as_ref(),
+			1e-12,
+			Par::Seq,
+			MemStack::new(&mut mem),
+			params,
+		);
+		core::assert!(info.n_converged_eigen == 0);
+		core::assert!(s[0] == 7.0);
+	}
 }
