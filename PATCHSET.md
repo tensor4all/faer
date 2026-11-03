@@ -53,7 +53,7 @@ gate has changed and two kinds of adoption are now in the ledger.
 | Workspace | `faer-ffi` is excluded (the C API and its cbindgen build are unused by tensor4all). |
 | Upstream base | Synced with Codeberg `0ecd846` (2026-10-17) by a merge commit, so `upstream/main` is an ancestor of this branch. Those nine upstream commits since the previous base `ddbd2ae` (the sparse CSC example doc, `MatMut::from_row_major_slice_with_stride_mut`'s strides, the CG/BiCGSTAB uninitialized read) were written upstream by Paul and Connor Smith and had already been cherry-picked here on 2026-10-22 in `9f3dc58`, `ae9b979` and `064016e` (their messages name Codeberg #305, #326 and `1b2d9a9`; the tests `codeberg_305`/`codeberg_326` came with them). The direction is upstream to fork, not the reverse: nothing was fed back upstream. The cherry-picked content is byte-identical to upstream's, so the sync changes no file -- the merged tree hash equals the pre-merge tree hash. Later syncs record the new base here. |
 | Publication | crates.io, in the order `t4a-faer-traits` then `t4a-faer`. Releases are tagged `faer-v<faer version>` and published by hand from a clean checkout of the tag; a `v<faer version>` tag would also start `publish.yml`. A version that is already on crates.io is skipped, so a release that bumps only one crate still succeeds. |
-| Released | Latest: `t4a-faer 0.27.1` with `t4a-faer-traits 0.24.2`, published from the commit tagged `faer-v0.27.1` (see the release section at the end). The published `src/**` is byte-identical to the tagged commit, so that commit is the revision a consumer pins. A later commit needs a new version. Earlier releases carry their own `faer-v<version>` tags. |
+| Released | Latest: `t4a-faer 0.28.2` with `t4a-faer-traits 0.24.2`, published from the commit tagged `faer-v0.28.2` (see the release section at the end). The published `src/**` is byte-identical to the tagged commit, so that commit is the revision a consumer pins. A later commit needs a new version. Earlier releases carry their own `faer-v<version>` tags. |
 | LICENSE | A `LICENSE` copy lives in each crate directory so the published archive ships the MIT text (`license-file` next to `license` makes Cargo warn). |
 
 ## Experiments
@@ -343,3 +343,13 @@ Only this ledger addendum changes in this round: no implementation changes,
 commit, push, PR or merge.
 
 **R4 — COMPLETE; no findings; disposition: adopt the scoped no-change conclusion.** The panel caller satisfies the actual partition/GEMM shape and non-aliasing contracts and completes logical pivot exchanges before the trailing helper (`faer/src/linalg/pfaffian/mod.rs:215–291,500–627`; `faer/src/utils/partition.rs:23–56`; `faer/src/linalg/matmul/mod.rs:1885–1889,1932–1974`). In locked threadteam 0.2.0, participant panics are caught, `JoinGuard` joins dispatched work before panic resumption, and leader/reservation/Pool Drop paths release ownership without a harmful double join (`src/team.rs:550–595`; `src/awake.rs:395–400,742–861`; `src/exec.rs:750–824`; `src/reserve.rs:24–28,92–98,309–328`; `src/pool.rs:247–279,353–368`). This closes those R1–R3 source-contract assumptions only; runtime panic injection was not performed, and the existing 48/48 numerical result is separate evidence. No corrective code change is adopted because no concrete contract violation was established; no build, test, benchmark, commit, push, PR operation or evo access occurred in this round.
+
+## Released: `t4a-faer` 0.28.2 (2026-11-03)
+
+`t4a-faer` 0.28.2; `t4a-faer-traits` stays 0.24.2 (no change in `faer-traits/`). Published from the
+merge commit of the version-bump PR, tagged `faer-v0.28.2`. A patch release with no public API
+change: it only adds the one-row dispatch branch inside `matmul_uninit_imp` and a regression test.
+It carries the fix for tensor4all/faer#200 (fresh matmul took the x86 AVX2 GEMM kernel for one row,
+2.2x slower and with different last bits than the replace path); the evidence and limits are in its
+ledger row and `docs/worklogs/2026-11-03-matmul-uninit-thin.md`. `n = 1` is unchanged and remains a
+separate decision recorded in #200.
