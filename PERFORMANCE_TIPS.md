@@ -104,3 +104,12 @@ recursion node, at serial `dgeqr2`'s speed. Splitting its applies by rows or pac
 changed it by 1 ms; overlapping it with the previous block's trailing apply on a split team
 (look-ahead) is the lever (`docs/worklogs/2026-10-30-qr-lookahead.md`, faer#160). Before threading a
 stage further, time it at block widths that differ by 4x: if it does not follow the arithmetic, hide it.
+
+## An overwrite-only entry inherits the replace entry's dispatch
+
+`matmul_with_conj_uninit` writes a fresh destination and so skipped the replace entry's one-row
+`matvec` branch, landing on the full GEMM kernel: 2.2x slower and different last bits on x86 AVX2,
+while aarch64's fallback to `matmul_with_conj` was unaffected. When an entry promises only that it
+does not read the destination, keep the dispatch shared and pay the O(m*n) initialization instead of
+giving the kernel a second selection path (tensor4all/faer#200,
+`docs/worklogs/2026-11-03-matmul-uninit-thin.md`).

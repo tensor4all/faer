@@ -12,6 +12,10 @@ rule files the task needs.
 Verification and adoption of a change: [docs/adoption-protocol.md](docs/adoption-protocol.md) — the
 blast-radius acceptance grid, the measure-once rule and the exact commands.
 
+Adding a linear-algebra routine: [docs/new-routine-checklist.md](docs/new-routine-checklist.md) — the
+test layers a new decomposition or solver needs, how a LAPACK validation family is registered, and the
+commands that prove it.
+
 Before performance work: [PERFORMANCE_TIPS.md](PERFORMANCE_TIPS.md) — the lessons that carry
 over between changes (strided rows, leading-dimension aliasing, the caller-held worker group, dqds).
 

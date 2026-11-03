@@ -368,7 +368,11 @@ pub fn lsmr<T: ComplexField>(
 			M.adjoint_apply_in_place(tmp.rb_mut(), par.reborrow(), stack.rb_mut());
 			tmp.norm_l2()
 		};
-		let threshold = &norm_ref * params.rel_tolerance;
+		// The absolute residual tested below is the preconditioned normal residual,
+		// so `abs_tolerance` is on the same scale as `rel_tolerance * norm_ref`.
+		let threshold = params
+			.abs_tolerance
+			.fmax(&norm_ref * params.rel_tolerance);
 		if norm_ref == zero::<T::Real>() {
 			x.fill(zero());
 			return Ok(LsmrInfo {
@@ -754,5 +758,43 @@ mod tests {
 			let result = result.unwrap();
 			assert!(result.iter_count <= (4 * n).msrv_div_ceil(Ord::min(k, n)));
 		}
+	}
+	#[test]
+	fn test_abs_tolerance_is_honoured() {
+		let a = Mat::<f64>::identity(2, 2);
+		let b = Mat::<f64>::from_fn(2, 1, |_, _| 1.0);
+		let run = |params: LsmrParams<f64>| {
+			let mut x = Mat::<f64>::zeros(2, 1);
+			lsmr(
+				x.as_mut(),
+				a.as_ref(),
+				a.as_ref(),
+				b.as_ref(),
+				params,
+				|_| {},
+				Par::Seq,
+				MemStack::new(&mut MemBuffer::new(lsmr_scratch(
+					a.as_ref(),
+					a.as_ref(),
+					1,
+					ParShape::Seq,
+				))),
+			)
+		};
+		// The initial normal residual is the `sqrt(2)` of the two-entry rhs.
+		let with = |abs_tolerance: f64, rel_tolerance: f64, max_iters: usize| LsmrParams {
+			abs_tolerance,
+			rel_tolerance,
+			max_iters,
+			..Default::default()
+		};
+		// `abs_tolerance` alone is enough to accept the initial point.
+		let result = run(with(10.0, 0.0, 0)).unwrap();
+		assert_eq!(result.iter_count, 0);
+		// ... and it is not allowed to mask a tighter combined tolerance.
+		assert!(run(with(0.1, 0.0, 0)).is_err());
+		// Combined: `max(atol, rtol * norm_ref)` decides.
+		assert!(run(with(0.1, 5.0, 0)).is_ok());
+		assert!(run(with(0.1, 0.5, 0)).is_err());
 	}
 }

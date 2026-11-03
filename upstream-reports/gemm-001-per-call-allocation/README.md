@@ -56,5 +56,5 @@ Not fixed upstream.
 ## References
 
 * Found in: tensor4all/faer#58.
-* Fork plan: tensor4all/faer#56. The fork intends to replace the `gemm` fallback with a product dispatched on the caller's team, which can also take the caller's scratch.
+* Fork plan: tensor4all/faer#56. The fork intends to replace the `gemm` fallback with a product dispatched on the caller's team, which can also take the caller's scratch. faer now depends on the fork's own `t4a-gemm` 0.20.1 (`faer/Cargo.toml`), which still allocates at the same places (`src/gemm.rs:437`, `:490`, `:654`), so that dependency does not fix this.
 * Not fixed in the fork yet.

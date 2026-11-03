@@ -1,3 +1,4 @@
+mod full;
 use super::LinOp;
 use crate::internal_prelude::*;
 use crate::perm;
@@ -287,7 +288,7 @@ pub fn partial_self_adjoint_eigen_imp<T: ComplexField>(
 		}
 		active
 	} else {
-		panic!();
+		return full::partial_full_spectrum(eigvecs, eigvals, A, n_eigval, par, stack);
 	}
 }
 

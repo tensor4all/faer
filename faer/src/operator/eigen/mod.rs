@@ -1160,6 +1160,30 @@ pub fn partial_self_adjoint_eigen_scratch<T: ComplexField>(
 		Ord::max(params.max_dim, Ord::max(2 * MIN_DIM, 2 * n_eigval)),
 		n,
 	);
+	if max_dim >= n {
+		// full-subspace branch: materialise the operator, then run the dense
+		// self-adjoint eigendecomposition
+		return StackReq::all_of(&[
+			// the buffers the implementation allocates before the branch selection
+			temp_mat_scratch::<T>(max_dim + 1, max_dim),
+			temp_mat_scratch::<T>(n, max_dim + 1),
+			temp_mat_scratch::<T>(n, max_dim),
+			// then the workspace of the dense path
+			temp_mat_scratch::<T>(n, n),
+			temp_mat_scratch::<T>(n, 1),
+			StackReq::new::<T>(n),
+			StackReq::new::<usize>(n),
+			StackReq::all_of(&[
+				A.apply_scratch(1, par),
+				linalg::evd::self_adjoint_evd_scratch::<T>(
+					n,
+					linalg::evd::ComputeEigenvectors::Yes,
+					par,
+					default(),
+				),
+			]),
+		]);
+	}
 	let residual = temp_mat_scratch::<T::Real>(max_dim, 1);
 	let H = temp_mat_scratch::<T>(max_dim + 1, max_dim);
 	let V = temp_mat_scratch::<T>(n, max_dim + 1);
@@ -1338,6 +1362,12 @@ pub fn partial_eigen<T: ComplexField>(
 /// $A$ with the largest magnitude, assuming $A$ is self-adjoint, until the
 /// provided outputs are full or the maximum number of algorithm restarts is
 /// reached.
+///
+/// when the projection space covers the whole space (max_dim >= n, which the
+/// default parameters reach for every small problem), the operator is
+/// materialised and the dense self-adjoint eigendecomposition is used. that
+/// branch costs O(n^2) memory and O(n^3) time, and it reports a zero count
+/// instead of panicking when it fails or the operator is not finite.
 pub fn partial_self_adjoint_eigen<T: ComplexField>(
 	eigvecs: MatMut<'_, T>,
 	eigvals: &mut [T],

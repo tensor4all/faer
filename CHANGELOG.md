@@ -1,3 +1,21 @@
+# t4a-faer 0.28.2 (tensor4all fork; with t4a-faer-traits 0.24.2)
+
+Changes since `t4a-faer` 0.28.1 (tag `faer-v0.28.1`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`. No public API change.
+
+## Performance and correctness
+
+- `matmul_with_conj_uninit` now sends a one-row destination through the same `matvec` route as
+  `matmul(Accum::Replace)` instead of the x86 AVX2 full GEMM kernel. The fresh path was 2.2x slower
+  for `m = 1` and produced different last bits from the replace path; it is now at or above the
+  replace path's speed and bitwise equal. The O(n) destination initialization is the only added
+  work, and the destination's prior contents are still never read (#200, #201).
+
+## Upstream
+
+Codeberg `sarah-quinones/faer` `main` at `0ecd846d` does not contain `matmul_with_conj_uninit`, so
+this defect cannot occur upstream and there is nothing to feed back. `n = 1` still takes the GEMM
+path in this fork and is recorded in #200 as a separate decision.
+
 # t4a-faer 0.27.1 (tensor4all fork; with t4a-faer-traits 0.24.2)
 
 Changes since `t4a-faer` 0.27.0 (tag `faer-v0.27.0`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`. No public API change.

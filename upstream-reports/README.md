@@ -1,6 +1,6 @@
 # Upstream reports
 
-This list is updated over time. Last updated: 2026-10-30.
+This list is updated over time. Last updated: 2026-11-03.
 
 This directory lists defects that we found while working on a port of `faer` and that also occur in the published upstream crates.
 Each entry was reproduced by running its program against the upstream release named in the table.
@@ -46,10 +46,16 @@ The program prints the expected and the actual value, and exits with status 1 wh
 | [faer-030](faer-030-real-schur-aed-sort-hang/) | Real Schur QR does not return when the deflation-window sort cannot swap a pair | `faer` 0.24.4 | hang | tensor4all/faer#144 | not yet | 2026-10-29 |
 | [faer-031](faer-031-real-evd-pair-clamp/) | The real nonsymmetric EVD returns a wrong eigenvector for a complex pair | `faer` 0.24.4 | wrong value | fix for tensor4all/faer#145 | not yet | 2026-10-29 |
 | [faer-032](faer-032-real-evd-defective-double-eigenvalue/) | The real nonsymmetric EVD returns a wrong eigenvector for a defective double eigenvalue | `faer` 0.24.4 | wrong value | fix for tensor4all/faer#31 (`dget34`) | not yet | 2026-10-30 |
+| [faer-033](faer-033-complex-jacobi-rotg-zero-q/) | Complex `JacobiRotation::rotg(p, 0)` returns `r = 1` instead of `p` | `faer` 0.24.4 | wrong value | tensor4all/faer#208 (`7cdf90f`) | not yet | 2026-11-03 |
+| [faer-034](faer-034-jacobi-right-2x2-conjugate/) | `JacobiRotation::apply_on_the_right_2x2` applies `conj(J)`, not `J` | `faer` 0.24.4 | wrong value | tensor4all/faer#208 (`7cdf90f`) | not yet | 2026-11-03 |
+| [faer-035](faer-035-lsmr-abs-tolerance-ignored/) | LSMR never reads `abs_tolerance` | `faer` 0.24.4 | no convergence | tensor4all/faer#208 (`7cdf90f`) | not yet | 2026-11-03 |
 | [gemm-001](gemm-001-per-call-allocation/) | Every matrix product allocates on the heap | `gemm` 0.19.0 | heap allocation per call | not fixed (tensor4all/faer#56 planned) | not yet | 2026-10-30 |
 | [gemm-x86-001](gemm-x86-001-diag-negative-stride/) | A product with a diagonal gives a wrong value when the left matrix is stored backwards | `private-gemm-x86` 0.1.22 | wrong value | tensor4all/t4a-private-gemm-x86#5 (`84ca6db`) | not yet | 2026-10-29 |
 
-"Fixed upstream" was checked against upstream `main`: `faer` at `0ecd846` (2026-10-22) and `private-gemm-x86` at `71872b9` (its 0.1.22 release).
+"Fixed upstream" was checked against each crate's upstream `main` and its latest release: `faer` at `0ecd846` (2026-10-22) and its 0.24.4 release, `gemm` at `86102c5`, which is its 0.19.0 release, `private-gemm-x86` at `71872b9`, which is its 0.1.22 release.
+Every entry was re-run on 2026-11-03; no newer release existed to raise a pin to, and `gemm`'s and `private-gemm-x86`'s `main` are their release commits, so only `faer` needed a build from `main`.
+`gemm-x86-001` needs an x86 CPU, and on aarch64 `faer-001` and `faer-026` do not trigger, as their sections state.
+`faer`'s `main` is the 0.24.4 release plus eleven commits, and only the `gevd` scratch layout and conjugate-pair slots among them touch the code behind an entry: `faer-009`, re-run there, still fails.
 
 Each README states, in its first three lines, what goes wrong, for which input and in which version.
 It then gives the command, a table of expected and actual output, the cause with file and line in the upstream source, and how this fork fixed it.
