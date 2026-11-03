@@ -16,6 +16,15 @@ Except for explicitly identified ported material, modifications made in this
 fork are Copyright (c) tensor4all contributors and are released under the same
 MIT license.
 
+LQ factorization, its factor extraction and the null-space blocks follow the
+output conventions of MatrixAlgebraKit.jl (MIT, Copyright (c) 2024 Jutho
+Haegeman and contributors, https://github.com/QuantumKitHub/MatrixAlgebraKit.jl,
+commit 5120b5def1848d8ff63d80472aef8a290ddb60a6): the factor shapes, the trailing
+null block of the full Q, and the real-nonnegative-diagonal gauge. The kernels
+are faer's own and the decomposition is faer's blocked QR on the transposed view,
+so no MatrixAlgebraKit expression is translated; MIT is the same license as this
+repository's LICENSE and no additional COPYING file is required.
+
 faer also contains code ported from other projects. Those files keep their own
 terms and their notices ship alongside the crate:
 

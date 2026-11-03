@@ -18,6 +18,9 @@ class Runner(unittest.TestCase):
         self.assertEqual(v.classify('linalg::evd::lapack::f64::lapack_schur_cases'), 'schur')
         self.assertEqual(v.classify('linalg::evd::lapack::f64::lapack_schur_reorder_cases'), 'schur_reorder')
         self.assertEqual(v.classify('linalg::qr::lapack::c64::lapack_qr_reflector_checkers'), 'qr')
+        # the transposed QR family keeps its own name and does not fall into `qr`
+        self.assertEqual(v.classify('linalg::lq::lapack::f64::lapack_lq_cases'), 'lq')
+        self.assertEqual(v.classify('linalg::lq::lapack::c32::lapack_lq_reference'), 'lq')
         self.assertEqual(v.classify('linalg::svd::tests::lapack_svd_f32::lapack::diagonal_families'), 'svd')
         self.assertEqual(v.classify('linalg::svd::bidiag_svd::tests::test_josef'), 'svd_large')
         self.assertIsNone(v.classify('linalg::svd::bidiag_svd::tests::test_deflation43'))

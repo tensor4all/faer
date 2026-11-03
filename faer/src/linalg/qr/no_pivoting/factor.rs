@@ -344,10 +344,10 @@ fn complete_factor<T: ComplexField>(factor: MatMut<'_, T>, basis: MatRef<'_, T>,
 
 /// Look-ahead steps taken, for the tests that check the path ran.
 #[cfg(test)]
-static LOOKAHEAD_STEPS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub(crate) static LOOKAHEAD_STEPS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 /// Tests: overlap every eligible step with a panel group of this width (0: the step model).
 #[cfg(test)]
-static LOOKAHEAD_FORCE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub(crate) static LOOKAHEAD_FORCE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// The panel group of a QR look-ahead step, or `None` when overlapping does not pay: the step
 /// model of `cost::lookahead_width`, with `F` the far columns' block apply and `P` the panel, both
@@ -432,6 +432,26 @@ pub fn qr_in_place<T: ComplexField>(
 	{
 		return qr_in_place_adapted(A, Q_coeff, par, stack, params);
 	}
+	qr_in_place_packed(A, Q_coeff, par, stack, params)
+}
+/// The factorization on the given layout, without the row-major adaptation: the
+/// panel of a matrix whose columns are not contiguous runs on the strides it is
+/// given. `lq::no_pivoting::factor::lq_in_place` factors the transposed view
+/// through this, because every LQ input presents that layout and the adaptation's
+/// copy would then be on the heap once per call.
+#[track_caller]
+pub(crate) fn qr_in_place_packed<T: ComplexField>(
+	A: MatMut<'_, T>,
+	Q_coeff: MatMut<'_, T>,
+	par: Par,
+	stack: &mut MemStack,
+	params: Spec<QrParams, T>,
+) -> QrInfo {
+	let block_size = Q_coeff.nrows();
+	assert!(all(
+		block_size > 0,
+		Q_coeff.ncols() == Ord::min(A.nrows(), A.ncols()),
+	));
 	let mut Q_coeff = Q_coeff;
 	let rank =
 		qr_in_place_blocked(A, Q_coeff.rb_mut(), 0, 0, par, stack, params, true);
@@ -449,6 +469,40 @@ pub fn qr_in_place<T: ComplexField>(
 		col += block_size;
 	}
 	QrInfo { rank }
+}
+/// copies the triangular factor $R$ out of the packed factorization in `packed`,
+/// leaving the householder vectors intact.
+///
+/// `out` is either the compact $\min(m, n) \times n$ factor or the full
+/// $m \times n$ one, whose rows past $\min(m, n)$ are zero. The strict lower
+/// triangle is zero, so every entry of `out` is written.
+///
+/// with `positive`, row $j$ is scaled by $\overline{d_j} / |d_j|$, where $d_j$ is
+/// the diagonal of $R$, which makes every diagonal entry of the result real and
+/// nonnegative. [`unitary`](crate::linalg::qr::no_pivoting::unitary::unitary)
+/// applies the matching phase to $Q$, so that the product is unchanged.
+#[track_caller]
+pub fn copy_r<T: ComplexField>(
+	out: MatMut<'_, T>,
+	packed: MatRef<'_, T>,
+	positive: bool,
+) {
+	let (m, n) = packed.shape();
+	let k = Ord::min(m, n);
+	let mut out = out;
+	assert!(all(out.ncols() == n, out.nrows() == k || out.nrows() == m));
+	// every entry of `out` is written: the strict lower triangle and the full
+	// factor's trailing rows are zero.
+	out.rb_mut().fill(zero());
+	out.rb_mut().get_mut(..k, ..).copy_from_triangular_upper(packed.get(..k, ..));
+	if positive {
+		for j in 0..k {
+			let phase = linalg::positive_phase(packed[(j, j)].clone()).conj();
+			for i in j..n {
+				out[(j, i)] *= &phase;
+			}
+		}
+	}
 }
 /// computes the layout of required workspace for performing a qr
 /// decomposition with no pivoting

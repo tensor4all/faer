@@ -48,6 +48,7 @@ and safe-minimum handling. Complex-modulus adaptations are identified explicitly
 | cholesky | implemented; passing | CHKPO/DRVPO/CHKPS, POT01/02/03 | 30 | cholesky::lapack | LLT/pivoted LLT; omit RFS/CON |
 | indefinite | implemented; passing (#113, fixed by #117) | S/DCHKSY, C/ZCHKHE, SYT01/HET01 | 30 | cholesky::lapack | Separate D; unpivoted LDL extension; no complex-symmetric contract |
 | qr | implemented; passing | CHKQR/CHKQ3, QRT01/02/03 | 30 | qr::lapack | Free column pivoting; no fixed-column JPVT flags or QL/RQ/LQ |
+| lq | implemented; passing | LQT01/02/03, read for the transposed factorization; `?gelqf`/`?orglq` cross-check (opt-in, linked LAPACK) | 30 | lq::lapack | No pivoted LQ; the null block and the positive gauge are checked as properties of the same factors |
 | triangular | implemented; passing | CHKTR, TRT02 | 30 | triangular_solve::lapack | TRS contract; no overflow-scaled LATRS/RFS/CON |
 | lstsq | implemented; passing | DRVLS, QRT14/16/17 | 30 | solvers::lapack | Tall QR, supported SVD minimum-norm; no new driver algorithms |
 

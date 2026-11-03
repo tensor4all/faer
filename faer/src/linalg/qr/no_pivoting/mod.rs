@@ -7,3 +7,4 @@ pub mod factor;
 pub mod inverse;
 pub mod reconstruct;
 pub mod solve;
+pub mod unitary;

@@ -54,8 +54,14 @@ use threadteam::TeamExec;
 /// let a = Mat::<f64>::from_fn(8, 8, |i, j| (i + j) as f64);
 /// let mut dst = Mat::<f64>::zeros(8, 8);
 ///
-/// // once: 4 participants, the calling thread and 3 reserved workers
-/// let pool = threadteam::Pool::builder().threads(4).build().unwrap();
+/// // once: 4 participants, the calling thread and 3 reserved workers. `into_team`
+/// // fails when a member is not idle yet, which happens while a doctest elsewhere in this
+/// // crate holds a team, so a pool built here waits for its own members.
+/// let pool = threadteam::Pool::builder()
+///     .threads(4)
+///     .acquire_timeout(std::time::Duration::from_secs(30))
+///     .build()
+///     .unwrap();
 /// let team = pool.into_team(4).ok().expect("an idle pool");
 ///
 /// // per call: lend the team to faer for the duration of the closure

@@ -133,6 +133,18 @@ pub(crate) fn copy_across_layouts<T: ComplexField>(
 	let _ = par;
 	copy_across_layouts_block(dst.rb_mut(), src);
 }
+/// the phase $d / |d|$ that makes a triangular factor's diagonal entry real
+/// positive, and `1` for an exactly zero entry (where the phase is arbitrary and
+/// the factorization keeps the raw sign).
+#[inline]
+pub(crate) fn positive_phase<T: ComplexField>(d: T) -> T {
+	let abs = d.abs();
+	if abs == zero() {
+		one()
+	} else {
+		d.mul_real(abs.recip())
+	}
+}
 /// A column-major copy of the row-major `src`, in a new buffer of
 /// `nrows * ncols` elements (column stride `nrows`): the work matrix of the
 /// row-major adaptations.
@@ -433,6 +445,7 @@ pub mod householder;
 pub mod jacobi;
 /// kronecker product
 pub mod kron;
+pub mod lq;
 pub mod lu;
 mod mat_ops;
 pub mod matmul;
