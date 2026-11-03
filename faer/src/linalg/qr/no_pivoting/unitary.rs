@@ -91,9 +91,15 @@ pub fn null_scratch<T: ComplexField>(
 	let _ = par;
 	linalg::householder::apply_block_householder_sequence_on_the_left_in_place_scratch::<T>(nrows, block_size, nrows - k)
 }
-/// builds an orthonormal basis of the left null space of the factored matrix: the
-/// columns $\min(m, n) + 1, \dots, m$ of the full $Q$, so that `out` is
-/// $m \times (m - \min(m, n))$ with orthonormal columns and $A^H out = 0$.
+/// builds orthonormal columns orthogonal to the column space determined by the
+/// factorization: the columns $\min(m, n) + 1, \dots, m$ of the full $Q$, so
+/// that `out` is $m \times (m - \min(m, n))$ with orthonormal columns and
+/// $A^H out = 0$.
+///
+/// these columns are a basis of the left null space of $A$ when
+/// $\operatorname{rank}(A) = \min(m, n)$. with rank loss the factorization
+/// determines a $\min(m, n)$-dimensional column space, so the complement is that
+/// of the determined subspace rather than of the column space of $A$.
 #[track_caller]
 pub fn null<T: ComplexField>(
 	out: MatMut<'_, T>,

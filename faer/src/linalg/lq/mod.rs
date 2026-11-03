@@ -7,8 +7,8 @@
 //! read transposed: `factor::lq_in_place` runs the blocked $QR$ kernel on
 //! `A.transpose_mut()`, so the triangular factor $L$ lands in the lower triangle
 //! of $A$ and the householder vectors of $Q$ land along its rows. `unitary`
-//! builds $Q$ (thin or full) and its orthonormal complement (the null space of
-//! $A$), `reconstruct` rebuilds $A = LQ$, and `factor::copy_l` copies $L$ out.
+//! builds $Q$ (thin or full) and its orthonormal complement, `reconstruct`
+//! rebuilds $A = LQ$, and `factor::copy_l` copies $L$ out.
 pub mod no_pivoting;
 
 #[cfg(test)]
