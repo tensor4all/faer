@@ -336,11 +336,36 @@ pub struct PartialPivLuInfo {
 pub enum LdltError {
 	ZeroPivot { index: usize },
 }
+/// Width of the unblocked leaf panel for `f64`. Below it the factorization runs a column at a time,
+/// sequentially, so on a team the leaves are the serial part of the call: at n = 512 on 8 threads
+/// they were half of it once the `U` solve stopped aliasing (`docs/worklogs/2026-11-05-lu-leaf-width.md`).
+/// Median of 31 calls, ms, the widths interleaved; evo2 (Zen 5), `f64`, a team of `T`:
+///
+/// | n, T    | 4     | 8     | 16    | 32    |
+/// |---------|-------|-------|-------|-------|
+/// | 256, 1  | 0.308 | 0.304 | 0.327 | 0.453 |
+/// | 256, 8  | 0.249 | 0.245 | 0.265 | 0.381 |
+/// | 512, 1  | 1.777 | 1.791 | 1.970 | 2.362 |
+/// | 512, 8  | 0.915 | 0.930 | 1.104 | 1.490 |
+/// | 1024, 1 | 11.01 | 11.07 | 11.53 | 12.56 |
+/// | 1024, 8 | 3.425 | 3.486 | 3.931 | 4.985 |
+/// | 2048, 1 | 81.66 | 82.05 | 83.23 | 86.26 |
+/// | 2048, 8 | 16.96 | 17.19 | 18.57 | 21.79 |
+/// | 4096, 1 | 614.7 | 615.3 | 619.9 | 630.2 |
+/// | 4096, 8 | 101.7 | 102.6 | 107.6 | 119.5 |
+///
+/// 8 wins or ties everywhere (4 is within 2 %, ahead at large n and behind at 256). The other scalar
+/// types keep 16: they were not scanned.
+const F64_RECURSION_THRESHOLD: usize = 8;
 impl<T: ComplexField> Auto<T> for PartialPivLuParams {
 	#[inline]
 	fn auto() -> Self {
 		Self {
-			recursion_threshold: 16,
+			recursion_threshold: if const { T::IS_NATIVE_F64 } {
+				F64_RECURSION_THRESHOLD
+			} else {
+				16
+			},
 			block_size: 64,
 			par_threshold: ParThreshold::Derived,
 			non_exhaustive: NonExhaustive(()),
@@ -860,5 +885,71 @@ mod tests {
 		};
 		run(Par::Seq);
 		crate::team::with_team(8, run);
+	}
+
+	/// The `f64` default leaf is 8 columns (the other types keep 16), and it factors shapes whose
+	/// width leaves a leaf tail, sequentially and on a team: `P A = L U` to rounding.
+	#[test]
+	fn f64_default_leaf_factors() {
+		let rt_f64 =
+			<PartialPivLuParams as Auto<f64>>::auto().recursion_threshold;
+		let rt_f32 =
+			<PartialPivLuParams as Auto<f32>>::auto().recursion_threshold;
+		let rt_c64 =
+			<PartialPivLuParams as Auto<c64>>::auto().recursion_threshold;
+		assert!(all(
+			rt_f64 == F64_RECURSION_THRESHOLD,
+			rt_f32 == 16,
+			rt_c64 == 16
+		));
+		let rng = &mut StdRng::seed_from_u64(0x1EAF);
+		for n in [7usize, 8, 9, 17, 100, 257] {
+			let A = CwiseMatDistribution {
+				nrows: n,
+				ncols: n,
+				dist: StandardNormal,
+			}
+			.rand::<Mat<f64>>(rng);
+			for team in [1usize, 4] {
+				let mut LU = A.clone();
+				let (mut perm, mut inv) = (vec![0usize; n], vec![0usize; n]);
+				crate::team::with_team(team, |par| {
+					lu_in_place(
+						LU.as_mut(),
+						&mut perm,
+						&mut inv,
+						par,
+						MemStack::new(&mut MemBuffer::new(
+							lu_in_place_scratch::<usize, f64>(
+								n,
+								n,
+								ParShape::Seq,
+								default(),
+							),
+						)),
+						default(),
+					);
+				});
+				let L = Mat::<f64>::from_fn(n, n, |i, j| {
+					if i > j {
+						LU[(i, j)]
+					} else if i == j {
+						1.0
+					} else {
+						0.0
+					}
+				});
+				let U = Mat::<f64>::from_fn(n, n, |i, j| {
+					if i <= j { LU[(i, j)] } else { 0.0 }
+				});
+				let PA = Mat::<f64>::from_fn(n, n, |i, j| A[(perm[i], j)]);
+				let err = (&PA - &L * &U).norm_max();
+				let tol = 64.0 * n as f64 * f64::EPSILON * A.norm_max();
+				assert!(
+					err <= tol,
+					"n={n} team={team}: |PA - LU| = {err:e} > {tol:e}"
+				);
+			}
+		}
 	}
 }
