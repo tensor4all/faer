@@ -26,7 +26,11 @@ convert its sine convention explicitly. Keep the g=0 identity/returned-f branch.
 No per-call allocation, dynamic dispatch or matrix-size loop is introduced.
 
 The AED local Sylvester solve owns four usize permutation arrays. Its query
-listed one. Reserve the actual four arrays rather than depending on padding or
+listed one. [#260](https://github.com/tensor4all/faer/issues/260) independently
+reproduces this at n=18/blocking_threshold=15 after #253 plus the exact #255
+sentinel correction: 2,112 queried bytes panic requesting a 24-byte LU record.
+Changing only the array count gives 2,304 bytes and completes QZ; its retained
+numerical assertion still fails at ratio 61.65 (tracked with #257). Reserve the actual four arrays rather than depending on padding or
 another scratch branch accidentally covering the shortfall. A child-module
 regression executes a full 2x2/2x2 swap with the AED query's workspace and checks
 both pencil reconstructions.
@@ -69,3 +73,12 @@ the full feature/MSRV/no_std matrix and coverage. The local checks are scoped to
 the changed generalized-Hessenberg/QZ paths; unrelated numerical families are
 unchanged. Colmat retains its current wrapper correction until merged upstream
 fixes and the original reproductions plus wrapper regressions pass.
+
+
+## Parent regression integration
+
+The updated #255 branch adds its six-dimension public window-32 regression and
+runs both sentinel/query tests in CI. Integration preserves those checks and
+this candidate's rotation/workspace checks in the same CI step. Production
+`faer/src` and `faer-traits/src` trees remain identical to 12bd4bc; the parent
+update changes only tests/workflow. No gate, tolerance or timeout is weakened.

@@ -24,7 +24,7 @@ jobs:
       # just compiled (the test modules inside the library need `threadteam`, #203).
       - run: cargo test -p t4a-faer --no-default-features --features "std,linalg" --test public_bidiag_sequential --test sparse_lu_no_rayon --test iteration_control
       - run: cargo test -p t4a-faer-traits
-      - run: cargo test -p t4a-faer --no-default-features --features "std,linalg" --test lsmr_initial_residual --test generalized_schur_reorder --test generalized_schur_reorder_no_alloc --test generalized_hessenberg_rotations --test qz_scratch
+      - run: cargo test -p t4a-faer --no-default-features --features "std,linalg" --test lsmr_initial_residual --test generalized_schur_reorder --test generalized_schur_reorder_no_alloc --test generalized_hessenberg_rotations --test qz_scratch --test public_qz_aed --test public_qz_scratch
       - run: python3 scripts/check-migration-examples.py
       - run: cargo build --examples -j8
       - run: |
