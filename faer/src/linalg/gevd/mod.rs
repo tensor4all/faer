@@ -16,6 +16,10 @@
 //! the implementation can choose to compute the left and/or right generalized
 //! eigenvectors separately, and the generalized eigenvalues (diagonal of $S$)
 //! are represented as a ratio $\alpha / \beta$ to improve numerical stability.
+//!
+//! The real driver's protected small solves and propagation of their scales
+//! follow the numerical contracts of Reference LAPACK v3.12.1, SRC/dlaln2.f and
+//! SRC/dtgevc.f: <https://github.com/Reference-LAPACK/lapack/tree/v3.12.1/SRC>.
 use crate::internal_prelude::*;
 use complex::Complex;
 use equator::assert;
@@ -379,6 +383,41 @@ fn solve_complex_shifted_1x1<T: RealField>(
 		});
 	}
 }
+// Reserve room for the two elimination/substitution steps, including complex
+// products. The caller protects both pivots before using this bound.
+fn shifted_2x2_scale<T: RealField>(bnorm: T, pivot_min: T) -> T {
+	let limit = (min_positive::<T>() * from_f64::<T>(16.0)).recip()
+		* pivot_min.fmin(one::<T>());
+	if bnorm > limit { limit / bnorm } else { one() }
+}
+
+// Solve the pivoted 2x2 system with a scaled RHS. Form U01/U00 before
+// multiplying by x1: U01*x1 itself can overflow even when x0 is finite.
+fn solve_scaled_2x2<T: ComplexField>(
+	LU: MatRef<'_, T>,
+	row_perm: crate::perm::PermRef<'_, usize>,
+	col_perm: crate::perm::PermRef<'_, usize>,
+	mut b: ColMut<'_, T>,
+) -> T::Real {
+	let bnorm = b[0]
+		.real()
+		.abs()
+		.fmax(b[0].imag().abs())
+		.fmax(b[1].real().abs())
+		.fmax(b[1].imag().abs());
+	let scale =
+		shifted_2x2_scale(bnorm, LU[(0, 0)].abs().fmin(LU[(1, 1)].abs()));
+	let rows = row_perm.arrays().0;
+	let cols = col_perm.arrays().0;
+	let b0 = b[rows[0]].mul_real(&scale);
+	let b1 = b[rows[1]].mul_real(&scale) - &LU[(1, 0)] * &b0;
+	let x1 = b1 / &LU[(1, 1)];
+	let x0 = b0 / &LU[(0, 0)] - (&LU[(0, 1)] / &LU[(0, 0)]) * &x1;
+	b[cols[0]] = x0;
+	b[cols[1]] = x1;
+	scale
+}
+
 fn solve_complex_shifted_2x2<T: RealField>(
 	smin: T,
 	ref ca: T,
@@ -389,7 +428,7 @@ fn solve_complex_shifted_2x2<T: RealField>(
 	ref wr: T,
 	ref wi: T,
 	stack: &mut MemStack,
-) {
+) -> T {
 	let nw = B.ncols();
 	let zero = zero::<T>;
 	let ref safmin = min_positive::<T>();
@@ -409,8 +448,14 @@ fn solve_complex_shifted_2x2<T: RealField>(
 		C[(1, 1)] = ca * &A[(1, 1)] - wr * d1;
 		let cmax = C.norm_max();
 		if cmax < *smin {
+			// `C` is replaced by `smin * I` (LAPACK `dlaln2`), so the solve is
+			// this scaling alone
 			let ref smin_inv = smin.recip();
-			zip!(B.rb_mut()).for_each(|unzip!(x)| *x *= smin_inv);
+			let scale = shifted_2x2_scale(B.norm_max(), smin.copy());
+			zip!(B.rb_mut()).for_each(|unzip!(x)| {
+				*x = (&*x * &scale) * smin_inv;
+			});
+			return scale;
 		}
 		let (_, row_perm, col_perm) =
 			linalg::lu::full_pivoting::factor::lu_in_place(
@@ -423,15 +468,14 @@ fn solve_complex_shifted_2x2<T: RealField>(
 				stack,
 				Default::default(),
 			);
-		linalg::lu::full_pivoting::solve::solve_in_place(
-			C.rb(),
-			C.rb(),
-			row_perm,
-			col_perm,
-			B.rb_mut(),
-			Par::Seq,
-			stack,
-		);
+		// a second pivot below `smin` is replaced by `smin` (LAPACK `dlaln2`).
+		// `C` is exactly singular when the block holds a copy of the
+		// eigenvalue being computed, and the zero pivot would divide the right
+		// hand side into `inf`/`NaN` (faer#220)
+		if C[(1, 1)].abs() < *smin {
+			C[(1, 1)] = smin.copy();
+		}
+		solve_scaled_2x2(C.rb(), row_perm, col_perm, B.rb_mut().col_mut(0))
 	} else {
 		let (mut C, stack) =
 			unsafe { linalg::temp_mat_uninit::<Complex<T>, _, _>(2, 2, stack) };
@@ -458,8 +502,13 @@ fn solve_complex_shifted_2x2<T: RealField>(
 		};
 		let cmax = C.norm_max();
 		if cmax < *smin {
+			// `C` is replaced by `smin * I`, as in the real branch
 			let ref smin_inv = smin.recip();
-			zip!(B.rb_mut()).for_each(|unzip!(x)| *x *= smin_inv);
+			let scale = shifted_2x2_scale(B.norm_max(), smin.copy());
+			zip!(B.rb_mut()).for_each(|unzip!(x)| {
+				*x = (&*x * &scale) * smin_inv;
+			});
+			return scale;
 		}
 		let (_, row_perm, col_perm) =
 			linalg::lu::full_pivoting::factor::lu_in_place(
@@ -472,9 +521,17 @@ fn solve_complex_shifted_2x2<T: RealField>(
 				stack,
 				Default::default(),
 			);
+		// the second pivot is protected as in the real branch, measured by
+		// `|re| + |im|` (LAPACK `dlaln2`)
+		if C[(1, 1)].re.abs() + C[(1, 1)].im.abs() < *smin {
+			C[(1, 1)] = Complex {
+				re: smin.copy(),
+				im: zero(),
+			};
+		}
 		let n = B.nrows();
 		let (Br, Bi) = B.two_cols_mut(0, 1);
-		let (mut B, stack) =
+		let (mut B, _) =
 			unsafe { linalg::temp_mat_uninit::<Complex<T>, _, _>(n, 1, stack) };
 		let mut B = B.as_mat_mut().col_mut(0);
 		zip!(&mut B, &Br, &Bi).for_each(|unzip!(z, re, im)| {
@@ -483,18 +540,39 @@ fn solve_complex_shifted_2x2<T: RealField>(
 				im: im.copy(),
 			}
 		});
-		linalg::lu::full_pivoting::solve::solve_in_place(
-			C.rb(),
-			C.rb(),
-			row_perm,
-			col_perm,
-			B.rb_mut().as_mat_mut(),
-			Par::Seq,
-			stack,
-		);
+		let scale = solve_scaled_2x2(C.rb(), row_perm, col_perm, B.rb_mut());
 		zip!(Br, Bi, &B).for_each(|unzip!(re, im, z)| {
 			(*re, *im) = (z.re.copy(), z.im.copy())
 		});
+		scale
+	}
+}
+
+// Apply the solve's scale to the remaining entries, then bound the whole
+// working vector before the next matrix update or the back transformation.
+fn rescale_gevd_rhs<T: RealField>(
+	mut rhs: MatMut<'_, T>,
+	j: usize,
+	na: usize,
+	ref scale: T,
+) -> T {
+	if *scale != one() {
+		zip!(rhs.rb_mut().get_mut(..j, ..)).for_each(|unzip!(x)| *x *= scale);
+		zip!(rhs.rb_mut().get_mut(j + na.., ..))
+			.for_each(|unzip!(x)| *x *= scale);
+	}
+	let limit = if rhs.ncols() == 2 {
+		from_f64::<T>(0.5)
+	} else {
+		one()
+	};
+	let xmax = rhs.norm_max();
+	if xmax > limit {
+		let ref scale = &limit / &xmax;
+		zip!(rhs).for_each(|unzip!(x)| *x *= scale);
+		one()
+	} else {
+		xmax / limit
 	}
 }
 fn qz_to_gevd_real<T: RealField>(
@@ -681,7 +759,9 @@ fn qz_to_gevd_real<T: RealField>(
 			while j < n {
 				let cplx = j + 1 < n && A[(j + 1, j)] != zero();
 				let na = if cplx { 2 } else { 1 };
-				let ref xscale = xmax.recip();
+				// the guard below may only shrink the vector (LAPACK `dtgevc`:
+				// `XSCALE = ONE / MAX( ONE, XMAX )`)
+				let ref xscale = xmax.fmax(one()).recip();
 				let mut temp = acolnorm[j]
 					.fmax(&bcolnorm[j])
 					.fmax(&acoefa * &acolnorm[j] + &bcoefa * &bcolnorm[j]);
@@ -694,7 +774,7 @@ fn qz_to_gevd_real<T: RealField>(
 								+ &bcoefa * &bcolnorm[j + 1],
 						)
 						.fmax(&acolnorm[j + 1])
-						.fmax(&acolnorm[j + 1]);
+						.fmax(&bcolnorm[j + 1]);
 					b1 = B[(j + 1, j + 1)].copy();
 				} else {
 					b1 = zero();
@@ -705,7 +785,6 @@ fn qz_to_gevd_real<T: RealField>(
 							rhs[(jr, jw)] = xscale * &rhs[(jr, jw)];
 						}
 					}
-					xmax = xmax * xscale;
 				}
 				let (mut sums, stack) = unsafe {
 					linalg::temp_mat_uninit::<T, _, _>(na, nw, stack)
@@ -740,7 +819,7 @@ fn qz_to_gevd_real<T: RealField>(
 							-&acoef * &sums[(ja, 0)] + &bcoefr * &sump[(ja, 0)];
 					}
 				}
-				if cplx {
+				let scale = if cplx {
 					solve_complex_shifted_2x2(
 						dmin.copy(),
 						acoef.copy(),
@@ -751,7 +830,7 @@ fn qz_to_gevd_real<T: RealField>(
 						bcoefr.copy(),
 						bcoefi.copy(),
 						stack,
-					);
+					)
 				} else {
 					solve_complex_shifted_1x1(
 						dmin.copy(),
@@ -762,7 +841,14 @@ fn qz_to_gevd_real<T: RealField>(
 						bcoefr.copy(),
 						bcoefi.copy(),
 					);
-				}
+					one()
+				};
+				xmax = rescale_gevd_rhs(
+					rhs.rb_mut().get_mut(je..j + na, ..),
+					j - je,
+					na,
+					scale,
+				);
 				j += na;
 			}
 			let (mut tmp, _) = linalg::temp_mat_zeroed::<T, _, _>(n, nw, stack);
@@ -946,7 +1032,7 @@ fn qz_to_gevd_real<T: RealField>(
 				} else {
 					b1 = zero();
 				}
-				if cplx {
+				let scale = if cplx {
 					solve_complex_shifted_2x2(
 						dmin.copy(),
 						acoef.copy(),
@@ -957,7 +1043,7 @@ fn qz_to_gevd_real<T: RealField>(
 						bcoefr.copy(),
 						bcoefi.copy(),
 						stack,
-					);
+					)
 				} else {
 					solve_complex_shifted_1x1(
 						dmin.copy(),
@@ -968,7 +1054,14 @@ fn qz_to_gevd_real<T: RealField>(
 						bcoefr.copy(),
 						bcoefi.copy(),
 					);
-				}
+					one()
+				};
+				rescale_gevd_rhs(
+					rhs.rb_mut().get_mut(..je + nw, ..),
+					j,
+					na,
+					scale,
+				);
 				for ja in 0..na {
 					if cplx_eigval {
 						let ref creala = &acoef * &rhs[(j + ja, 0)];
@@ -1498,6 +1591,177 @@ mod tests {
 			0.0,
 		);
 		core::assert!(b.is_all_finite(), "{b:?}");
+	}
+
+	/// faer#220: an exactly singular shifted 2x2 block, with a nonzero right
+	/// hand side and the norm of `C` above `smin`. The second pivot is replaced
+	/// by `smin`, so the solution is finite and nonzero.
+	#[test]
+	fn complex_shifted_2x2_singular_block_stays_finite() {
+		use crate::mat::Mat;
+		let smin = 1e-30_f64;
+		let mut mem = MemBuffer::new(dyn_stack::StackReq::new::<f64>(256));
+		let stack = MemStack::new(&mut mem);
+		// real shift: `C = A` with `A` of rank one
+		let a = Mat::<f64>::from_fn(2, 2, |_, _| 1.0);
+		let mut b = Mat::<f64>::from_fn(2, 1, |i, _| (i + 1) as f64);
+		solve_complex_shifted_2x2(
+			smin,
+			1.0,
+			a.as_ref(),
+			1.0,
+			1.0,
+			b.as_mut(),
+			0.0,
+			0.0,
+			stack,
+		);
+		core::assert!(b.is_all_finite(), "{b:?}");
+		core::assert!(b.norm_max() > 0.0, "{b:?}");
+		// complex shift: `A = [[2, 1], [-1, 2]]` shifted by its own eigenvalue
+		// `2 + i`, in both orientations the callers pass
+		let a =
+			Mat::<f64>::from_fn(2, 2, |i, j| [[2.0, 1.0], [-1.0, 2.0]][i][j]);
+		for a in [a.as_ref(), a.transpose()] {
+			let mut b =
+				Mat::<f64>::from_fn(2, 2, |i, j| (i + 2 * j + 1) as f64);
+			solve_complex_shifted_2x2(
+				smin,
+				1.0,
+				a,
+				1.0,
+				1.0,
+				b.as_mut(),
+				2.0,
+				1.0,
+				stack,
+			);
+			core::assert!(b.is_all_finite(), "{b:?}");
+			core::assert!(b.norm_max() > 0.0, "{b:?}");
+		}
+	}
+
+	/// A shifted 2x2 block whose largest entry is below `smin` is replaced by
+	/// `smin * I`: the solution is the right hand side divided by `smin`, not
+	/// divided again by the block.
+	#[test]
+	fn complex_shifted_2x2_tiny_block_is_a_scaling() {
+		use crate::mat::Mat;
+		let smin = 1e-20_f64;
+		let mut mem = MemBuffer::new(dyn_stack::StackReq::new::<f64>(256));
+		let stack = MemStack::new(&mut mem);
+		let a = Mat::<f64>::from_fn(2, 2, |i, j| {
+			1e-30 * [[2.0, 1.0], [-1.0, 2.0]][i][j]
+		});
+		for nw in [1, 2] {
+			let b0 = Mat::<f64>::from_fn(2, nw, |i, j| (i + 2 * j + 1) as f64);
+			let mut b = b0.clone();
+			solve_complex_shifted_2x2(
+				smin,
+				1.0,
+				a.as_ref(),
+				1.0,
+				1.0,
+				b.as_mut(),
+				0.0,
+				0.0,
+				stack,
+			);
+			for j in 0..nw {
+				for i in 0..2 {
+					core::assert_eq!(b[(i, j)], b0[(i, j)] * smin.recip());
+				}
+			}
+		}
+	}
+
+	fn check_complex_shifted_2x2_large_rhs<T: RealField>() {
+		let eps = eps::<T>();
+		let smin = &eps * &eps;
+		let big = min_positive::<T>().recip() / from_f64::<T>(16.0);
+		let mut mem = MemBuffer::new(dyn_stack::StackReq::new::<T>(256));
+		for tiny in [false, true] {
+			let c = if tiny { &smin * &eps } else { eps.copy() };
+			let a = Mat::<T>::from_fn(2, 2, |i, j| {
+				&c * from_f64::<T>([[1.0, 5.0], [2.0, 3.0]][i][j])
+			});
+			for a in [a.as_ref(), a.transpose()] {
+				for nw in [1, 2] {
+					for j in [0, 1] {
+						let mut b = Mat::<T>::from_fn(3, nw, |_, _| big.copy());
+						let scale = solve_complex_shifted_2x2(
+							smin.copy(),
+							one(),
+							a,
+							one(),
+							one(),
+							b.as_mut().subrows_mut(j, 2),
+							zero(),
+							if nw == 2 { c.copy() } else { zero() },
+							MemStack::new(&mut mem),
+						);
+						core::assert!(
+							b.is_all_finite(),
+							"tiny={tiny}, nw={nw}: {b:?}"
+						);
+						core::assert!(
+							scale > zero() && scale < one(),
+							"{scale:?}"
+						);
+						rescale_gevd_rhs(b.as_mut(), j, 2, scale);
+						// The untouched row represents the rest of the eigenvector.
+						// C*x must equal that row after both scales are propagated.
+						let anchor = if j == 0 { 2 } else { 0 };
+						let unit = if tiny { &smin } else { &c };
+						let target = &b[(anchor, 0)] / unit;
+						core::assert!(target > zero(), "{b:?}");
+						for i in 0..2 {
+							let mut rr = -&target;
+							let mut ri = if nw == 2 {
+								-&b[(anchor, 1)] / unit
+							} else {
+								zero()
+							};
+							for k in 0..2 {
+								let ar = if tiny {
+									if i == k { one() } else { zero() }
+								} else {
+									&a[(i, k)] / &c
+								};
+								let xr = &b[(j + k, 0)];
+								let xi = if nw == 2 {
+									b[(j + k, 1)].copy()
+								} else {
+									zero()
+								};
+								rr += &ar * xr;
+								ri += &ar * &xi;
+								if !tiny && nw == 2 && i == k {
+									rr += &xi;
+									ri -= xr;
+								}
+							}
+							let residual = rr.abs().fmax(ri.abs())
+								/ target.fmax(one::<T>());
+							core::assert!(
+								residual < &eps * from_f64::<T>(128.0),
+								"residual={residual:?}"
+							);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn complex_shifted_2x2_large_rhs_f32() {
+		check_complex_shifted_2x2_large_rhs::<f32>();
+	}
+
+	#[test]
+	fn complex_shifted_2x2_large_rhs_f64() {
+		check_complex_shifted_2x2_large_rhs::<f64>();
 	}
 	#[test]
 	fn test_lishen_() {
