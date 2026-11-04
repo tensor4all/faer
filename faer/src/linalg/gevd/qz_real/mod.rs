@@ -1451,6 +1451,7 @@ fn hessenberg_to_qz_blocked_scratch<T: RealField>(
 		return StackReq::empty();
 	}
 	let nw = (n - 3) / 3;
+	let nw = nw + nw % 2;
 	let nsr = (params.recommended_shift_count)(n, n);
 	let rcost = (params.relative_cost_estimate_of_shift_chase_to_matmul)(n, n);
 	let itemp1 = (nsr as f64
