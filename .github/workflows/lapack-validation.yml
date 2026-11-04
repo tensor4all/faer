@@ -38,6 +38,8 @@ jobs:
       - name: Build once and run all numerical families
         timeout-minutes: 49 # build <=20m; family limits sum to 25m; setup/headroom
         run: scripts/run-lapack-validation.sh
+      - name: Validate recursive QZ workspace bounds
+        run: cargo test -p t4a-faer --test qz_scratch recursive -- --ignored 2>&1 | tee target/lapack-validation/qz-recursive.log
       - name: Summarize known and new failures
         id: summary
         if: always()

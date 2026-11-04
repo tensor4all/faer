@@ -1451,6 +1451,7 @@ fn hessenberg_to_qz_blocked_scratch<T: RealField>(
 		return StackReq::empty();
 	}
 	let nw = (n - 3) / 3;
+	let nw = nw + nw % 2;
 	let nsr = (params.recommended_shift_count)(n, n);
 	let rcost = (params.relative_cost_estimate_of_shift_chase_to_matmul)(n, n);
 	let itemp1 = (nsr as f64
@@ -1489,7 +1490,7 @@ fn aed_scratch<T: RealField>(
 			linalg::temp_mat_scratch::<T>(4, 4),
 			linalg::temp_mat_scratch::<T>(8, 8),
 			linalg::temp_mat_scratch::<T>(8, 1),
-			StackReq::all_of(&[StackReq::new::<usize>(8)]),
+			StackReq::all_of(&[StackReq::new::<usize>(8); 4]),
 			StackReq::any_of(&[
 				linalg::lu::full_pivoting::factor::lu_in_place_scratch::<
 					usize,
@@ -3377,6 +3378,7 @@ fn multishift_sweep<T: RealField>(
 }
 #[cfg(test)]
 mod tests {
+
 	use super::super::gen_hessenberg::{
 		GeneralizedHessenbergParams, generalized_hessenberg,
 		generalized_hessenberg_scratch,
@@ -3387,6 +3389,45 @@ mod tests {
 	use dyn_stack::MemBuffer;
 	use equator::assert;
 	use stats::prelude::*;
+
+	#[test]
+	fn aed_workspace_covers_full_sylvester_swap() {
+		let mut a = crate::mat![
+			[0.1, -1.0, 0.2, 0.3],
+			[1.0, 0.1, 0.1, 0.2],
+			[0.0, 0.0, 0.5, -1.0],
+			[0.0, 0.0, 1.0, 0.5]
+		];
+		let mut b = Mat::<f64>::identity(4, 4);
+		let mut q = b.clone();
+		let mut z = b.clone();
+		let original = (a.clone(), b.clone());
+		let mut memory = MemBuffer::new(aed_scratch::<f64>(
+			15,
+			4,
+			ParShape::Seq,
+			auto!(f64),
+		));
+		swap_qz(
+			a.as_mut(),
+			b.as_mut(),
+			Some(q.as_mut()),
+			Some(z.as_mut()),
+			0,
+			2,
+			2,
+			MemStack::new(&mut memory),
+		);
+		let tolerance = 200.0 * f64::EPSILON;
+		crate::assert!(
+			(&q * &a * z.adjoint() - &original.0).norm_l2()
+				<= tolerance * original.0.norm_l2()
+		);
+		crate::assert!(
+			(&q * &b * z.adjoint() - &original.1).norm_l2()
+				<= tolerance * original.1.norm_l2()
+		);
+	}
 	fn make_pair(rng: &mut dyn RngCore, ns: &[usize]) -> (Mat<f64>, Mat<f64>) {
 		let dist = StandardNormal;
 		let n = ns.iter().sum::<usize>();
