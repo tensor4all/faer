@@ -113,7 +113,9 @@ pub enum BicgError<T> {
 /// The callback runs after an update and may return `()` to continue or
 /// `core::ops::ControlFlow<()>` to request a stop. A stopped iterate remains in
 /// `out`; the returned info has `stopped = true` and does not imply convergence.
-/// Initial convergence needs no update and does not call the callback.
+/// Initial convergence needs no update and does not call the callback, and a
+/// numerical breakdown does not call it either: the last finite iterate (a kept
+/// half step included) remains in `out` and the error carries its residual.
 ///
 /// # Errors
 /// Returns the solver's existing numerical breakdown or nonconvergence error
