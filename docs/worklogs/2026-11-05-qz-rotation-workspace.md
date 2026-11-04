@@ -77,7 +77,7 @@ fixes and the original reproductions plus wrapper regressions pass.
 
 ## Parent regression integration
 
-The updated #255 branch adds its six-dimension public window-32 regression and
+At the cc317ac checkpoint, #255 added its six-dimension public window-32 regression and
 runs both sentinel/query tests in CI. Integration preserves those checks and
 this candidate's rotation/workspace checks in the same CI step. Production
 `faer/src` and `faer-traits/src` trees remain identical to 12bd4bc; the parent
@@ -88,3 +88,21 @@ regression, the six-dimension window-32 query regression and both real-precision
 exact-query suites. Recursive cases retain their opt-in scheduled coverage; the
 unchanged production code was already validated for those cases and on both
 aarch64 numerical jobs. The new head still runs its required hosted checks.
+
+
+## Parent test-runtime adjustment
+
+The later #255 head 68ac9eb reduces its window-32 public regression from
+31/32/95/96/97/191 to 31/32/96/97. The original reported n=96 case remains;
+n=95 and n=191 are no longer covered by that sweep. This is a reduction in
+coverage, inherited from the parent's test-runtime adjustment, rather than a
+numerical repair. This candidate's separate maximum/default-window suites at
+n=18/78/96 and opt-in recursive n=258 suites remain unchanged; they do not
+replace the removed window-32 cases.
+
+The merged parent changes only that test. Production sources, manifests and
+Cargo.lock are identical to cc317ac and the previously validated 12bd4bc.
+The integrated focused run passes all eight ordinary tests (four scalar-range,
+row-zero, four-dimension window-32 and both real-precision exact-query suites).
+The two recursive tests retain their scheduled opt-in coverage. Required hosted
+CI runs again for this combined head; no performance claim is added.
