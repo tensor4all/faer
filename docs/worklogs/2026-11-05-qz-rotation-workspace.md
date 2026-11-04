@@ -106,3 +106,15 @@ The integrated focused run passes all eight ordinary tests (four scalar-range,
 row-zero, four-dimension window-32 and both real-precision exact-query suites).
 The two recursive tests retain their scheduled opt-in coverage. Required hosted
 CI runs again for this combined head; no performance claim is added.
+
+
+## Main integration after #255
+
+Maintainers merged #255 as e6bb7be and retargeted this PR to main after its
+base branch was removed. The only merge conflict was the CI test command;
+the resolved command retains every main regression and both rotation/workspace
+suites. The merge's complete tree is identical to 470360d, so the eight local
+focused tests and existing numerical evidence apply unchanged. This record is
+the only subsequent content change; numerical sources, manifests and Cargo.lock
+remain identical to the validated candidate. Required checks run for the new
+ancestry/head; no main merge or registry publication is performed here.
