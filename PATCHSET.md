@@ -61,7 +61,7 @@ gate has changed and two kinds of adoption are now in the ledger.
 | Workspace | `faer-ffi` is excluded (the C API and its cbindgen build are unused by tensor4all). |
 | Upstream base | Synced with Codeberg `0ecd846` (2026-10-17) by a merge commit, so `upstream/main` is an ancestor of this branch. Those nine upstream commits since the previous base `ddbd2ae` (the sparse CSC example doc, `MatMut::from_row_major_slice_with_stride_mut`'s strides, the CG/BiCGSTAB uninitialized read) were written upstream by Paul and Connor Smith and had already been cherry-picked here on 2026-10-22 in `9f3dc58`, `ae9b979` and `064016e` (their messages name Codeberg #305, #326 and `1b2d9a9`; the tests `codeberg_305`/`codeberg_326` came with them). The direction is upstream to fork, not the reverse: nothing was fed back upstream. The cherry-picked content is byte-identical to upstream's, so the sync changes no file -- the merged tree hash equals the pre-merge tree hash. Later syncs record the new base here. |
 | Publication | crates.io, in the order `t4a-faer-traits` then `t4a-faer`. Releases are tagged `faer-v<faer version>` and published by hand from a clean checkout of the tag; a `v<faer version>` tag would also start `publish.yml`. A version that is already on crates.io is skipped, so a release that bumps only one crate still succeeds. |
-| Released | Latest: `t4a-faer 0.28.2` with `t4a-faer-traits 0.24.2`, published from the commit tagged `faer-v0.28.2` (see the release section at the end). The published `src/**` is byte-identical to the tagged commit, so that commit is the revision a consumer pins. A later commit needs a new version. Earlier releases carry their own `faer-v<version>` tags. |
+| Released | Latest: `t4a-faer 0.28.3` with `t4a-faer-traits 0.24.2`, published from the commit tagged `faer-v0.28.3` (see the release section at the end). The published `src/**` is byte-identical to the tagged commit, so that commit is the revision a consumer pins. A later commit needs a new version. Earlier releases carry their own `faer-v<version>` tags. |
 | LICENSE | A `LICENSE` copy lives in each crate directory so the published archive ships the MIT text (`license-file` next to `license` makes Cargo warn). |
 
 ## Experiments
@@ -386,3 +386,17 @@ See [design and verification](docs/worklogs/2026-11-04-sparse-lu-components.md).
 Candidate: optional supplied column permutations for symbolic LU/QR and a
 high-level LU constructor. Existing defaults retain COLAMD.
 See [design and validation](docs/worklogs/2026-11-04-sparse-column-ordering.md).
+
+## Released: `t4a-faer` 0.28.3 (2026-11-04)
+
+`t4a-faer` 0.28.3; `t4a-faer-traits` stays 0.24.2 (no change in `faer-traits/`). Published from the
+merge commit of the version bump PR, tagged `faer-v0.28.3`.
+
+A patch release with no public API change. It carries the sparse LU fix recorded in the ledger row
+for #236: the recursive dense panel triangular solve no longer carries `#[cfg(feature = "rayon")]`,
+so a build without the default feature set computes it instead of skipping it. The default feature
+set was never affected, which is why the ordinary CI lanes stayed green while `--no-default-features`
+builds returned wrong `partial_piv_lu` results from `n = 17` upward, in every release since 0.26.0.
+Consumers that build with `--no-default-features` and call the sparse LU should take this version.
+The regression test is `faer/tests/sparse_lu_no_rayon.rs` (f32, f64, c32, c64 at n = 0, 1, 3, 12, 40
+over all three `SupernodalThreshold` choices) and the `--no-default-features` CI lane that came with it.
