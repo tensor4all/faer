@@ -86,6 +86,25 @@ fn parallel_regions_allocate_nothing() {
 			assert!(parallel > 0, "full pivoting LU, width {width}: no parallel region");
 			assert_eq!(allocs, 0, "full pivoting LU, width {width}");
 
+			// partial pivoting LU at a 2 KiB column stride: the `U` panel solves stage their right
+			// hand sides in a per-thread buffer, which grows during the warm-up and is reused after
+			{
+				use faer::linalg::lu::partial_pivoting::factor as plu;
+				let n = 256;
+				let a0 = sample(n, n, 4);
+				let mut a = a0.clone();
+				assert_eq!(a.col_stride() as usize * core::mem::size_of::<f64>() % 1024, 0);
+				let (mut p, mut pi) = (vec![0usize; n], vec![0usize; n]);
+				let params = plu::PartialPivLuParams { par_threshold: ParThreshold::Fixed(0), ..<plu::PartialPivLuParams as Auto<f64>>::auto() };
+				let mut mem = MemBuffer::new(plu::lu_in_place_scratch::<usize, f64>(n, n, par.shape(), params.into()));
+				let (allocs, parallel) = counted(|| {
+					a.copy_from(&a0);
+					plu::lu_in_place(a.as_mut(), &mut p, &mut pi, par.reborrow(), MemStack::new(&mut mem), params.into());
+				});
+				assert!(parallel > 0, "partial pivoting LU, width {width}: no parallel region");
+				assert_eq!(allocs, 0, "partial pivoting LU, width {width}");
+			}
+
 			// Bunch-Kaufman with full pivoting: rank-one and rank-two steps
 			let x = sample(n, n, 2);
 			let s0 = &x + x.transpose();
