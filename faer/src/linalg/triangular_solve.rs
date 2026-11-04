@@ -469,9 +469,11 @@ pub fn solve_unit_upper_triangular_in_place<
 /// | 256 | 652 us             | 268 us        |
 ///
 /// The triangle's stride does not matter (it is read through the products' packing and a few
-/// scalars). A node of at most 128 rows and 64 columns with an aliased stride therefore copies its
-/// right hand side into a per-thread buffer with a stride that does not alias, solves it there with
-/// the unchanged recursion, and copies it back: the same operations in the same order, so the
+/// scalars). A node of at most 128 rows and 64 columns whose columns crowd one L1 set
+/// (`stage::conflicts`: at least 24 lines per set, which a 1 KiB stride never reaches and a 4 KiB
+/// stride reaches at 24 columns) therefore copies its right hand side into a per-thread buffer
+/// with a stride that does not alias, solves it there with the unchanged recursion, and copies it
+/// back: the same operations in the same order, so the
 /// result is bitwise the same, for `O(n k)` copies against `O(n^2 k)` work. The buffer belongs to
 /// the thread, grows once to at most `128 x 64` elements and is reused (AGENTS.md, working memory
 /// in parallel code), so a steady-state call allocates nothing.
@@ -482,8 +484,21 @@ mod stage {
 
 	/// fewer rows than this are a few vectors per column: nothing to gain from a copy
 	pub(super) const MIN_ROWS: usize = 16;
-	/// fewer columns than this do not fill a set's ways
-	pub(super) const MIN_COLS: usize = 13;
+	/// L1 sets repeat every `64 sets * 64 bytes` (48 KiB, 12 ways on the Zen cores measured here)
+	const SET_PERIOD: usize = 4096;
+	/// A chunk is staged when this many of its lines (one per column) share an L1 set: twice the
+	/// 12 ways. Measured on evo2 (`f64`, unit lower `b x b` against `b` columns, 1T, staged against
+	/// in place at the same stride; lines per set = `k * gcd(stride, 4096) / 4096`):
+	///
+	/// | stride | b = k = 32       | 64              | 128            |
+	/// |--------|------------------|-----------------|----------------|
+	/// | 1 KiB  | 1.8 / 1.4 us (8) | 8.0 / 6.7 (16)  |                |
+	/// | 2 KiB  | 1.9 / 1.9 (16)   | 8.2 / 12.8 (32) | 47 / 78 (64)   |
+	/// | 4 KiB  | 2.0 / 6.1 (32)   | 8.5 / 30.7 (64) | 50 / 138 (128) |
+	///
+	/// At 16 lines or fewer the copy costs more than the conflicts (1 KiB, the n = 128 LU, was 6-8 %
+	/// slower under a rule that staged every 1 KiB multiple); at 32 and more staging wins.
+	const MIN_LINES_PER_SET: usize = 24;
 
 	std::thread_local! {
 		static BUF: RefCell<alloc::vec::Vec<u64>> = const { RefCell::new(alloc::vec::Vec::new()) };
@@ -505,11 +520,16 @@ mod stage {
 		}) && core::mem::align_of::<T>() <= core::mem::align_of::<u64>()
 	}
 
-	/// the column stride, in bytes, is a nonzero multiple of 1 KiB
+	/// `k` columns at this column stride put at least `MIN_LINES_PER_SET` lines into one L1 set
 	#[inline]
-	pub(super) fn aliases<T>(col_stride: isize) -> bool {
+	pub(super) fn conflicts<T>(col_stride: isize, k: usize) -> bool {
 		let bytes = col_stride.unsigned_abs() * core::mem::size_of::<T>();
-		bytes != 0 && bytes % 1024 == 0
+		if bytes == 0 {
+			return false;
+		}
+		// gcd(bytes, SET_PERIOD) for a power-of-two period
+		let g = Ord::min(1usize << bytes.trailing_zeros(), SET_PERIOD);
+		k * g / SET_PERIOD >= MIN_LINES_PER_SET
 	}
 
 	/// the stride of the staged copy: `n`, or `n` plus 64 bytes when `n` itself would alias
@@ -645,10 +665,9 @@ fn solve_unit_lower_triangular_in_place_imp<'N, 'K, T: ComplexField>(
 	#[cfg(feature = "std")]
 	if n <= 128
 		&& n >= stage::MIN_ROWS
-		&& k >= stage::MIN_COLS
 		&& rhs.row_stride() == 1
 		&& stage::native::<T>()
-		&& stage::aliases::<T>(rhs.col_stride())
+		&& stage::conflicts::<T>(rhs.col_stride(), k)
 	{
 		let mut rhs = rhs;
 		if stage::with_staged(rhs.rb_mut(), |staged| {
@@ -1061,7 +1080,7 @@ mod aliased_rhs {
 		let size = core::mem::size_of::<T>();
 		let mut state = 0x5EED;
 		for (n, k) in [
-			(16, 13),
+			(16, 24),
 			(64, 64),
 			(100, 77),
 			(128, 200),
@@ -1102,6 +1121,18 @@ mod aliased_rhs {
 					};
 					let (staged, ran) = solve(aliased);
 					let (plain, ran_plain) = solve(padded);
+					// a 1 KiB stride (an odd multiple) puts at most 16 lines of a 64-column chunk in
+					// a set: below the staging floor, where the copy costs more than it saves
+					let kib = {
+						let m = (n * size).div_ceil(1024);
+						(m | 1) * 1024 / size
+					};
+					let (_, ran_kib) = solve(kib);
+					core::assert_eq!(
+						ran_kib,
+						0,
+						"n={n} k={k}: a 1 KiB stride was staged"
+					);
 					core::assert!(
 						ran > 0,
 						"n={n} k={k}: the aliased stride was not staged"
