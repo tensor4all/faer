@@ -3068,8 +3068,8 @@ mod tests {
 	}
 	#[test]
 	fn nonzero_subnormal_pivot_is_not_singular() {
-		// the modulus of `c64(2^-1074, 0)` underflows to zero, the entry
-		// itself is not zero
+		// the modulus of `c64(2^-1074, 0)` underflowed to zero until
+		// tensor4all/faer#274, the entry itself is not zero
 		let tiny = f64::from_bits(1);
 		let triplets = [Triplet::new(0, 0, c64::new(tiny, 0.0))];
 		let A =

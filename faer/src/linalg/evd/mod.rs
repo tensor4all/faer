@@ -1907,8 +1907,9 @@ pub fn eigenvectors_from_schur_cplx<T: ComplexField>(
 /// `bignum / anrm`); a power of two lands within a factor of two of the same bound and does not
 /// round (an entry far below the largest can still underflow when scaling down, as in LAPACK).
 /// The largest entry is the largest `|re|` or `|im|`, within a factor `sqrt(2)` of LAPACK's
-/// modulus: faer's complex modulus is itself inf for `2^1023 + 0i` and zero for `2^-1074 + 0i`,
-/// which would select a zero factor or none. Without the scaling, the Hessenberg reduction and
+/// modulus. It was chosen because faer's complex modulus was inf for `2^1023 + 0i` and zero for
+/// `2^-1074 + 0i` until tensor4all/faer#274, which would have selected a zero factor or none.
+/// Without the scaling, the Hessenberg reduction and
 /// the Schur iteration of a matrix whose entries are near the bottom of the range work in
 /// subnormals: on Grcar, random and near-Jordan matrices the GET22 ratio grew from about `2^-90`
 /// (32-bit) and reached `1 / eps` by `2^-100` (32-bit) and `2^-960` (64-bit); near the top, the
@@ -3335,9 +3336,9 @@ mod geev_scaling_tests {
 		}
 	}
 
-	/// The ends of the range for a complex matrix, where faer's complex modulus overflows
-	/// (`2^1023 + 0i`, `2^127 + 0i`) or underflows (`2^-1074`, `2^-149`): the eigenvalues come
-	/// back exactly.
+	/// The ends of the range for a complex matrix, where faer's complex modulus overflowed
+	/// (`2^1023 + 0i`, `2^127 + 0i`) or underflowed (`2^-1074`, `2^-149`) until
+	/// tensor4all/faer#274: the eigenvalues come back exactly.
 	#[test]
 	fn evd_scaling_at_the_complex_range_ends() {
 		let top = c64::new(2.0f64.powi(1023), 0.0);

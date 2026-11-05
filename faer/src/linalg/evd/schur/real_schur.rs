@@ -713,8 +713,8 @@ pub(crate) fn schur_swap_22<T: RealField>(
 
 /// LAPACK `dlapy2`: `sqrt(x^2 + y^2)` without unnecessary overflow, as
 /// `w sqrt(1 + (z / w)^2)` with `w = max(|x|, |y|)`, `z = min(|x|, |y|)`.
-/// faer's generic `hypot` squares scaled components and overflows near
-/// `max_positive / 2`.
+/// faer's generic `hypot` squared scaled components and overflowed near
+/// `max_positive / 2` until tensor4all/faer#274.
 fn lapy2<T: RealField>(x: &T, y: &T) -> T {
 	if x.is_nan() {
 		return x.copy();
@@ -3125,7 +3125,8 @@ mod tests {
 		}
 		#[test]
 		fn lapy2_avoids_overflow_and_underflow() {
-			// faer's generic `hypot` returns `inf` for the first input.
+			// faer's generic `hypot` returned `inf` for the first input until
+			// tensor4all/faer#274.
 			assert!(rel(&lapy2(&1e308f64, &1e297), &1e308) <= 1e-15);
 			assert!(rel(&lapy2(&-3e-320f64, &4e-320), &5e-320) <= 1e-3);
 			assert!(rel(&lapy2(&3e38f32, &-4e37), &3.026549e38) <= 1e-6);
@@ -3137,7 +3138,7 @@ mod tests {
 		}
 		/// The `dlanv2` branch of `lahqr_schur22` for real eigenvalues with an
 		/// off-diagonal near overflow: `sqrt(c^2 + z^2)` and faer's `hypot`
-		/// overflow and made `cs = sn = 0`.
+		/// (until tensor4all/faer#274) overflowed and made `cs = sn = 0`.
 		/// `lahqr_schur22` returns a standardized block (`c == 0`, or equal
 		/// diagonal entries and off-diagonal entries of opposite signs) that
 		/// is the rotation of its input. `[[0, -1], [1, 2]]`, a double

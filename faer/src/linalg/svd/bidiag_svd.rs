@@ -1117,7 +1117,8 @@ pub(super) fn divide_and_conquer_scratch<T: ComplexField>(
 /// `alpha * lambda` and `beta * phi` are products of entries of an already
 /// rescaled subproblem, so a deeply split bidiagonal makes them as small as
 /// `1e-41`, where `x.abs2() + y.abs2()` is subnormal or zero even after the
-/// `sqrt(max_positive)` rescaling that `hypot` applies.
+/// `sqrt(max_positive)` rescaling that `hypot` applied until
+/// tensor4all/faer#274.
 fn hypot_scaled<T: RealField>(x: &T, y: &T) -> T {
 	let (x, y) = (x.abs(), y.abs());
 	let (w, z) = if x > y { (x, y) } else { (y, x) };

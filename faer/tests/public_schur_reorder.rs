@@ -350,8 +350,9 @@ fn overflowing_swap_is_rejected_unchanged() {
 	assert!(!stable_or_rejected(&outside_window::<f32>(column), 0, 2, 0));
 }
 /// The standardization of the swapped pair needs `dlanv2`'s scaled norm:
-/// `sqrt(c^2 + z^2)` and faer's generic `hypot` both overflow here, which made
-/// `q` lose orthogonality. LAPACK `dtrexc` accepts with residual below 1e-15.
+/// `sqrt(c^2 + z^2)` and faer's generic `hypot` (until tensor4all/faer#274)
+/// both overflowed here, which made `q` lose orthogonality. LAPACK `dtrexc`
+/// accepts with residual below 1e-15.
 #[test]
 fn standardization_of_extreme_pair_stays_orthogonal() {
 	let t =

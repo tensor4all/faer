@@ -342,13 +342,21 @@ fn abs_impl<T: RealField>(re: T, im: T) -> T {
 	let one = &one();
 	let re_abs = &re.abs();
 	let im_abs = &im.abs();
-	if re_abs > big || im_abs > big {
-		((re * small).abs2() + (im * small).abs2()).sqrt() * big
+	// exact powers of two that keep the square of the larger component, and of
+	// any component within `sqrt(eps)` of it, normal. a component above `big`
+	// scaled by `small` alone can square to `inf`, and one below `small` scaled
+	// by `big` alone can square to a subnormal or zero, so those two ranges
+	// scale further by `eps`
+	let (scale, unscale) = if re_abs > big || im_abs > big {
+		(small * eps::<T>(), big / eps::<T>())
 	} else if re_abs > one || im_abs > one {
-		(re.abs2() + im.abs2()).sqrt()
+		(one.copy(), one.copy())
+	} else if re_abs < small && im_abs < small {
+		(big / eps::<T>(), small * eps::<T>())
 	} else {
-		((re * big).abs2() + (im * big).abs2()).sqrt() * small
-	}
+		(big.copy(), small.copy())
+	};
+	((re * &scale).abs2() + (im * &scale).abs2()).sqrt() * unscale
 }
 fn recip_impl<T: RealField>(re: T, im: T) -> (T, T) {
 	use ext::*;
@@ -5835,5 +5843,154 @@ mod tests {
 		// 1 / 2^-1074 exceeds the largest finite value
 		let (re, _) = recip_impl(f64::from_bits(1), 0.0);
 		assert_eq!(re, f64::INFINITY);
+	}
+
+	/// `abs` of each `(re, im)` through `Complex<T>` and the `repr(transparent)`
+	/// `ComplexImpl<T>`, bit for bit against the platform `hypot`
+	macro_rules! assert_abs_is_hypot {
+		($t:ty, $cases:expr) => {
+			for (re, im) in $cases {
+				let expected = <$t>::hypot(re, im).to_bits();
+				let z = Complex::<$t> { re, im };
+				assert_eq!(abs(&z).to_bits(), expected, "abs({re:e}, {im:e})");
+				let z = ComplexImpl(z);
+				assert_eq!(abs(&z).to_bits(), expected, "abs({re:e}, {im:e})");
+				assert_eq!(
+					hypot(&re, &im).to_bits(),
+					expected,
+					"hypot({re:e}, {im:e})"
+				);
+			}
+		};
+	}
+
+	/// the modulus of a nonzero subnormal is exact and nonzero where `hypot`'s
+	/// is: the squares flushed it to zero (`tensor4all/faer#274`)
+	#[test]
+	fn abs_of_subnormal_complex() {
+		let s = f32::from_bits;
+		let d = f64::from_bits;
+		assert_abs_is_hypot!(
+			f32,
+			[
+				// the issue's pure-imaginary cases
+				(0.0, s(1 << 19)),
+				(0.0, s(1 << 9)),
+				(-0.0, -s(1)),
+				// 3-4-5 with both components subnormal
+				(s(3), s(4)),
+				// a subnormal and a normal component: the subnormal square kept
+				// too few bits and the modulus was one ulp high
+				(s(3 * 2_372_667), s(4 * 2_372_667)),
+				// controls the squares already got right
+				(-s(3 << 12), s(4 << 12)),
+				(s(3 * 1_900_000), s(4 * 1_900_000)),
+			]
+		);
+		assert_abs_is_hypot!(
+			f64,
+			[
+				(0.0, d(1 << 44)),
+				(0.0, d(1 << 4)),
+				(d(3), -d(4)),
+				// controls the squares already got right: a subnormal and a normal
+				// component, and two subnormals with a normal modulus
+				(d(3 << 50), d(4 << 50)),
+				(d(3 * 1_000_000_000_000_000), d(4 * 1_000_000_000_000_000)),
+			]
+		);
+	}
+
+	/// the modulus near `max_positive` is finite where `hypot`'s is: the
+	/// squares overflowed to `inf` (`tensor4all/faer#274`)
+	#[test]
+	fn abs_near_max_positive() {
+		assert_abs_is_hypot!(
+			f32,
+			[
+				(f32::MAX, 0.0),
+				(0.0, -f32::MAX),
+				(3.0 * 2.0f32.powi(125), 4.0 * 2.0f32.powi(125)),
+			]
+		);
+		assert_abs_is_hypot!(
+			f64,
+			[
+				(f64::MAX, 0.0),
+				(-3.0 * 2.0f64.powi(1021), 4.0 * 2.0f64.powi(1021)),
+			]
+		);
+		assert_eq!(
+			abs(&Complex {
+				re: f64::MAX,
+				im: f64::MAX
+			}),
+			f64::INFINITY
+		);
+	}
+
+	/// zero, infinite and NaN inputs keep the previous results
+	#[test]
+	fn abs_of_zero_inf_nan() {
+		assert_eq!(
+			abs(&Complex {
+				re: 0.0f64,
+				im: -0.0
+			})
+			.to_bits(),
+			0
+		);
+		assert_eq!(
+			abs(&Complex {
+				re: f32::INFINITY,
+				im: 1.0
+			}),
+			f32::INFINITY
+		);
+		assert_eq!(
+			abs(&Complex {
+				re: 1.0,
+				im: f64::NEG_INFINITY
+			}),
+			f64::INFINITY
+		);
+		assert!(
+			abs(&Complex {
+				re: f64::NAN,
+				im: 1e-320
+			})
+			.is_nan()
+		);
+		assert!(
+			abs(&Complex {
+				re: f32::MAX,
+				im: f32::NAN
+			})
+			.is_nan()
+		);
+	}
+
+	/// `sqrt` takes its modulus from `abs_impl`: `sqrt(s^2 (3 + 4i)) = s (2 + i)`
+	/// for `s^2` deep in the subnormals (`tensor4all/faer#274`)
+	#[test]
+	fn sqrt_of_subnormal_complex() {
+		let s = 2.0f32.powi(-74);
+		let z = Complex {
+			re: 3.0 * s * s,
+			im: 4.0 * s * s,
+		};
+		assert_eq!(sqrt(&z), Complex { re: 2.0 * s, im: s });
+		let s = 2.0f64.powi(-537);
+		let z = Complex {
+			re: 3.0 * s * s,
+			im: -4.0 * s * s,
+		};
+		assert_eq!(
+			sqrt(&z),
+			Complex {
+				re: 2.0 * s,
+				im: -s
+			}
+		);
 	}
 }
