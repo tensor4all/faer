@@ -980,12 +980,20 @@ impl<
 		let other = other.as_shape(M, N);
 		imp(this, other.canonical(), Conj::get::<RhsT>());
 		pub fn imp<'M, 'N, T: ComplexField>(
-			this: MatMut<'_, T, Dim<'M>, Dim<'N>>,
+			mut this: MatMut<'_, T, Dim<'M>, Dim<'N>>,
 			other: MatRef<'_, T, Dim<'M>, Dim<'N>>,
 			conj_: Conj,
 		) {
 			match conj_ {
 				Conj::No => {
+					// a row-major source into a column-major destination: in
+					// tiles, not one strided read per element
+					if crate::linalg::copy_lower_across_layouts(
+						this.rb_mut().as_dyn_mut(),
+						other.as_dyn(),
+					) {
+						return;
+					}
 					zip!(this, other).for_each_triangular_lower(
 						crate::linalg::zip::Diag::Include,
 						|unzip!(dst, src)| *dst = src.copy(),

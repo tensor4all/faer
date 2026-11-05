@@ -267,6 +267,49 @@ fn copy_across_layouts_block<T: Clone>(
 		jb += B;
 	}
 }
+/// Copies the lower triangle of `src`, diagonal included, into `dst` in tiles,
+/// when `dst` is column-major, `src` is not, and the matrix is above
+/// [`row_major_copy_pays`]'s floor; returns `false` and touches nothing
+/// otherwise. The elements written are exactly those
+/// `MatMut::copy_from_triangular_lower` writes (column `j < min(m, n)`, rows
+/// `j..m`), so the upper triangle of `dst` is left as it was.
+///
+/// The elementwise path walks `dst` column by column, so for a row-major `src`
+/// every read steps by the source's row stride: at `1024 x 1024` f64 that is
+/// 4.2 ms against 0.30 ms from a column-major source, and it is the whole of
+/// the gap between the two orders of `Llt::new`. Each `16`-column band is the
+/// diagonal tile, copied elementwise below its diagonal, and the rectangle
+/// under it, copied with [`copy_across_layouts_block`].
+pub(crate) fn copy_lower_across_layouts<T: Clone>(
+	mut dst: MatMut<'_, T>,
+	src: MatRef<'_, T>,
+) -> bool {
+	let (m, n) = dst.shape();
+	if dst.row_stride() != 1
+		|| src.row_stride().unsigned_abs() == 1
+		|| !row_major_copy_pays(m, n)
+	{
+		return false;
+	}
+	let k = Ord::min(m, n);
+	let mut jb = 0;
+	while jb < k {
+		let j1 = Ord::min(jb + COPY_TILE, k);
+		for j in jb..j1 {
+			for i in j..j1 {
+				dst[(i, j)] = src[(i, j)].clone();
+			}
+		}
+		if j1 < m {
+			copy_across_layouts_block(
+				dst.rb_mut().submatrix_mut(j1, jb, m - j1, j1 - jb),
+				src.submatrix(j1, jb, m - j1, j1 - jb),
+			);
+		}
+		jb = j1;
+	}
+	true
+}
 struct DynMat<'a, T: ComplexField, Rows: Shape, Cols: Shape> {
 	ptr: *mut T,
 	nrows: Rows,
@@ -915,6 +958,96 @@ mod tests {
 					crate::team::with_team(threads, |par| run(par));
 				}
 			}
+		}
+	}
+
+	/// The tiled path of `copy_from_triangular_lower` writes exactly the
+	/// elements the elementwise one does, with the same values, and leaves the
+	/// rest of the destination alone: square, tall, wide, a narrow band whose
+	/// area is still above the floor, sides that are not a multiple of the tile,
+	/// and a source whose rows are walked backwards.
+	#[test]
+	fn tiled_triangular_copy_writes_what_the_elementwise_one_does() {
+		fn check<T: Entry>(m: usize, n: usize, flipped: bool) {
+			let (_, rm) = fixture::<T>(m, n, flipped);
+			let (base, rs, cs) = rm_strides(m, n, flipped);
+			let src = unsafe {
+				MatRef::from_raw_parts(rm.as_ptr().add(base), m, n, rs, cs)
+			};
+			let sentinel = T::at(m + 11, n + 13);
+			let mut tiled = Mat::<T>::from_fn(m, n, |_, _| sentinel.clone());
+			std::assert!(crate::linalg::row_major_copy_pays(m, n));
+			tiled.copy_from_triangular_lower(src);
+			for j in 0..n {
+				for i in 0..m {
+					let want = if i >= j { src[(i, j)].clone() } else { sentinel.clone() };
+					if !tiled[(i, j)].same(&want) {
+						panic!("{m}x{n} flipped={flipped}: entry ({i}, {j}) differs");
+					}
+				}
+			}
+		}
+		for (m, n) in [(64, 64), (65, 65), (300, 300), (257, 100), (100, 257), (17, 300), (300, 17)] {
+			for flipped in [false, true] {
+				check::<f64>(m, n, flipped);
+				check::<crate::c64>(m, n, flipped);
+			}
+		}
+	}
+
+	/// The gate for the tiled copy: `Llt::new` and `PartialPivLu::new` given the
+	/// same matrix as a row-major and as a column-major view leave the same
+	/// factors, entry for entry and bit for bit, and the same permutation. The
+	/// copy is the only step that differs between the two orders, so anything
+	/// it got wrong shows here.
+	#[test]
+	fn llt_and_partial_piv_lu_factor_both_orders_bit_for_bit() {
+		use crate::linalg::solvers::{Llt, PartialPivLu};
+		fn same<T: Entry>(what: &str, a: MatRef<'_, T>, b: MatRef<'_, T>) {
+			for j in 0..a.ncols() {
+				for i in 0..a.nrows() {
+					if !a[(i, j)].same(&b[(i, j)]) {
+						panic!("{what}: entry ({i}, {j}) differs between the two orders");
+					}
+				}
+			}
+		}
+		for n in [65, 129, 300] {
+			let (cm, rm) = fixture::<f64>(n, n, false);
+			let cm = MatRef::from_column_major_slice(&cm, n, n);
+			let rm = MatRef::from_row_major_slice(&rm, n, n);
+			// symmetric positive definite: A Aᵀ + n I, built once and laid out both ways
+			let spd = Mat::<f64>::from_fn(n, n, |i, j| {
+				let mut s = if i == j { n as f64 } else { 0.0 };
+				for k in 0..n {
+					s += cm[(i, k)] * cm[(j, k)];
+				}
+				s
+			});
+			let spd_cm: Vec<f64> = (0..n * n).map(|k| spd[(k % n, k / n)]).collect();
+			let spd_rm: Vec<f64> = (0..n * n).map(|k| spd[(k / n, k % n)]).collect();
+			let run = |par: Par<'_>| {
+				let a = Llt::new(
+					MatRef::from_column_major_slice(&spd_cm, n, n),
+					Side::Lower,
+					Par::Seq,
+				)
+				.unwrap();
+				let b = Llt::new(
+					MatRef::from_row_major_slice(&spd_rm, n, n),
+					Side::Lower,
+					par,
+				)
+				.unwrap();
+				same(&format!("llt {n}"), a.L(), b.L());
+			};
+			run(Par::Seq);
+			crate::team::with_team(8, |par| run(par));
+			let a = PartialPivLu::new(cm, Par::Seq);
+			let b = PartialPivLu::new(rm, Par::Seq);
+			same(&format!("lu L {n}"), a.L(), b.L());
+			same(&format!("lu U {n}"), a.U(), b.U());
+			std::assert_eq!(a.P().arrays(), b.P().arrays(), "lu {n}: permutations differ");
 		}
 	}
 }
