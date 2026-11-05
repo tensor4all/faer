@@ -93,54 +93,70 @@ Keep imports such as `use faer::Mat`, but change the Cargo dependency. Replace g
 | `lu.solve(&b)` | `lu.solve(&b, Par::Seq)` |
 | Global parallelism setting | Pass `Par::Seq` or a team to each operation |
 
-This fork has no `Par::rayon`, `Par::Rayon`, or global faer parallelism setter. Replace old Rayon width tokens with `faer::team::with_team` or a caller owned team. For scratch queries use `par.shape()`, not the execution token itself. See the current API in `faer/src/lib.rs` and the [changelog](../CHANGELOG.md) for the release history.
+This fork has no `Par::rayon`, `Par::Rayon`, or global faer parallelism setter. Replace old Rayon width tokens with an owned team or `faer::team::with_team`. For scratch queries use `par.shape()`, not the execution token itself. See the current API in `faer/src/lib.rs` and the [changelog](../CHANGELOG.md) for the release history.
 
 ## Explicit parallelism
 
-A scoped team is convenient for a sequence of calls. The requested width includes the calling thread. A width of one, or zero, selects sequential execution. The default `threadteam` feature is required.
+Owning a team is the primary route, and the one we measure and publish. Build the pool once, reserve the team once, and take an execution token for each call with `team.exec(width)`; `Exec::team` lends that token to the operations of the call, and dropping the `exec` frees it for the next one. The requested width includes the calling thread. A width of one, or zero, selects sequential execution. The default `threadteam` feature is required; add `threadteam = "0.3"` alongside the faer dependency to name the pool and team types:
 
 ```rust
-use faer::{mat, Accum, Mat};
 use faer::linalg::matmul::matmul;
+use faer::{Accum, Mat, Par, mat};
 
 fn main() {
     let a = mat![[1.0_f64, 2.0], [3.0, 4.0]];
     let mut product = Mat::<f64>::zeros(2, 2);
-    let mut again = Mat::<f64>::zeros(2, 2);
-    faer::team::with_team(4, |mut par| {
-        matmul(product.as_mut(), Accum::Replace, &a, &a, 1.0, par.reborrow());
-        matmul(again.as_mut(), Accum::Replace, &a, &a, 1.0, par.reborrow());
-    });
-    assert!((product[(0, 0)] - 7.0).abs() < 1e-12);
-    assert!((again[(1, 1)] - 22.0).abs() < 1e-12);
-}
-```
 
-`Par` is consumed by an operation and is neither `Copy` nor `Clone`. `reborrow()` lends its exclusive authority for one call; the parent cannot be used until that borrow ends. A team token is valid only in its scope and cannot escape it. Do not acquire or reuse the same team recursively inside an active team operation; pass the existing authority through the call chain instead. Independent nested pools can oversubscribe the machine. Internal algorithms may split a team into disjoint children; that is not permission to duplicate a parent token.
-
-For repeated parallel calls, construct and retain a `threadteam::Pool` and `Team`, then obtain a fresh execution token for each scope. Add `threadteam = "0.3"` alongside the faer dependency:
-
-```rust
-use faer::{mat, Accum, Mat, Par};
-use faer::linalg::matmul::matmul;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = threadteam::Pool::builder().threads(4).build()?;
+    // Once: a pool of four threads, turned into a team that keeps three members reserved.
+    let pool = threadteam::Pool::builder()
+        .threads(4)
+        .acquire_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("a thread pool for the team");
     let team = pool.into_team(4).ok().expect("a newly built pool is idle");
-    let a = mat![[1.0_f64, 2.0], [3.0, 4.0]];
-    let mut product = Mat::<f64>::zeros(2, 2);
-    for _ in 0..2 {
+
+    // Per call: one execution token, and the team lent to the operation inside it.
+    for _ in 0..3 {
         let mut exec = team.exec(4);
         exec.team(|token| {
             matmul(product.as_mut(), Accum::Replace, &a, &a, 1.0, Par::Team(token));
-        }).ok().expect("the team is idle between calls");
+        })
+        .ok()
+        .expect("the team is idle between calls");
     }
-    assert!((product[(1, 1)] - 22.0).abs() < 1e-12);
-    Ok(())
+    assert!((product[(0, 0)] - 7.0).abs() < 1e-12);
 }
 ```
 
-`with_team` acquires a pool and team for each scope; threadteam may reuse cached workers. There is no implicit global faer execution pool or global faer thread setting, but this does not mean threadteam has no process level worker cache. Short or small operations can execute sequentially even with a team when parallel dispatch does not pay.
+The loop is the point. The pool and the team live outside it; `team.exec(4)` mints one execution token per iteration, `Exec::team` hands that token to the closure as `Par::Team`, and `matmul` consumes it. The `exec` is dropped at the end of the iteration, which is what lets the next one take a token. Holding the team and lending it per call is what a program with a sequence of calls does.
+
+`faer::team::with_team` is the one-off route. It builds a pool, reserves its members, runs a single closure, and releases them after it returns; use it for one call, or for a script that runs a single operation.
+
+```rust
+use faer::linalg::matmul::matmul;
+use faer::{Accum, Mat, mat};
+
+fn main() {
+    let a = mat![[1.0_f64, 2.0], [3.0, 4.0]];
+    let mut product = Mat::<f64>::zeros(2, 2);
+    faer::team::with_team(4, |par| {
+        matmul(product.as_mut(), Accum::Replace, &a, &a, 1.0, par);
+    });
+    assert!((product[(0, 0)] - 7.0).abs() < 1e-12);
+}
+```
+
+The difference is per call, not per thread. Measured on EVO-X2 with threadteam 0.3.0 and 8 participants, holding a team and passing it to one operation per call costs 0.47 us per call, while `with_team` costs 30.4 us per call and 438.7 us for the first one. A single LU factorization at n = 128 takes 60 us, so the one-off helper spends half of that call on acquiring the team it then releases. Use `with_team` when the program makes one call, and own the pool and team when it makes a sequence of them.
+
+The rules that bite:
+
+* `Par` is consumed by an operation and is neither `Copy` nor `Clone`. `reborrow()` lends its exclusive authority for one call; the parent cannot be used until that borrow ends. A team token is valid only in its scope and cannot escape it.
+* Two pools do not share their members. A second `with_team` call, or a second pool, acquires its own members instead of borrowing the budget already held.
+* Nesting does not add a team. A call made from inside an operation that holds a team gets the token passed down to it, not a new one: a token that carries no members, or a team narrowed to one participant, is a serial token and runs inline on the calling thread, and `Par::Seq` needs no team at all.
+* Do not acquire the same team recursively. `threadteam::Team::exec` panics when the calling thread already holds a token of that team, and the token lives until its `Exec` is dropped, not until the operation returns. Pass the existing authority through the call chain with `reborrow()`, or take one token per call and drop it.
+* Independent nested pools can oversubscribe the machine. Internal algorithms may split a team into disjoint children; that is not permission to duplicate a parent token.
+
+There is no implicit global faer execution pool or global faer thread setting, but this does not mean threadteam has no process level worker cache. Short or small operations can execute sequentially even with a team when parallel dispatch does not pay.
 
 ## Migration pitfalls
 

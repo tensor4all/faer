@@ -62,12 +62,27 @@ It is an execution contract, not a performance parity claim against Julia or
 its BLAS. See <https://tensor4all.org/faer-benchmark/> for measurements.
 
 `Par::Team` is non-Copy and non-Clone exclusive authority to use a worker team.
-`with_team(2, |mut par| ...)` scopes that authority to its closure. Keep the
-region around a sequence of operations and lend its token using
-`par.reborrow()`. Each completed call releases the borrow, allowing the next
-factorization or solve to use the same authority. A factor object owns its
-numerical data, but it does not own a team or silently choose parallelism.
-The separate choice of `Par::Seq` needs no team region at all.
+Owning that team is the primary route: build a `threadteam::Pool` once, reserve it
+with `pool.into_team(width)`, and take an execution token for each call with
+`team.exec(width)` inside `Exec::team(|token| ...)`. Wrap that token as
+`Par::Team(token)` and lend it with `reborrow()` to each factorization or solve of
+the scope; the team comes back when that `exec` is dropped. A factor object owns its numerical data, but it does not own a team or
+silently choose parallelism. The separate choice of `Par::Seq` needs no team at all.
+
+`faer::team::with_team(2, |mut par| ...)` is the one-off route: it builds a pool,
+reserves its members, and releases them after the closure returns. Use it for one call, or
+for a script that runs a single operation. The
+[Rust guide](../migration-guide.md#explicit-parallelism) gives the cost of each
+route per call. In either route, lend the authority with `par.reborrow()` rather
+than copying it, so each completed call releases the borrow for the next one.
+
+Two pools do not share their members. Nesting does not add a team: a call made
+from inside an operation that holds one gets the token passed down to it, and a
+token that carries no members, or a team narrowed to one participant, is a serial
+token that runs inline on the calling thread.
+Do not acquire the same team recursively: `threadteam::Team::exec` panics on a
+thread that already holds a token of that team, and a token lives until its `Exec`
+is dropped.
 
 A nested child must receive and use the child token, not capture the parent
 token. While child authority is active the parent is unavailable. This prevents
@@ -79,7 +94,7 @@ are fork APIs. There is no `get_global_parallelism`, `set_global_parallelism`,
 or `Par::Rayon`. Do not transplant upstream documentation's signatures.
 See [the Par migration guide](../par-team-migration.md) for detailed API history.
 
-## Reuse one region for several factorizations
+## Hold one team across several factorizations
 
 The source is [`faer/examples/migration_julia.rs`](../../faer/examples/migration_julia.rs).
 Run it with `cargo run -p t4a-faer --example migration_julia -j8`.
@@ -91,12 +106,21 @@ known success condition and propagates SVD nonconvergence as its original typed 
 use faer::linalg::matmul::dot::inner_prod;
 use faer::linalg::matmul::matmul;
 use faer::linalg::solvers::{DenseSolveCore, Solve, SvdError};
-use faer::{Accum, Conj, Mat, Side, c64, col, mat};
+use faer::{Accum, Conj, Mat, Par, Side, c64, col, mat};
 
 fn main() -> Result<(), SvdError> {
 	let a = mat![[4.0_f64, 1.0], [1.0, 3.0]];
 	let b = mat![[6.0_f64], [7.0]];
-	faer::team::with_team(2, |mut par| -> Result<(), SvdError> {
+	// The pool and the team are built once; every factorization below lends the team.
+	let pool = threadteam::Pool::builder()
+		.threads(2)
+		.acquire_timeout(std::time::Duration::from_secs(30))
+		.build()
+		.expect("a thread pool for the team");
+	let team = pool.into_team(2).ok().expect("a newly built pool is idle");
+	let mut exec = team.exec(2);
+	exec.team(|token| -> Result<(), SvdError> {
+		let mut par = Par::Team(token);
 		let lu = a.partial_piv_lu(par.reborrow());
 		let chol = a
 			.llt(Side::Lower, par.reborrow())
@@ -133,7 +157,9 @@ fn main() -> Result<(), SvdError> {
 			}
 		}
 		Ok(())
-	})?;
+	})
+	.ok()
+	.expect("the team is idle between calls")?;
 	let x = col![c64::new(1.0, 1.0), c64::new(2.0, 0.0)];
 	let y = col![c64::new(1.0, 0.0), c64::new(0.0, 1.0)];
 	let dot =

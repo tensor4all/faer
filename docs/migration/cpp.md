@@ -54,12 +54,29 @@ contract, not a claim of performance parity with Eigen or a BLAS library.
 Measurements are published at <https://tensor4all.org/faer-benchmark/>.
 
 `Par::Team` is non-Copy and non-Clone exclusive authority to use a worker team.
-`with_team(2, |mut par| ...)` scopes that ownership to the closure. Repeated
-operations lend the authority with `par.reborrow()` instead of copying it or
-acquiring a separate team for each call. The borrow ends when each call returns,
-so the next operation can borrow the same authority. The matrix and factor
+Owning that team is the primary route: build a `threadteam::Pool` once, reserve it
+with `pool.into_team(width)`, and take an execution token for each call with
+`team.exec(width)` inside `Exec::team(|t| ...)`. The operation consumes the token,
+and dropping that `exec` frees the right to take another one, so a sequence of
+calls lends one reservation instead of acquiring one per call. The matrix and factor
 owners remain ordinary Rust values; holding a matrix does not grant worker
 access.
+
+`faer::team::with_team(2, |mut par| ...)` is the one-off route: it builds a pool,
+reserves its members, and releases them after the closure returns. Use it for one call, or
+for a script that runs a single operation; the
+[Rust guide](../migration-guide.md#explicit-parallelism) gives its cost per call
+beside a team the caller holds. In either route a sequence of operations within
+the scope lends the authority with `par.reborrow()`, instead of copying it or
+acquiring a separate team for each call.
+
+Two pools do not share their members. Nesting does not add a team: a call made
+from inside an operation that holds one gets the token passed down to it, and a
+token that carries no members, or a team narrowed to one participant, is a serial
+token that runs inline on the calling thread.
+Do not acquire the same team recursively: `threadteam::Team::exec` panics on a
+thread that already holds a token of that team, and a token lives until its `Exec`
+is dropped.
 
 If work is split into nested children, each child must use its child token,
 not a captured parent token. This keeps the parent authority unavailable while
@@ -96,7 +113,16 @@ fn main() -> Result<(), LdltError> {
 		assert!((x[(i, 0)] - expected[(i, 0)]).abs() < 1.0e-12);
 	}
 
-	faer::team::with_team(2, |mut par| -> Result<(), LdltError> {
+	// The pool and the team are built once; each operation lends the team and returns it.
+	let pool = threadteam::Pool::builder()
+		.threads(2)
+		.acquire_timeout(std::time::Duration::from_secs(30))
+		.build()
+		.expect("a thread pool for the team");
+	let team = pool.into_team(2).ok().expect("a newly built pool is idle");
+	let mut exec = team.exec(2);
+	exec.team(|token| -> Result<(), LdltError> {
+		let mut par = Par::Team(token);
 		let ldlt = a.ldlt(Side::Lower, par.reborrow())?;
 		let x = ldlt.solve(&b, par.reborrow());
 		let mut storage = Mat::<f64>::zeros(3, 2);
@@ -112,7 +138,9 @@ fn main() -> Result<(), LdltError> {
 		}
 		assert_eq!(storage[(0, 1)], 0.0);
 		Ok(())
-	})?;
+	})
+	.ok()
+	.expect("the team is idle between calls")?;
 	Ok(())
 }
 ```

@@ -48,22 +48,8 @@ Upstream documentation, for the same crate with an API that differs in places: t
 
 There is no process wide parallelism setting. Every operation that can run in parallel takes a
 `Par`: `Par::Seq` runs it on the calling thread, and `Par::Team` runs its regions on the members of a
-`threadteam` team that the caller owns. A caller with a thread budget scopes its work once:
-
-```rust
-faer::team::with_team(8, |par| {
-    // every faer call in here with `par` runs its regions on 8 participants: the calling thread
-    // and 7 reserved workers
-    qr_in_place(a.as_mut(), h.as_mut(), par, stack, params);
-});
-```
-
-A caller that already owns a team lends a sub-team to each call with `par.reborrow()`; a width of one
-is `Par::Seq`.
-
-Each `with_team` call acquires a pool and team for its closure. Threadteam can reuse cached workers
-across calls rather than spawning and joining them each time. Code that runs parallel work repeatedly
-should own the `threadteam` `Pool` and `Team` itself and lend a `Par` from the team to each call:
+`threadteam` team that the caller owns. Owning the team is the primary route: a caller with a thread
+budget builds the pool and the team once and lends the team to each call.
 
 ```rust
 // once: 8 participants, the calling thread and 7 reserved workers
@@ -78,6 +64,25 @@ for (a, h) in work {
         .expect("a team token for an idle team");
 }
 ```
+
+A caller that already holds a token lends a sub-team to a phase with `par.reborrow()`; a width of one
+runs the phase on the calling thread.
+
+`faer::team::with_team` is the one-off route. It builds a pool, reserves its members, runs one closure,
+and releases them afterwards, so it suits a single call or a script that runs a single operation:
+
+```rust
+faer::team::with_team(8, |par| {
+    // every faer call in here with `par` runs its regions on 8 participants: the calling thread
+    // and 7 reserved workers
+    qr_in_place(a.as_mut(), h.as_mut(), par, stack, params);
+});
+```
+
+Each `with_team` call acquires a pool and team for its closure, and threadteam can reuse cached
+workers across calls rather than spawning and joining them each time. A program with a sequence of
+calls pays that acquisition per call, which is why it should own the `team` as above. The
+[migration guide](docs/migration-guide.md#explicit-parallelism) gives the measured cost of each route.
 
 See the *parallelism* section of the crate documentation for the full picture.
 

@@ -2,7 +2,7 @@ use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::evd::EvdError;
 use faer::linalg::lu::partial_pivoting::{factor, solve};
 use faer::linalg::matmul::matmul;
-use faer::{Accum, Mat, MatRef, Side, mat};
+use faer::{Accum, Mat, MatRef, Par, Side, mat};
 
 fn main() -> Result<(), EvdError> {
 	// Two logical rows, two columns, lda = 3. Padding is not matrix data.
@@ -10,7 +10,16 @@ fn main() -> Result<(), EvdError> {
 	let a = MatRef::from_column_major_slice_with_stride(&data, 2, 2, 3);
 	let b = mat![[4.0], [11.0]];
 
-	faer::team::with_team(2, |mut par| {
+	// The pool and the team are built once; each operation lends the team and returns it.
+	let pool = threadteam::Pool::builder()
+		.threads(2)
+		.acquire_timeout(std::time::Duration::from_secs(30))
+		.build()
+		.expect("a thread pool for the team");
+	let team = pool.into_team(2).ok().expect("a newly built pool is idle");
+	let mut exec = team.exec(2);
+	exec.team(|token| {
+		let mut par = Par::Team(token);
 		let mut lu = a.to_owned();
 		let mut x = b.clone();
 		let mut perm = [0_usize; 2];
@@ -64,4 +73,6 @@ fn main() -> Result<(), EvdError> {
 		}
 		Ok(())
 	})
+	.ok()
+	.expect("the team is idle between calls")
 }

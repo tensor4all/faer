@@ -19,11 +19,13 @@ In a consuming project's `Cargo.toml`, use:
 
 ```toml
 [dependencies]
-faer = { package = "t4a-faer", version = "0.27" }
+faer = { package = "t4a-faer", version = "0.28" }
 ```
 
 These examples use the default features, which include `std` and `threadteam`.
 Without `threadteam`, there is no `Par::Team` or `faer::team` module.
+The examples build a `threadteam::Pool` directly, so add `threadteam = "0.3"` alongside the faer
+dependency.
 
 Upstream faer exposed process wide parallelism controls backed by a global Rayon pool.
 This fork removes `set_global_parallelism`, `get_global_parallelism`, and `Par::Rayon`.
@@ -34,31 +36,37 @@ Import `faer::linalg::solvers::Solve` to call the solver trait methods.
 
 ## Parallel regions
 
-The application owns the thread budget. `faer::team::with_team(width, |par| ...)`
-scopes a team to a closure and hands that closure the authority to use it.
-The width includes the calling thread. A width of one supplies `Par::Seq`.
+The application owns the thread budget. Owning a team is the primary route: build a
+`threadteam::Pool` once, reserve its members once with `pool.into_team(width)`, and take a fresh
+execution token for each call with `team.exec(width)`. `Exec::team` runs the closure on that token,
+and the operation it is lent to consumes it and gives the team back. That is the route for a sequence
+of calls, and the one the [Rust migration guide](../migration-guide.md#explicit-parallelism)
+measures. The width includes the calling thread. A width of one executes sequentially.
 There is no implicit global pool selection inside a faer operation.
 Threadteam may reuse cached workers, which is different from choosing a global execution team.
+The [parallelism section](../../README.md#parallelism) shows the same construction.
+
+`faer::team::with_team(width, |par| ...)` is the one-off route: it builds a pool, reserves its
+members, runs one closure, and releases them. Use it for a single call, or for a script that runs a
+single operation. The Rust guide gives its cost per call beside a team the caller holds.
 
 `Par` is neither `Copy` nor `Clone`. A call consumes its token.
 For successive operations in one region, lend it with `par.reborrow()`.
 That borrow ends when the operation returns, so the next phase can reuse the same team.
-For a repeated workload, own a `threadteam::Pool` and `Team` once and borrow their execution
-permission for each call, rather than acquiring a new team around every small operation.
-The [parallelism section](../../README.md#parallelism) shows that construction.
+
+Two pools do not share their members. A second `with_team` call, or a second pool, acquires its own
+members instead of borrowing the budget already held.
 
 Nested work must use the permission it receives. Split a team into disjoint child teams
 before running concurrent children; each child passes its own `Par::Team` to faer.
 Do not capture the parent permission inside a child while that parent is borrowed or consumed.
-Calling `with_team` again constructs a separate team; it does not split the current budget.
+Nesting does not add a team: a call made from inside an operation that holds a team gets the token
+passed down to it, and a token that carries no members, or a team narrowed to one participant, is a
+serial token that runs inline on the calling thread. Do not acquire the same team recursively: `threadteam::Team::exec` panics when the calling
+thread already holds a token of that team.
 The type system protects a token's authority, not the total number of teams an application creates.
 
-`Par::Seq` executes on the calling thread without acquiring a team or dispatching to workers.
-It is the execution mode for a single thread baseline, not a request to enter a pool of width one.
-The examples check numerical results, not timing. Published measurements and their conditions
-live on the [benchmark site](https://tensor4all.org/faer-benchmark/).
-
-## Complete example: sequential, scoped, and nested solves
+## Complete example: sequential, an owned team, and nested solves
 
 The complete source is [`faer/examples/migration_overview.rs`](../../faer/examples/migration_overview.rs).
 Run it with `cargo run -p t4a-faer --example migration_overview -j8` from the repository root.
@@ -80,19 +88,31 @@ fn main() {
 	let b = mat![[6.0], [7.0]];
 	solve_checked(&a, &b, Par::Seq);
 
-	faer::team::with_team(4, |mut par| {
-		solve_checked(&a, &b, par.reborrow());
-		solve_checked(&a, &b, par.reborrow());
+	// The pool and the team are built once. Each call takes an execution token from the
+	// team, lends it, and gets it back when the operation returns.
+	let pool = threadteam::Pool::builder()
+		.threads(4)
+		.acquire_timeout(std::time::Duration::from_secs(30))
+		.build()
+		.expect("a thread pool for the team");
+	let team = pool.into_team(4).ok().expect("a newly built pool is idle");
 
-		// The two children each own two participants from the same four.
-		let Par::Team(team) = par else {
-			unreachable!("with_team(4) supplies a team");
-		};
-		team.split(&[2, 2], |_, child| {
-			solve_checked(&a, &b, Par::Team(child));
-		})
-		.expect("two children of size two fit the parent of size four");
-	});
+	for _ in 0..2 {
+		let mut exec = team.exec(4);
+		exec.team(|token| solve_checked(&a, &b, Par::Team(token)))
+			.ok()
+			.expect("the team is idle between calls");
+	}
+
+	// One call split into two children of two participants each.
+	let mut exec = team.exec(4);
+	exec.team(|token| {
+		token
+			.split(&[2, 2], |_, child| solve_checked(&a, &b, Par::Team(child)))
+			.expect("two children of size two fit the parent of size four");
+	})
+	.ok()
+	.expect("the team is idle between calls");
 }
 ```
 

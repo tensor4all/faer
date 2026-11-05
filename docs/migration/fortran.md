@@ -20,17 +20,30 @@ The Rust package is `t4a-faer`, imported as `faer`. These are mathematical mappi
 ## Parallel regions belong to the caller
 
 A BLAS thread count setting does not select faer's execution resources.
-Create a region with `faer::team::with_team(width, |mut par| ...)`, then lend its token
-with `par.reborrow()` to factorization, solve, and product calls in succession.
-The width includes the calling thread, and dropping the scoped team returns its reservation.
-For a repeated workload, hold the pool and team outside the loop instead of acquiring them per call.
+Owning the team is the primary route: build a `threadteam::Pool` once, reserve it with
+`pool.into_team(width)`, and take an execution token for each call with `team.exec(width)`
+inside `Exec::team(|token| ...)`. Wrap that token as `Par::Team(token)` and lend it with
+`par.reborrow()` to the factorization, solve, and product calls of the scope; the team comes
+back when that `exec` is dropped. The width includes the calling thread, and dropping the team returns
+its reservation. A program with a sequence of calls holds the pool and the team outside the
+loop, so the members are reserved once.
+
+`faer::team::with_team(width, |mut par| ...)` is the one-off route: it acquires a team and
+releases it after the closure returns. Use it for one call, or for a script that runs a single
+operation. The [Rust guide](../migration-guide.md#explicit-parallelism) gives the cost of
+each route per call.
 
 `Par::Team` is exclusive authority over that reservation, not an integer thread count.
 It cannot be copied or cloned. Concurrent nested work must split the reservation and use the
 child token it receives. It must not capture and reuse the parent token.
 The [parallel regions guide](README.md#parallel-regions) has a working split and a type checked
-example of the forbidden parent reuse. A second `with_team` call would acquire an independent
-team rather than borrowing the existing budget.
+example of the forbidden parent reuse. A second `with_team` call, or a second pool, would acquire
+independent members rather than borrowing the budget already held. Nesting does not add a
+team: a call made from inside an operation that holds one gets the token passed down to it, and a
+token that carries no members, or a team narrowed to one participant, is a serial token that runs
+inline on the calling thread. Do not acquire the same team recursively:
+`threadteam::Team::exec` panics on a thread that already holds a token of that team, and a token
+lives until its `Exec` is dropped.
 
 Use `Par::Seq` when the call must stay on the calling thread. It bypasses team acquisition
 and worker dispatch; it does not enter a global pool at width one.
@@ -74,7 +87,7 @@ use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::evd::EvdError;
 use faer::linalg::lu::partial_pivoting::{factor, solve};
 use faer::linalg::matmul::matmul;
-use faer::{Accum, Mat, MatRef, Side, mat};
+use faer::{Accum, Mat, MatRef, Par, Side, mat};
 
 fn main() -> Result<(), EvdError> {
 	// Two logical rows, two columns, lda = 3. Padding is not matrix data.
@@ -82,7 +95,16 @@ fn main() -> Result<(), EvdError> {
 	let a = MatRef::from_column_major_slice_with_stride(&data, 2, 2, 3);
 	let b = mat![[4.0], [11.0]];
 
-	faer::team::with_team(2, |mut par| {
+	// The pool and the team are built once; each operation lends the team and returns it.
+	let pool = threadteam::Pool::builder()
+		.threads(2)
+		.acquire_timeout(std::time::Duration::from_secs(30))
+		.build()
+		.expect("a thread pool for the team");
+	let team = pool.into_team(2).ok().expect("a newly built pool is idle");
+	let mut exec = team.exec(2);
+	exec.team(|token| {
+		let mut par = Par::Team(token);
 		let mut lu = a.to_owned();
 		let mut x = b.clone();
 		let mut perm = [0_usize; 2];
@@ -136,6 +158,8 @@ fn main() -> Result<(), EvdError> {
 		}
 		Ok(())
 	})
+	.ok()
+	.expect("the team is idle between calls")
 }
 ```
 

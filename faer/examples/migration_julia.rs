@@ -1,12 +1,21 @@
 use faer::linalg::matmul::dot::inner_prod;
 use faer::linalg::matmul::matmul;
 use faer::linalg::solvers::{DenseSolveCore, Solve, SvdError};
-use faer::{Accum, Conj, Mat, Side, c64, col, mat};
+use faer::{Accum, Conj, Mat, Par, Side, c64, col, mat};
 
 fn main() -> Result<(), SvdError> {
 	let a = mat![[4.0_f64, 1.0], [1.0, 3.0]];
 	let b = mat![[6.0_f64], [7.0]];
-	faer::team::with_team(2, |mut par| -> Result<(), SvdError> {
+	// The pool and the team are built once; every factorization below lends the team.
+	let pool = threadteam::Pool::builder()
+		.threads(2)
+		.acquire_timeout(std::time::Duration::from_secs(30))
+		.build()
+		.expect("a thread pool for the team");
+	let team = pool.into_team(2).ok().expect("a newly built pool is idle");
+	let mut exec = team.exec(2);
+	exec.team(|token| -> Result<(), SvdError> {
+		let mut par = Par::Team(token);
 		let lu = a.partial_piv_lu(par.reborrow());
 		let chol = a
 			.llt(Side::Lower, par.reborrow())
@@ -43,7 +52,9 @@ fn main() -> Result<(), SvdError> {
 			}
 		}
 		Ok(())
-	})?;
+	})
+	.ok()
+	.expect("the team is idle between calls")?;
 	let x = col![c64::new(1.0, 1.0), c64::new(2.0, 0.0)];
 	let y = col![c64::new(1.0, 0.0), c64::new(0.0, 1.0)];
 	let dot =
