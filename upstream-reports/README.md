@@ -6,6 +6,7 @@ This directory lists defects that we found while working on a port of `faer` and
 Each entry was reproduced by running its program against the upstream release named in the table.
 faer-028 was first reported upstream (sarah-quinones/faer#339, simplicial backend only). It is listed because the supernodal backend has the same defect.
 Defects that exist only in this fork are not listed here.
+Slow paths, whose symptom is a time rather than a wrong value, are listed separately in [`performance/`](performance/README.md).
 
 Each subdirectory is a standalone Cargo project.
 It depends only on the upstream crate from crates.io, pinned to the version in the table.

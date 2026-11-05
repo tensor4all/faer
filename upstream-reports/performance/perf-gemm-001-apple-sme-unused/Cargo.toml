@@ -1,0 +1,21 @@
+[package]
+name = "perf-gemm-001-apple-sme-unused"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Not part of the t4a-faer workspace: this measures the published crates on their own.
+[workspace]
+
+[dependencies]
+gemm = { version = "=0.19.0", default-features = false, features = ["std"] }
+# The comparator: the tensor4all fork of gemm, which adds the Apple SME kernels.
+gemm_sme = { package = "t4a-gemm", version = "=0.20.1", default-features = false, features = ["std", "apple-sme"] }
+libc = "0.2"
+
+[features]
+# Second run: upstream with its own opt-in Apple matrix-unit path.
+upstream-amx = ["gemm/experimental-apple-amx"]
+
+[profile.release]
+debug = false

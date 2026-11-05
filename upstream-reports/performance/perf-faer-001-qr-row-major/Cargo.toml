@@ -1,0 +1,15 @@
+[package]
+name = "perf-faer-001-qr-row-major"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Not part of the t4a-faer workspace: this measures the published crate on its own.
+[workspace]
+
+[dependencies]
+faer = { version = "=0.24.4", default-features = false, features = ["std", "linalg"] }
+libc = "0.2"
+
+[profile.release]
+debug = false
