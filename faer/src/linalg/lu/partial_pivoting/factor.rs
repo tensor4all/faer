@@ -16,6 +16,174 @@ pub(crate) fn swap_elems<T: ComplexField>(
 		core::ptr::swap(a, b);
 	}
 }
+/// The first row of the largest `abs1` among the lanes of `val` (each lane holds the first row at
+/// which it saw its maximum, so the smallest tied row is the first row of the column): the scalar
+/// search's choice, whatever the lane count. 0 when every value is zero (or NaN), as there.
+#[inline(always)]
+fn first_of_max<T: ComplexField, S: pulp::Simd>(
+	simd: &SimdCtx<'_, T, S>,
+	val: faer_traits::RealReg<T::SimdVec<S>>,
+	idx: T::SimdIndex<S>,
+) -> usize {
+	let best = simd.reduce_max_real(val);
+	let is_best = (**simd).ge(val, simd.splat_real(&best));
+	let tied = simd.iselect(is_best, idx, simd.isplat(T::Index::truncate(usize::MAX)));
+	let lanes = bytemuck::cast_slice::<T::SimdIndex<S>, T::Index>(core::slice::from_ref(&tied));
+	lanes.iter().map(|i| i.zx()).min().unwrap_or(0)
+}
+
+/// One column step of the leaf on contiguous columns, in one pass per column: `lhs` (rows below
+/// the pivot of the pivot column) is scaled by `inv` when given, then `rest[.., c] -= lhs *
+/// urow[c]` for every column of `rest`, and the first row of `rest[.., 0]` with the largest `abs1`
+/// is returned (the next pivot, found while that column is written). With `lhs` empty of columns
+/// to update, only the search runs when `search_lhs`: the first column of a leaf.
+fn leaf_step_simd<T: ComplexField>(
+	lhs: ColMut<'_, T, usize, ContiguousFwd>,
+	rest: MatMut<'_, T, usize, usize, ContiguousFwd>,
+	urow: RowRef<'_, T, usize>,
+	inv: Option<T>,
+	search_lhs: bool,
+) -> usize {
+	struct Impl<'a, 'M, 'N, T: ComplexField> {
+		lhs: ColMut<'a, T, Dim<'M>, ContiguousFwd>,
+		rest: MatMut<'a, T, Dim<'M>, Dim<'N>, ContiguousFwd>,
+		urow: RowRef<'a, T, Dim<'N>>,
+		inv: Option<T>,
+		search_lhs: bool,
+	}
+	impl<'a, 'M, 'N, T: ComplexField> pulp::WithSimd for Impl<'a, 'M, 'N, T> {
+		type Output = usize;
+
+		#[inline(always)]
+		fn with_simd<S: pulp::Simd>(self, simd: S) -> usize {
+			let Self { mut lhs, mut rest, urow, inv, search_lhs } = self;
+			let M = lhs.nrows();
+			let N = rest.ncols();
+			let simd = SimdCtx::<'_, T, S>::new(T::simd_ctx(simd), M);
+			let lanes = core::mem::size_of::<T::SimdVec<S>>() / core::mem::size_of::<T>();
+			let inc = simd.isplat(T::Index::truncate(lanes));
+			let iota = T::simd_iota(&simd.0);
+			let indices = simd.indices();
+			let mut best_val = faer_traits::RealReg(simd.zero());
+			let mut best_idx = simd.izero();
+			let track = |x: T::SimdVec<S>, idx: T::SimdIndex<S>, best_val: &mut faer_traits::RealReg<T::SimdVec<S>>, best_idx: &mut T::SimdIndex<S>| {
+				let v = simd.abs1(x);
+				let better = (*simd).gt(v, *best_val);
+				*best_val = faer_traits::RealReg(simd.select(better, v.0, best_val.0));
+				*best_idx = simd.iselect(better, idx, *best_idx);
+			};
+			if let Some(inv) = inv {
+				let inv = simd.splat(&inv);
+				simd_iter!(for i in [indices] {
+					let x = simd.read(lhs.rb(), i);
+					simd.write(lhs.rb_mut(), i, simd.mul(x, inv));
+				});
+			}
+			if search_lhs {
+				let mut idx = iota;
+				simd_iter!(for i in [indices] {
+					track(simd.read(lhs.rb(), i), idx, &mut best_val, &mut best_idx);
+					idx = simd.iadd(idx, inc);
+				});
+				let _ = idx;
+				return first_of_max(&simd, best_val, best_idx);
+			}
+			let lhs = lhs.rb();
+			for j in N.indices() {
+				let u = simd.splat(&-urow[j].copy());
+				let mut dst = rest.rb_mut().col_mut(j);
+				if *j == 0 {
+					let mut idx = iota;
+					simd_iter!(for i in [indices] {
+						let x = simd.mul_add(simd.read(lhs, i), u, simd.read(dst.rb(), i));
+						simd.write(dst.rb_mut(), i, x);
+						track(x, idx, &mut best_val, &mut best_idx);
+						idx = simd.iadd(idx, inc);
+					});
+					let _ = idx;
+				} else {
+					simd_iter!(for i in [indices] {
+						let x = simd.mul_add(simd.read(lhs, i), u, simd.read(dst.rb(), i));
+						simd.write(dst.rb_mut(), i, x);
+					});
+				}
+			}
+			if *N == 0 { 0 } else { first_of_max(&simd, best_val, best_idx) }
+		}
+	}
+	with_dim!(M, lhs.nrows());
+	with_dim!(N, rest.ncols());
+	dispatch!(
+		Impl {
+			lhs: lhs.as_row_shape_mut(M),
+			rest: rest.as_shape_mut(M, N),
+			urow: urow.as_col_shape(N),
+			inv,
+			search_lhs,
+		},
+		Impl,
+		T
+	)
+}
+
+/// The leaf on contiguous columns: the scalar leaf's steps (search, swap of the whole row, scaling,
+/// rank one update of the leaf's columns) with the scaling, the update and the next column's search
+/// in one SIMD pass per column, and no `matmul` call per column.
+fn lu_in_place_unblocked_simd<I: Index, T: ComplexField>(
+	matrix: MatMut<'_, T>,
+	start: usize,
+	end: usize,
+	trans: &mut [I],
+) -> usize {
+	let mut matrix = matrix;
+	let m = matrix.nrows();
+	let mut n_trans = 0;
+	let mut imax = {
+		let (col, _) = matrix.rb_mut().get_mut(.., start..end).split_at_col_mut(1);
+		let col = col.col_mut(0).try_as_col_major_mut().unwrap();
+		let empty = MatMut::from_column_major_slice_mut(&mut [], m, 0).try_as_col_major_mut().unwrap();
+		leaf_step_simd(col, empty, RowRef::from_slice(&[]), None, true)
+	};
+	for j in start..end {
+		let row = j - start;
+		trans[row] = I::truncate(imax - row);
+		if imax != row {
+			swap_rows_idx(matrix.rb_mut(), row, imax);
+			n_trans += 1;
+		}
+		let panel = matrix.rb_mut().get_mut(.., j..end);
+		let (top, bottom) = panel.split_at_row_mut(row + 1);
+		let top = top.rb();
+		let pivot = top[(row, 0)].copy();
+		let (mut lhs, rest) = bottom.split_at_col_mut(1);
+		let mut inv = None;
+		// An exactly zero pivot column is a singular factor, not a division: OpenBLAS's
+		// `getf2_k` leaves the (all zero) column alone instead of scaling it by infinity.
+		if pivot != zero() {
+			if pivot.abs() >= min_positive() {
+				inv = Some(pivot.recip());
+			} else {
+				// see the scalar leaf: a subnormal pivot divides elementwise, rescaled
+				let ref shift = max_positive::<T::Real>();
+				let ref pivot = pivot.mul_real(shift);
+				for i in 0..lhs.nrows() {
+					lhs[(i, 0)] = &lhs[(i, 0)].mul_real(shift) / pivot;
+				}
+			}
+		}
+		let urow = top.row(row).subcols(1, end - j - 1);
+		let next = leaf_step_simd(
+			lhs.col_mut(0).try_as_col_major_mut().unwrap(),
+			rest.try_as_col_major_mut().unwrap(),
+			urow,
+			inv,
+			false,
+		);
+		imax = row + 1 + next;
+	}
+	n_trans
+}
+
 fn lu_in_place_unblocked<I: Index, T: ComplexField>(
 	matrix: MatMut<'_, T>,
 	start: usize,
@@ -26,6 +194,9 @@ fn lu_in_place_unblocked<I: Index, T: ComplexField>(
 	let m = matrix.nrows();
 	if start == end {
 		return 0;
+	}
+	if const { T::SIMD_CAPABILITIES.is_simd() } && matrix.row_stride() == 1 {
+		return lu_in_place_unblocked_simd(matrix, start, end, trans);
 	}
 	let mut n_trans = 0;
 	for j in start..end {
