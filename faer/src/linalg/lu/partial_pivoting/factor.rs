@@ -66,12 +66,19 @@ fn leaf_step_simd<T: ComplexField>(
 			let indices = simd.indices();
 			let mut best_val = faer_traits::RealReg(simd.zero());
 			let mut best_idx = simd.izero();
-			let track = |x: T::SimdVec<S>, idx: T::SimdIndex<S>, best_val: &mut faer_traits::RealReg<T::SimdVec<S>>, best_idx: &mut T::SimdIndex<S>| {
+			let track = |x: T::SimdVec<S>,
+			             idx: T::SimdIndex<S>,
+			             best_val: &mut faer_traits::RealReg<T::SimdVec<S>>,
+			             best_idx: &mut T::SimdIndex<S>| {
 				let v = simd.abs1(x);
 				let better = (*simd).gt(v, *best_val);
 				*best_val = faer_traits::RealReg(simd.select(better, v.0, best_val.0));
 				*best_idx = simd.iselect(better, idx, *best_idx);
 			};
+			// `x - l * u` in one fused multiply-add: the rounding of the scalar leaf's rank one
+			// `matmul`, so the factor, and the pivots of near ties, do not depend on the layout
+			// (a strided panel takes the scalar leaf)
+			let update = |l: T::SimdVec<S>, u: T::SimdVec<S>, x: T::SimdVec<S>| simd.mul_add(l, u, x);
 			if let Some(inv) = inv {
 				let inv = simd.splat(&inv);
 				simd_iter!(for i in [indices] {
@@ -95,7 +102,7 @@ fn leaf_step_simd<T: ComplexField>(
 				if *j == 0 {
 					let mut idx = iota;
 					simd_iter!(for i in [indices] {
-						let x = simd.mul_add(simd.read(lhs, i), u, simd.read(dst.rb(), i));
+						let x = update(simd.read(lhs, i), u, simd.read(dst.rb(), i));
 						simd.write(dst.rb_mut(), i, x);
 						track(x, idx, &mut best_val, &mut best_idx);
 						idx = simd.iadd(idx, inc);
@@ -103,7 +110,7 @@ fn leaf_step_simd<T: ComplexField>(
 					let _ = idx;
 				} else {
 					simd_iter!(for i in [indices] {
-						let x = simd.mul_add(simd.read(lhs, i), u, simd.read(dst.rb(), i));
+						let x = update(simd.read(lhs, i), u, simd.read(dst.rb(), i));
 						simd.write(dst.rb_mut(), i, x);
 					});
 				}
@@ -141,7 +148,9 @@ fn lu_in_place_unblocked_simd<I: Index, T: ComplexField>(
 	let mut imax = {
 		let (col, _) = matrix.rb_mut().get_mut(.., start..end).split_at_col_mut(1);
 		let col = col.col_mut(0).try_as_col_major_mut().unwrap();
-		let empty = MatMut::from_column_major_slice_mut(&mut [], m, 0).try_as_col_major_mut().unwrap();
+		let empty = MatMut::from_column_major_slice_mut(&mut [], m, 0)
+			.try_as_col_major_mut()
+			.unwrap();
 		leaf_step_simd(col, empty, RowRef::from_slice(&[]), None, true)
 	};
 	for j in start..end {
@@ -190,14 +199,25 @@ fn lu_in_place_unblocked<I: Index, T: ComplexField>(
 	end: usize,
 	trans: &mut [I],
 ) -> usize {
-	let mut matrix = matrix;
-	let m = matrix.nrows();
 	if start == end {
 		return 0;
 	}
-	if const { T::SIMD_CAPABILITIES.is_simd() } && matrix.row_stride() == 1 {
-		return lu_in_place_unblocked_simd(matrix, start, end, trans);
+	// real types only: the lane indices of the complex search were not right (the scalar leaf
+	// stays the complex one)
+	if const { T::SIMD_CAPABILITIES.is_simd() && T::IS_REAL } && matrix.row_stride() == 1 {
+		lu_in_place_unblocked_simd(matrix, start, end, trans)
+	} else {
+		lu_in_place_unblocked_scalar(matrix, start, end, trans)
 	}
+}
+fn lu_in_place_unblocked_scalar<I: Index, T: ComplexField>(
+	matrix: MatMut<'_, T>,
+	start: usize,
+	end: usize,
+	trans: &mut [I],
+) -> usize {
+	let mut matrix = matrix;
+	let m = matrix.nrows();
 	let mut n_trans = 0;
 	for j in start..end {
 		let col = j;
@@ -272,8 +292,8 @@ use crate::utils::thread::with_width;
 
 pub use crate::utils::cost::ParThreshold;
 
-/// The width the trailing update (`b` row swaps over `cols` columns, `b x cols` solve, `rows x cols x b`
-/// product) of a level runs
+/// The width the trailing update (`b` row swaps over `cols` columns, `b x cols` solve,
+/// `rows x cols x b` product) of a level runs
 /// at (1: sequential). [`ParThreshold::Derived`] is the widest width of `par` that pays for the
 /// serial time; [`Fixed`](ParThreshold::Fixed) is an explicit floor in `f64` elements of the
 /// updated block, counted in flops (a complex element carries four times the arithmetic), and
@@ -332,8 +352,8 @@ fn swap_stage_width<T: ComplexField>(
 		),
 	}
 }
-/// Applies the transpositions `trans` (row `j` with row `j + trans[j]`, in order) to every column of
-/// `mat`.
+/// Applies the transpositions `trans` (row `j` with row `j + trans[j]`, in order) to every
+/// column of `mat`.
 fn apply_transpositions<I: Index, T: ComplexField>(mat: MatMut<'_, T>, trans: &[I]) {
 	let mut mat = mat;
 	for j in 0..mat.ncols() {
@@ -1089,6 +1109,46 @@ mod tests {
 
 	/// The `f64` default leaf is 8 columns (the other types keep 16), and it factors shapes whose
 	/// width leaves a leaf tail, sequentially and on a team: `P A = L U` to rounding.
+	fn simd_leaf_picks_the_scalar_pivots_for<T: ComplexField<Real = T> + Copy + PartialEq>(
+		from: impl Fn(f64) -> T,
+	) {
+		// the same panels through both leaves: the transpositions must be identical, ties
+		// included (a matrix of small integers ties a lot, and the scalar search takes the
+		// first row), and the factor bit for bit (the update is the same fused multiply-add as
+		// the scalar leaf's `matmul`); the panel sits between other columns, which the row
+		// swaps must reach too
+		let rng = &mut StdRng::seed_from_u64(0x5EAF);
+		let shapes = [(1usize, 1usize), (8, 8), (9, 8), (16, 8), (17, 8), (33, 5), (100, 8), (257, 16), (64, 3)];
+		for (m, w) in shapes {
+			for ties in [false, true] {
+				let ncols = w + 6;
+				let R = CwiseMatDistribution {
+					nrows: m,
+					ncols,
+					dist: StandardNormal,
+				}
+				.rand::<Mat<f64>>(rng);
+				let A = Mat::from_fn(m, ncols, |i, j| {
+					// small integers: exact ties first, near ties after a step
+					from(if ties { ((i * 7 + j * 3) % 5) as f64 + (R[(i, j)] * 2.0).round() } else { R[(i, j)] })
+				});
+				let (start, end) = (3, 3 + w);
+				let (mut simd, mut scalar) = (A.clone(), A.clone());
+				let (mut t_simd, mut t_scalar) = (vec![0usize; w], vec![0usize; w]);
+				let n_simd =
+					lu_in_place_unblocked_simd(simd.as_mut(), start, end, &mut t_simd);
+				let n_scalar =
+					lu_in_place_unblocked_scalar(scalar.as_mut(), start, end, &mut t_scalar);
+				assert!(all(t_simd == t_scalar, n_simd == n_scalar));
+				assert!(simd == scalar);
+			}
+		}
+	}
+	#[test]
+	fn simd_leaf_picks_the_scalar_pivots() {
+		simd_leaf_picks_the_scalar_pivots_for::<f64>(|x| x);
+		simd_leaf_picks_the_scalar_pivots_for::<f32>(|x| x as f32);
+	}
 	#[test]
 	fn f64_default_leaf_factors() {
 		let rt_f64 =
