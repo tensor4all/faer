@@ -1,6 +1,6 @@
 [package]
 name = "t4a-faer"
-version = "0.30.0"
+version = "0.31.0"
 edition = "2021"
 authors = ["sarah quiñones <sarah@veganb.tw>"]
 description.workspace = true
@@ -39,7 +39,7 @@ dyn-stack = { version = "0.13.2", default-features = false, features = ["core-er
 pulp = { version = "0.22.2", default-features = false, features = ["x86-v3"] }
 equator = { version = "0.6.0" }
 
-faer-traits = { package = "t4a-faer-traits", path = "../faer-traits", version = "0.24.2", default-features = false }
+faer-traits = { package = "t4a-faer-traits", path = "../faer-traits", version = "0.24.3", default-features = false }
 
 # tensor4all fork of gemm: same [lib] name (`gemm`), so every `use gemm::...` in
 # this crate is unchanged. The fork adds the Apple SME microkernels (f64/c64/f32/c32)

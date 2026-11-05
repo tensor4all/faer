@@ -2557,7 +2557,7 @@ dependencies = [
 
 [[package]]
 name = "t4a-faer"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "aligned-vec",
  "amd",
@@ -2608,7 +2608,7 @@ dependencies = [
 
 [[package]]
 name = "t4a-faer-traits"
-version = "0.24.2"
+version = "0.24.3"
 dependencies = [
  "bytemuck",
  "dyn-stack",

@@ -1,3 +1,30 @@
+# t4a-faer 0.31.0 (tensor4all fork; with t4a-faer-traits 0.24.3)
+
+Changes since `t4a-faer` 0.30.0 (tag `faer-v0.30.0`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`. No public API change.
+
+## Performance
+
+- The partial-pivoting LU's leaf takes 8 columns for f64 (#276). At 1024 with 8 threads LU goes from 4.56 ms to
+  3.37 ms against 3.40 ms for MKL, so the ratio moves from 1.34 to 0.99; at 4096 it is 0.55 to 0.66. At 512 the ratio
+  is still 1.28: that cell is bound by the leaf's serial section, not by the trailing update, and this change does not
+  move it.
+- The same leaf is vectorised: scaling, the update and the next pivot search share one pass per column, and the row
+  swaps are applied inside the trailing update per column chunk instead of as a separate pass (#276). The SIMD leaf
+  produces the same pivots and the same factor entries as the scalar leaf, bit for bit, on random real matrices; that
+  test is what makes the second implementation acceptable. **No performance figure is claimed for this part**: it
+  landed after the run that produced the numbers above.
+- The unit-lower triangular solve stages an aliased right-hand side, and stages only when a set receives 24 lines
+  (#276). Cholesky at 1024 with 8 threads is 0.60 against MKL.
+
+## Correctness
+
+- `faer_traits::math_utils::abs` returns the right modulus at both ends of the range (#274, #275). A nonzero subnormal
+  `c32` or `c64` used to come back as 0 because the component squares underflowed, and a component at `f32::MAX`
+  overflowed to `inf`; the two outer ranges are now scaled and the inner range is bit-unchanged, so ordinary inputs take
+  the same arithmetic as before.
+- Still open next to it, recorded in #275 and not fixed here: complex `sqrt` overflows where `re + |z|` is near the
+  maximum, and `recip` returns 0 where `|z|^2` overflows.
+
 # t4a-faer 0.30.0 (tensor4all fork; with t4a-faer-traits 0.24.2)
 
 Changes since `t4a-faer` 0.29.0 (tag `faer-v0.29.0`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`. No public API change.
