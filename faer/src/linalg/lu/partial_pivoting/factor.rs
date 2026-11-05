@@ -254,9 +254,10 @@ fn lu_in_place_unblocked<I: Index, T: ComplexField>(
 	}
 	n_trans
 }
-/// Sections of the trailing update of one recursion level: the triangular solve and the
-/// product, each a join; the second runs on caches the first filled or evicted, so the two
-/// are counted as the cold-region rule of the thresholds design (provisional).
+/// Sections of the trailing update of one recursion level: the left half's row swaps with the
+/// triangular solve (one section over column chunks of the right half), then the product; the
+/// second runs on caches the first filled or evicted, so the two are counted as the cold-region
+/// rule of the thresholds design (provisional).
 const TRAILING_UPDATE_SECTIONS: u32 = 2;
 /// Sections of the swap stage of one level when both the columns left of the panel and the
 /// columns right of it are swapped: a split of the two blocks over the parallelism, then a
@@ -271,7 +272,8 @@ use crate::utils::thread::with_width;
 
 pub use crate::utils::cost::ParThreshold;
 
-/// The width the trailing update (`b x cols` solve, `rows x cols x b` product) of a level runs
+/// The width the trailing update (`b` row swaps over `cols` columns, `b x cols` solve, `rows x cols x b`
+/// product) of a level runs
 /// at (1: sequential). [`ParThreshold::Derived`] is the widest width of `par` that pays for the
 /// serial time; [`Fixed`](ParThreshold::Fixed) is an explicit floor in `f64` elements of the
 /// updated block, counted in flops (a complex element carries four times the arithmetic), and
@@ -290,9 +292,11 @@ fn trailing_update_width<T: ComplexField>(
 			let macs = cols.saturating_mul(
 				b.saturating_mul(b) / 2 + rows.saturating_mul(b),
 			);
+			// the region also applies the left half's `b` row swaps to its `cols` columns
 			return par_width_time_upto(
 				par,
-				serial_time(macs, gemm_ns_per_mac::<T>()),
+				serial_time(macs, gemm_ns_per_mac::<T>())
+					+ serial_time(b.saturating_mul(cols), rate::lu_swap().of::<T>()),
 				TRAILING_UPDATE_SECTIONS,
 				max_region_width(par.degree()),
 			);
@@ -328,6 +332,17 @@ fn swap_stage_width<T: ComplexField>(
 		),
 	}
 }
+/// Applies the transpositions `trans` (row `j` with row `j + trans[j]`, in order) to every column of
+/// `mat`.
+fn apply_transpositions<I: Index, T: ComplexField>(mat: MatMut<'_, T>, trans: &[I]) {
+	let mut mat = mat;
+	for j in 0..mat.ncols() {
+		let mut col = mat.rb_mut().col_mut(j);
+		for (j, &t) in trans.iter().enumerate() {
+			swap_elems(col.rb_mut(), j, t.zx() + j);
+		}
+	}
+}
 pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 	A: MatMut<'_, T>,
 	start: usize,
@@ -349,8 +364,11 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 	let block_size = half.next_multiple_of(pow);
 	let mut n_trans = 0;
 	assert!(n <= m);
+	// The left half sees only its own columns: its transpositions reach the right half in the
+	// trailing update below, inside the same section as the solve, so each worker swaps the rows
+	// of the columns it then solves instead of the caller swapping them alone beforehand.
 	n_trans += lu_in_place_recursion(
-		A.rb_mut().get_mut(.., start..end),
+		A.rb_mut().get_mut(.., start..start + block_size),
 		0,
 		block_size,
 		&mut trans[..block_size],
@@ -359,10 +377,9 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 	);
 	{
 		let mut A = A.rb_mut().get_mut(.., start..end);
-		let (A00, mut A01, A10, mut A11) =
-			A.rb_mut().split_at_mut(block_size, block_size);
-		let A00 = A00.rb();
-		let A10 = A10.rb();
+		let (A_l, A_r) = A.rb_mut().split_at_col_mut(block_size);
+		let (A00, A10) = A_l.rb().split_at_row(block_size);
+		let left_trans = &trans[..block_size];
 		// The panel solve and the trailing product below are this level's whole
 		// parallel work, and the block size halves every level of the recursion, so
 		// past a few levels they are a fork and a join around a handful of thousands
@@ -372,16 +389,36 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 		// (one join for the solve, one for the product), the second of them on
 		// cold caches. Below it take `Par::Seq`; the recursion keeps the caller's
 		// `par`, so every level decides for its own trailing update.
-		let (rows1, cols1, b) = (A11.nrows(), A11.ncols(), A10.ncols());
+		let (rows1, cols1, b) = (A10.nrows(), A_r.ncols(), A10.ncols());
 		let width = trailing_update_width::<T>(&par, params.par_threshold, rows1, cols1, b);
 		with_width(par.reborrow(), width, |mut par_here| {
-			{
+			// the swap and the solve of one column chunk of the right half are the chunk's
+			// worker's alone: one section, sequential work on every member
+			let swap_and_solve = |mut chunk: MatMut<'_, T>| {
+				apply_transpositions(chunk.rb_mut(), left_trans);
 				linalg::triangular_solve::solve_unit_lower_triangular_in_place(
-					A00.rb(),
-					A01.rb_mut(),
-					par_here.reborrow(),
+					A00,
+					chunk.get_mut(..block_size, ..),
+					Par::Seq,
 				);
+			};
+			let mut A_r = A_r;
+			match par_here {
+				Par::Seq => swap_and_solve(A_r.rb_mut()),
+				#[cfg(feature = "rayon")]
+				_ => {
+					let k = par_here.degree();
+					crate::utils::thread::for_each(
+						par_here.reborrow(),
+						k,
+						A_r.rb_mut().par_col_partition_mut(k),
+						|chunk| swap_and_solve(chunk),
+					);
+				},
 			}
+			let (A01, A11) = A_r.split_at_row_mut(block_size);
+			let A01 = A01.rb();
+			let mut A11 = A11;
 			linalg::matmul::matmul(
 				A11.rb_mut(),
 				Accum::Add,
@@ -400,15 +437,7 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 			params.into(),
 		);
 	}
-	let swap = |mat: MatMut<'_, T>| {
-		let mut mat = mat;
-		for j in 0..mat.ncols() {
-			let mut col = mat.rb_mut().col_mut(j);
-			for (j, &t) in trans[..n].iter().enumerate() {
-				swap_elems(col.rb_mut(), j, t.zx() + j);
-			}
-		}
-	};
+	let swap = |mat: MatMut<'_, T>| apply_transpositions(mat, &trans[..n]);
 	let (A_left, A_right) = A.rb_mut().split_at_col_mut(start);
 	let A_right = A_right.get_mut(.., end - start..ncols - start);
 	let width = swap_stage_width::<T>(
