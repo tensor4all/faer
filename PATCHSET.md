@@ -45,6 +45,7 @@ gate has changed and two kinds of adoption are now in the ledger.
 
 | Candidate | State | Why it stays there |
 | --- | --- | --- |
+| argmin-time gate for the LU regions (evo2, not committed) | **DROPPED** | 4T/8T 0.99-1.03 and 11T/14T 0.89-1.12 against the widest-that-pays rule; the cross-domain dispatch cost, not the rule, is what is wrong above 8 threads (`docs/worklogs/2026-11-05-cross-ccd-team-stall.md`) |
 | `60de2ee` builtin-copy tile | **HOLD** | an unchanged control cell moved 17% when the ELFs said the code was identical; the ELF argument is demoted to a static observation (`faer-benchmark/docs/reviews/20261018-elf-comparison-demotion.md`), so the copy probe's own control question has to be answered before this can be timed again |
 | `7cd372f` structured floor | **DROPPED** | generated code for all four dense functions differed from the candidate it replaced; the static gate refused it before timing and there is no path to a declared cell |
 | `f013756` direct two-entry | **DROPPED** | same static gate |
