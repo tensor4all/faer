@@ -1,3 +1,9 @@
+# t4a-faer 0.30.0 (tensor4all fork; with t4a-faer-traits 0.24.2)
+
+Changes since `t4a-faer` 0.29.0 (tag `faer-v0.29.0`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`. No public API change.
+
+- `threadteam` 0.4.0: participants are placed by default, and the leader is placed before every section.
+
 # t4a-faer 0.28.2 (tensor4all fork; with t4a-faer-traits 0.24.2)
 
 Changes since `t4a-faer` 0.28.1 (tag `faer-v0.28.1`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`. No public API change.

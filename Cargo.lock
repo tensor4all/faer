@@ -2557,7 +2557,7 @@ dependencies = [
 
 [[package]]
 name = "t4a-faer"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "aligned-vec",
  "amd",
@@ -2831,9 +2831,9 @@ dependencies = [
 
 [[package]]
 name = "threadteam"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5dd6b40e18f897d036c79963512a194e6f8dbe76e29386ca4ccf6c9d1663f5c"
+checksum = "d7a5218209ff687a851e064af466d0a3daeca458dcba50c41ff935162201a9b7"
 dependencies = [
  "libc",
  "loom",
