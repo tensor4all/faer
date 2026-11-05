@@ -359,7 +359,14 @@ pub fn qr_in_place_scratch<I: Index, T: ComplexField>(
 	let _ = par;
 	let _ = block_size;
 	let _ = &params;
-	linalg::temp_mat_scratch::<T>(ncols, 2)
+	linalg::temp_mat_scratch::<T>(ncols, 2).or(
+		householder::upgrade_sequence_scratch::<T>(
+			nrows,
+			nrows.min(ncols),
+			block_size,
+			par,
+		),
+	)
 }
 /// information about the resulting $QR$ factorization.
 #[derive(Copy, Clone, Debug)]
@@ -442,7 +449,8 @@ pub fn qr_in_place<'out, I: Index, T: ComplexField>(
 			block_size,
 			1,
 			par.reborrow(),
-		);
+            stack,
+);
 		j += block_size;
 	}
 	ret

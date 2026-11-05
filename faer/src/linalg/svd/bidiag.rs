@@ -26,11 +26,27 @@ const BLOCK_FLOOR: usize = 128;
 pub fn bidiag_in_place_scratch<T: ComplexField>(
 	nrows: usize,
 	ncols: usize,
+	left_block_size: usize,
+	right_block_size: usize,
 	par: ParShape,
 	params: Spec<BidiagParams, T>,
 ) -> StackReq {
 	_ = par;
-	_ = params;
+	let params = params.config;
+	let upgrade_par = if matches!(params.par_threshold, ParThreshold::Never) {
+		ParShape::Seq
+	} else {
+		par
+	};
+	let k = nrows.min(ncols);
+	let upgrade =
+		upgrade_sequence_scratch::<T>(nrows, k, left_block_size, upgrade_par)
+			.or(upgrade_sequence_scratch::<T>(
+				ncols.saturating_sub(1),
+				k.saturating_sub(1),
+				right_block_size,
+				upgrade_par,
+			));
 	let tail = StackReq::all_of(&[
 		temp_mat_scratch::<T>(nrows, 1),
 		temp_mat_scratch::<T>(ncols, 1),
@@ -46,9 +62,9 @@ pub fn bidiag_in_place_scratch<T: ComplexField>(
 			temp_mat_scratch::<T>(BLOCK_SIZE, 2),
 			temp_mat_scratch::<T>(ncols, 1),
 		]);
-		StackReq::any_of(&[blocked, tail])
+		StackReq::any_of(&[blocked, tail,upgrade])
 	} else {
-		tail
+		tail.or(upgrade)
 	}
 }
 /// bidiagonalization tuning parameters.
@@ -146,7 +162,8 @@ pub fn bidiag_in_place<T: ComplexField>(
 			bl,
 			1,
 			par.reborrow(),
-		);
+            stack,
+);
 		j += bl;
 	}
 	if size > 0 {
@@ -166,7 +183,8 @@ pub fn bidiag_in_place<T: ComplexField>(
 				br,
 				1,
 				par.reborrow(),
-			);
+            stack,
+);
 			j += br;
 		}
 	}
@@ -820,8 +838,14 @@ mod tests {
 		let mut Hl = Mat::zeros(bl, size);
 		let mut Hr = Mat::zeros(br, size - 1);
 		let mut UV = A.clone();
-		let mut mem =
-			MemBuffer::new(bidiag_in_place_scratch::<T>(m, n, par.shape(), params.into()));
+		let mut mem = MemBuffer::new(bidiag_in_place_scratch::<T>(
+			m,
+			n,
+			bl,
+			br,
+			par.shape(),
+			params.into(),
+		));
 		bidiag_in_place(
 			UV.rb_mut(),
 			Hl.rb_mut(),
@@ -907,7 +931,11 @@ mod tests {
 	/// columns than the team has members.
 	#[test]
 	fn bidiag_on_a_team_reconstructs() {
-		fn check<T: crate::ComplexField<Real = f64>>(a: Mat<T>, bl: usize, br: usize) {
+		fn check<T: crate::ComplexField<Real = f64>>(
+			a: Mat<T>,
+			bl: usize,
+			br: usize,
+		) {
 			let (m, n) = a.shape();
 			let size = Ord::min(m, n);
 			let mut params: BidiagParams = crate::Auto::<T>::auto();
@@ -927,6 +955,7 @@ mod tests {
 					MemStack::new(&mut MemBuffer::new(bidiag_in_place_scratch::<T>(
 						m,
 						n,
+						bl,br,
 						ParShape::team(4),
 						params.into(),
 					))),

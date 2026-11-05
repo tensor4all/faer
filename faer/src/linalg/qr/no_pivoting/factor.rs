@@ -187,6 +187,7 @@ fn qr_in_place_blocked<T: ComplexField>(
 					A.rb().get(row.., row..row + local),
 					sub_block_size,
 					par.reborrow(),
+					stack,
 				);
 				if offset > 0 {
 					use crate::linalg::matmul::triangular::{
@@ -235,7 +236,10 @@ fn qr_in_place_blocked<T: ComplexField>(
 			let bs2 = Ord::min(full_block_size, Ord::min(size.saturating_sub(row2), n.saturating_sub(next_col)));
 			let far = n.saturating_sub(next_col + bs2);
 			let sub2 = Ord::min(bs2, sub_block_size);
-			let panel_req = || temp_mat_scratch::<T>(bs2, bs2);
+			let panel_shape = par.shape();
+			let panel_req = || {
+                qr_in_place_scratch::<T>(m - row2,bs2,bs2,panel_shape,params.into())
+            };
 			let ahead = if lookahead
 				&& offset == 0
 				&& local == block_size
@@ -315,7 +319,7 @@ fn factor_panel<T: ComplexField>(
 	let mut H = H;
 	let local = qr_in_place_blocked(A.rb_mut(), H.rb_mut().subrows_mut(0, sub_block_size), 0, 0, par.reborrow(), stack, params, false);
 	if local > 0 {
-		complete_factor(H.subcols_mut(0, local), A.rb().subcols(0, local), sub_block_size, par);
+		complete_factor(H.subcols_mut(0, local), A.rb().subcols(0, local), sub_block_size, par, stack);
 	}
 	local
 }
@@ -324,7 +328,13 @@ fn factor_panel<T: ComplexField>(
 /// sub-blocks of `sub_block_size` (`factor`: the block's factor rows from its first, and its
 /// `local` columns; `basis`: the reflectors from the block's diagonal down): moves each
 /// sub-block's factor to its diagonal position and merges them.
-fn complete_factor<T: ComplexField>(factor: MatMut<'_, T>, basis: MatRef<'_, T>, sub_block_size: usize, par: Par) {
+fn complete_factor<T: ComplexField>(
+	factor: MatMut<'_, T>,
+	basis: MatRef<'_, T>,
+	sub_block_size: usize,
+	par: Par,
+	stack: &mut MemStack,
+) {
 	let mut H = factor;
 	let local = basis.ncols();
 	let mut k = 0;
@@ -339,7 +349,14 @@ fn complete_factor<T: ComplexField>(factor: MatMut<'_, T>, basis: MatRef<'_, T>,
 		}
 		k += sub_block_size;
 	}
-	householder::upgrade_householder_factor(H.get_mut(0..local, 0..local), basis, local, sub_block_size, par);
+	householder::upgrade_householder_factor(
+		H.get_mut(0..local, 0..local),
+		basis,
+		local,
+		sub_block_size,
+		par,
+		stack,
+	);
 }
 
 /// Look-ahead steps taken, for the tests that check the path ran.
@@ -517,7 +534,13 @@ pub fn qr_in_place_scratch<T: ComplexField>(
 	let _ = par;
 	let _ = nrows;
 	let _ = &params;
-	temp_mat_scratch::<T>(block_size, ncols)
+	temp_mat_scratch::<T>(block_size, ncols).and(
+		householder::upgrade_prefix_scratch::<T>(
+			nrows,
+			block_size.min(ncols),
+			par,
+		),
+	)
 }
 #[cfg(test)]
 mod tests {

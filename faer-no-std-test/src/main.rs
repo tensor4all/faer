@@ -68,5 +68,23 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 	let m = faer::mat![[2.0, 1.0]];
 	libc_print::libc_println!("{m:?}");
 	libc_print::libc_println!("{:?}", m.transpose() * &m);
+	// Exercise the provided-stack upgrade in a real no_std executable.
+	let basis = faer::mat![[1.0_f64, 0.0], [0.2, 1.0], [0.3, 0.4]];
+	let mut factor = faer::Mat::<f64>::zeros(2, 2);
+	factor[(0, 0)] = 0.565;
+	factor[(1, 1)] = 0.58;
+	let req = faer::linalg::householder::upgrade_householder_factor_scratch::<
+		f64,
+	>(3, 2, 2, 1, faer::ParShape::Seq);
+	let mut memory = faer::dyn_stack::MemBuffer::new(req);
+	faer::linalg::householder::upgrade_householder_factor(
+		factor.as_mut(),
+		basis.as_ref(),
+		2,
+		1,
+		faer::Par::Seq,
+		faer::dyn_stack::MemStack::new(&mut memory),
+	);
+	assert!((factor[(0, 1)] - 0.32).abs() < 1e-12);
 	0
 }

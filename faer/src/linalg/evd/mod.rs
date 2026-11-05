@@ -116,6 +116,7 @@ pub fn self_adjoint_evd_scratch<T: ComplexField>(
 		temp_mat_scratch::<T>(bs, n),
 		StackReq::any_of(&[tridiag::tridiag_in_place_scratch::<T>(
 			n,
+			bs,
 			par,
 			params.tridiag.into(),
 		)]),

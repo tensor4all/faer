@@ -94,8 +94,14 @@ fn svd_imp_scratch<T: ComplexField>(
 	let bid = temp_mat_scratch::<T>(work_rows::<T>(m), n);
 	let householder_left = temp_mat_scratch::<T>(householder_block_size, n);
 	let householder_right = temp_mat_scratch::<T>(householder_block_size, n);
-	let compute_bidiag =
-		bidiag::bidiag_in_place_scratch::<T>(m, n, par, params.bidiag.into());
+	let compute_bidiag = bidiag::bidiag_in_place_scratch::<T>(
+		m,
+		n,
+		householder_block_size,
+		householder_block_size,
+		par,
+		params.bidiag.into(),
+	);
 	let diag = temp_mat_scratch::<T>(n, 1);
 	let subdiag = diag;
 	let compute_ub = compute_v != ComputeSvdVectors::No;

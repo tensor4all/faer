@@ -72,6 +72,28 @@ fn parallel_regions_allocate_nothing() {
 	use faer::linalg::lu::full_pivoting::factor as flu;
 	for width in [4usize, 8, 70] {
 		faer::team::with_team(width, |mut par: Par<'_>| {
+            // #93: the deep compact-WY reduction must use caller scratch, including
+            // its partial matrices. The token is held across warm-up and counting.
+            macro_rules! upgrade {
+                ($t:ty)=>{{
+                    use faer::traits::math_utils::{zero,one,from_f64,from_real};
+                    use faer::linalg::householder::{upgrade_householder_factor,upgrade_householder_factor_scratch};
+                    let(m,b)=(8192,32);
+                    let basis=Mat::<$t>::from_fn(m,b,|i,j|if i<j{zero()}else if i==j{one()}else{from_f64(0.01*((i+3*j)as f64).sin())});
+                    let tau:Vec<$t>=(0..b).map(|j|from_f64::<$t>(0.5)*from_real::<$t>(&(basis.col(j).norm_l2()*basis.col(j).norm_l2()))).collect();
+                    let mut factor=Mat::<$t>::zeros(b,b);
+                    let req=upgrade_householder_factor_scratch::<$t>(m,b,b,1,par.shape());
+                    let mut memory=MemBuffer::new(req);
+                    let(n,parallel)=counted(||{
+                        for j in 0..b{factor[(j,j)]=tau[j];}
+                        upgrade_householder_factor(factor.as_mut(),basis.as_ref(),b,1,par.reborrow(),MemStack::new(&mut memory));
+                    });
+                    assert_eq!(n,0,"Householder upgrade {} width={width}",stringify!($t));
+                    assert!(parallel>0,"Householder upgrade branch did not dispatch");
+                    for j in 0..b{assert_eq!(factor[(j,j)],tau[j]);}
+                }}
+            }
+            upgrade!(f32);upgrade!(f64);upgrade!(faer::c32);upgrade!(faer::c64);
 			// full pivoting LU: the per-step pivot search (`for_each` over column blocks)
 			let n = 96;
 			let a0 = sample(n, n, 1);

@@ -42,7 +42,7 @@ pub fn hessenberg_in_place_scratch<T: ComplexField>(
 		StackReq::any_of(&[StackReq::all_of(&[
 			temp_mat_scratch::<T>(n, 1).array(3),
 			temp_mat_scratch::<T>(n, par.degree()),
-		])])
+		])]).or(householder::upgrade_sequence_scratch::<T>(n.saturating_sub(1),n.saturating_sub(1),block_size,if matches!(params.par_threshold,ParThreshold::Never){ParShape::Seq}else{par}))
 	} else {
 		StackReq::all_of(&[
 			temp_mat_scratch::<T>(n, block_size),
@@ -419,7 +419,8 @@ fn hessenberg_rearranged_unblocked<T: ComplexField>(
 				b,
 				1,
 				par.reborrow(),
-			);
+            stack,
+);
 			j += b;
 		}
 	}

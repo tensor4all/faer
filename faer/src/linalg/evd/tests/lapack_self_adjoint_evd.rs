@@ -55,8 +55,12 @@ fn dense_self_adjoint_case(
 		recursion_threshold: threshold,
 		..auto!(Scalar)
 	});
-	let mut mem =
-		MemBuffer::new(tridiag::tridiag_in_place_scratch::<Scalar>(n, par.shape(), tp));
+	let mut mem = MemBuffer::new(tridiag::tridiag_in_place_scratch::<Scalar>(
+		n,
+		bs,
+		par.shape(),
+		tp,
+	));
 	let mut qm=MemBuffer::new(householder::apply_block_householder_sequence_on_the_left_in_place_scratch::<Scalar>(n.saturating_sub(1),bs,n));
 	let mut em = MemBuffer::new(
 		self_adjoint_evd_scratch::<Scalar>(

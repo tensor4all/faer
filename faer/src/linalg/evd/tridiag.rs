@@ -27,15 +27,16 @@ impl<T: ComplexField> Auto<T> for TridiagParams {
 /// matrix's tridiagonalization
 pub fn tridiag_in_place_scratch<T: ComplexField>(
 	dim: usize,
+	block_size: usize,
 	par: ParShape,
 	params: Spec<TridiagParams, T>,
 ) -> StackReq {
 	_ = par;
-	_ = params;
+	let params = params.config;
 	StackReq::all_of(&[
 		temp_mat_scratch::<T>(dim, 1).array(2),
 		temp_mat_scratch::<T>(dim, par.degree()),
-	])
+	]).or(householder::upgrade_sequence_scratch::<T>(dim.saturating_sub(1),dim.saturating_sub(1),block_size,if matches!(params.par_threshold,ParThreshold::Never){ParShape::Seq}else{par}))
 }
 fn tridiag_fused_op_simd<T: ComplexField>(
 	A: MatMut<'_, T, usize, usize, ContiguousFwd>,
@@ -296,6 +297,7 @@ pub fn tridiag_in_place<T: ComplexField>(
 	if n == 0 {
 		return;
 	}
+	{
 	alloca!('stack: {
 		let mut y = unsafe { col![uninit::<T>, n] };
 		let mut w = unsafe { col![uninit::<T>, n] };
@@ -520,6 +522,7 @@ pub fn tridiag_in_place<T: ComplexField>(
 			}
 		}
 	}
+	}
 	if n > 0 {
 		let n = n - 1;
 		let A = A.rb().submatrix(1, 0, n, n);
@@ -537,7 +540,8 @@ pub fn tridiag_in_place<T: ComplexField>(
 				b,
 				1,
 				par.reborrow(),
-			);
+            stack,
+);
 			j += b;
 		}
 	}
@@ -570,7 +574,7 @@ mod tests {
 				Par::Seq,
 				MemStack::new(&mut MemBuffer::new(StackReq::all_of(&[
 					householder::apply_block_householder_sequence_transpose_on_the_left_in_place_scratch::<f64>(n - 1, b, n),
-					tridiag_in_place_scratch::<f64>(n, ParShape::Seq, default()),
+					tridiag_in_place_scratch::<f64>(n,b,ParShape::Seq, default()),
 				]))),
 				default(),
 			);
@@ -635,7 +639,7 @@ mod tests {
 				MemStack::new(&mut MemBuffer::new(tridiag_in_place_scratch::<
 					c64,
 				>(
-					n, ParShape::Seq, default()
+					n,b,ParShape::Seq,default()
 				))),
 				default(),
 			);

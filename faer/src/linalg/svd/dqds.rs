@@ -466,7 +466,7 @@ mod tests {
             let mut bid = a.clone();
             let mut hl = Mat::<f64>::zeros(1, n);
             let mut hr = Mat::<f64>::zeros(1, n - 1);
-            let mut mem = MemBuffer::new(bidiag::bidiag_in_place_scratch::<f64>(n, n, Par::Seq.shape(), Default::default()));
+            let mut mem = MemBuffer::new(bidiag::bidiag_in_place_scratch::<f64>(n,n,1,1,Par::Seq.shape(), Default::default()));
             bidiag::bidiag_in_place(bid.as_mut(), hl.as_mut(), hr.as_mut(), Par::Seq, MemStack::new(&mut mem), Default::default());
             let mut d: Vec<f64> = (0..n).map(|i| bid[(i, i)]).collect();
             let mut e: Vec<f64> = (0..n - 1).map(|i| bid[(i, i + 1)]).collect();

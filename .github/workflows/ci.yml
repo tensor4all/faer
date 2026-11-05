@@ -23,6 +23,8 @@ jobs:
       # The library also builds without `rayon`; keep the sequential-only path tested, not
       # just compiled (the test modules inside the library need `threadteam`, #203).
       - run: cargo test -p t4a-faer --no-default-features --features "std,linalg" --test public_bidiag_sequential --test sparse_lu_no_rayon --test iteration_control
+      - run: cargo test -p t4a-faer --no-default-features --features "std,linalg" --test public_householder_upgrade_scratch
+      - run: cargo test -p t4a-faer --features threadteam --test public_householder_upgrade_scratch --test no_step_alloc
       - run: cargo test -p t4a-faer-traits
       - run: cargo test -p t4a-faer --no-default-features --features "std,linalg" --test lsmr_initial_residual --test generalized_schur_reorder --test generalized_schur_reorder_no_alloc --test public_qz_aed --test public_qz_scratch
       - run: python3 scripts/check-migration-examples.py

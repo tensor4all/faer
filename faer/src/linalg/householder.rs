@@ -132,12 +132,176 @@ pub(crate) fn make_householder_out_of_place<T: ComplexField>(
 /// bases up to this width have their `V^H V` formed as inner products on the calling thread
 /// (see `upgrade_householder_factor`)
 const NARROW_BASIS: usize = 8;
+fn upgrade_shape_width(shape: ParShape, width: usize) -> ParShape {
+	let _ = width;
+	match shape {
+		ParShape::Seq => ParShape::Seq,
+		#[cfg(feature = "threadteam")]
+		ParShape::Team(_, costs) => ParShape::Team(
+			core::num::NonZeroUsize::new(width.max(1)).unwrap(),
+			costs,
+		),
+	}
+}
+// The same cost rule as par_width_upto, using the pool costs retained by
+// ParShape.
+fn upgrade_width<T: ComplexField>(
+	m: usize,
+	n: usize,
+	shape: ParShape,
+) -> usize {
+	let rows = m.saturating_sub(n);
+	if rows < 2 * n || shape.degree() < 2 || rows / 4 < 2 {
+		return 1;
+	}
+	let estimate = crate::utils::cost::serial_time(
+		rows.saturating_mul(n).saturating_mul(n),
+		crate::utils::cost::rate::gemm_mac().of::<T>(),
+	);
+	if !crate::utils::cost::pays_at(estimate, 1, shape.min_dispatch_cost()) {
+		return 1;
+	}
+	(2..=shape.degree().min(rows / 4))
+		.rev()
+		.find(|&w| {
+			shape.pays(estimate, 1, core::num::NonZeroUsize::new(w).unwrap())
+		})
+		.unwrap_or(1)
+}
+/// Workspace required by [`upgrade_householder_factor`] for the supplied basis,
+/// block widths and token shape (including the pool's dispatch costs).
+///
+/// Recursive children use the same split budgets as `join_raw` and own disjoint
+/// regions. Sequential/narrow upgrades and already complete factors need no
+/// memory.
+///
+/// # Panics
+/// Panics if the basis has fewer rows than columns, either block width is zero
+/// for a nonempty factor, or the workspace size overflows.
+///
+/// # Examples
+/// ```
+/// use faer::{Mat, Par, ParShape};
+/// use faer::dyn_stack::{MemBuffer,MemStack};
+/// use faer::linalg::householder::{upgrade_householder_factor,upgrade_householder_factor_scratch};
+/// let basis=Mat::<f64>::from_fn(4,2,|i,j|if i==j{1.0}else{0.0});
+/// let mut factor=Mat::<f64>::zeros(2,2);
+/// factor[(0,0)]=0.5; factor[(1,1)]=0.5;
+/// let req=upgrade_householder_factor_scratch::<f64>(4,2,2,1,ParShape::Seq);
+/// let mut memory=MemBuffer::new(req);
+/// upgrade_householder_factor(factor.as_mut(),basis.as_ref(),2,1,Par::Seq,MemStack::new(&mut memory));
+/// assert_eq!(factor[(0,1)],0.0);
+/// ```
+pub fn upgrade_householder_factor_scratch<T: ComplexField>(
+	m: usize,
+	n: usize,
+	block_size: usize,
+	prev_block_size: usize,
+	par: ParShape,
+) -> StackReq {
+	assert!(m >= n);
+	if n == 0 {
+		return StackReq::EMPTY;
+	}
+	assert!(block_size > 0 && prev_block_size > 0);
+	if block_size == prev_block_size
+		|| n <= prev_block_size
+		|| prev_block_size >= 8
+	{
+		return StackReq::EMPTY;
+	}
+	let width = upgrade_width::<T>(m, n, par);
+	if width < 2 {
+		return StackReq::EMPTY;
+	}
+	let par = upgrade_shape_width(par, width);
+	let count = n.msrv_div_ceil(block_size);
+	if count > 1 {
+		// Split at a column boundary between complete blocks, retaining a truncated tail.
+		let mid = (count / 2) * block_size;
+		let half = width / 2;
+		upgrade_householder_factor_scratch::<T>(
+			m,
+			mid,
+			block_size,
+			prev_block_size,
+			upgrade_shape_width(par, width - half),
+		)
+		.and(upgrade_householder_factor_scratch::<T>(
+			m - mid,
+			n - mid,
+			block_size,
+			prev_block_size,
+			upgrade_shape_width(par, half),
+		))
+	} else if n <= NARROW_BASIS {
+		StackReq::EMPTY
+	} else {
+		StackReq::new::<T>(
+			width
+				.checked_mul(n)
+				.and_then(|v| v.checked_mul(n))
+				.expect("Householder upgrade scratch size overflow"),
+		)
+	}
+}
+// Final factor upgrades of a compact sequence reuse the same stack per block.
+pub(crate) fn upgrade_sequence_scratch<T: ComplexField>(
+	m: usize,
+	k: usize,
+	b: usize,
+	par: ParShape,
+) -> StackReq {
+	if k == 0 {
+		return StackReq::EMPTY;
+	}
+	assert!(b > 0);
+	let mut req = StackReq::EMPTY;
+	let mut j = 0;
+	while j < k {
+		let width = b.min(k - j);
+		req = req.or(upgrade_householder_factor_scratch::<T>(
+			m - j,
+			width,
+			width,
+			1,
+			par,
+		));
+		j += width;
+	}
+	req
+}
+// QR may complete a rank-dependent prefix of any width up to the panel width.
+// Earlier subpanels and their upgrades are sequential phases on the same stack.
+pub(crate) fn upgrade_prefix_scratch<T: ComplexField>(
+	m: usize,
+	width: usize,
+	par: ParShape,
+) -> StackReq {
+	let mut req = StackReq::EMPTY;
+	for n in NARROW_BASIS + 1..=width.min(m) {
+		req = req.or(upgrade_householder_factor_scratch::<T>(m, n, n, 1, par));
+	}
+	req
+}
+/// Upgrade initialized previous diagonal blocks of a compact-WY factor in
+/// place. The diagonal denominators are retained; the basis is read as
+/// unit-lower. `stack` must hold [`upgrade_householder_factor_scratch`] for the
+/// same arguments.
+///
+/// # Panics
+/// Panics on incompatible shapes, invalid block widths, or insufficient
+/// workspace.
+///
+/// # Examples
+/// See [`upgrade_householder_factor_scratch`] for an executable construction.
 pub fn upgrade_householder_factor<T: ComplexField>(
 	householder_factor: MatMut<'_, T>,
 	essentials: MatRef<'_, T>,
 	block_size: usize,
 	prev_block_size: usize,
 	par: Par,
+	stack: &mut MemStack,
 ) {
 	assert!(all(
 		householder_factor.nrows() == householder_factor.ncols(),
@@ -149,6 +313,13 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 		return;
 	}
 	let n = essentials.ncols();
+	assert!(stack.can_hold(upgrade_householder_factor_scratch::<T>(
+		essentials.nrows(),
+		n,
+		block_size,
+		prev_block_size,
+		par.shape()
+	)));
 	// Below, this function threads its `V^H V` products, and its own `deep` predicate states when
 	// the reduction has the shape to pay for that: deep against its `n x n` output, over a work
 	// floor, with at least one row per thread. Below that floor the same products still open a
@@ -182,7 +353,7 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 	crate::utils::cost::trace::shape("", 0, 0, 0);
 	if width >= 2 && width < par.degree() {
 		return crate::utils::thread::with_width(par, width, |par| {
-			upgrade_householder_factor(householder_factor, essentials, block_size, prev_block_size, par)
+			upgrade_householder_factor(householder_factor, essentials, block_size, prev_block_size, par, stack)
 		});
 	}
 	let mut par = if width >= 2 { par } else { Par::Seq };
@@ -195,10 +366,24 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 			block_size > prev_block_size,
 			block_size % prev_block_size == 0,
 		));
-		let mid = block_count / 2;
+		let mid = (block_count / 2) * block_size;
 		let (tau_tl, _, _, tau_br) = householder_factor.split_at_mut(mid, mid);
 		let (basis_left, basis_right) = essentials.split_at_col(mid);
 		let basis_right = basis_right.split_at_row(mid).1;
+		let shape = par.shape();
+		let degree = par.degree();
+		let left_shape = upgrade_shape_width(shape, degree - degree / 2);
+		let left_req = upgrade_householder_factor_scratch::<T>(
+			basis_left.nrows(),
+			basis_left.ncols(),
+			block_size,
+			prev_block_size,
+			left_shape,
+		);
+		let (left_mem, right_stack) = stack.make_aligned_uninit::<u8>(
+			left_req.size_bytes(),
+			left_req.align_bytes(),
+		);
 		join_raw(
 			|parallelism| {
 				upgrade_householder_factor(
@@ -207,6 +392,7 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 					block_size,
 					prev_block_size,
 					parallelism,
+					MemStack::new(left_mem),
 				)
 			},
 			|parallelism| {
@@ -216,6 +402,7 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 					block_size,
 					prev_block_size,
 					parallelism,
+					right_stack,
 				)
 			},
 			par,
@@ -286,7 +473,9 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 				// exactly `threads` balanced row ranges (at least four rows each), so the split runs
 				// at the width the gate chose
 				let n_chunks = threads;
-				let mut partials = alloc::vec![T::zero(); n_chunks * n * n];
+				// INVARIANT: initialized generic T values preserve the existing MatMut/drop
+                // contract; the storage is borrowed from the caller, never heap-owned here.
+                let (mut partials, _) = stack.make_with::<T>(n_chunks * n * n, |_| T::zero());
 				let source = basis_bot;
 				crate::utils::thread::with_width(par, threads, |par| crate::utils::thread::for_each(
 					par,
@@ -346,8 +535,9 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 		let (basis_left, basis_right) = essentials.split_at_col(mid);
 		let basis_right = basis_right.split_at_row(mid).1;
 		join_raw(
-			|parallelism| {
-				join_raw(
+            |parallelism| {
+                let (left_mem,right_stack)=stack.make_aligned_uninit::<u8>(0,1);
+                join_raw(
 					|parallelism| {
 						upgrade_householder_factor(
 							tau_tl,
@@ -355,6 +545,7 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 							block_size,
 							prev_block_size,
 							parallelism,
+							MemStack::new(left_mem),
 						)
 					},
 					|parallelism| {
@@ -364,6 +555,7 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 							block_size,
 							prev_block_size,
 							parallelism,
+							right_stack,
 						)
 					},
 					parallelism,
@@ -1082,6 +1274,7 @@ mod tests {
 		apply_block_householder_transpose_on_the_left_in_place_scratch,
 		apply_block_householder_transpose_on_the_left_in_place_with_conj,
 		make_householder_in_place, upgrade_householder_factor,
+		upgrade_householder_factor_scratch,
 	};
 	use crate::dyn_stack::{MemBuffer, MemStack};
 	use crate::{Conj, Mat, Par};
@@ -1218,7 +1411,24 @@ mod tests {
 			}
 		}
 		let mut factor = tile.clone();
-		upgrade_householder_factor(factor.as_mut(), a.as_ref(), b, 1, Par::Seq);
+		{
+			let req = upgrade_householder_factor_scratch::<f64>(
+				a.nrows(),
+				a.ncols(),
+				b,
+				1,
+				Par::Seq.shape(),
+			);
+			let mut mem = MemBuffer::new(req);
+			upgrade_householder_factor(
+				factor.as_mut(),
+				a.as_ref(),
+				b,
+				1,
+				Par::Seq,
+				MemStack::new(&mut mem),
+			)
+		};
 		let target: Mat<f64> = Mat::from_fn(m, k, |i, j| {
 			(((i * 5 + j * 11) % 9) as f64) * 0.125 - 0.5
 		});
@@ -1269,23 +1479,33 @@ mod tests {
 		};
 		let mut sequential = Mat::<f64>::zeros(n, n);
 		taus(&mut sequential);
-		upgrade_householder_factor(
+		{
+			let req = upgrade_householder_factor_scratch::<f64>(
+				basis.nrows(),
+				basis.ncols(),
+				n,
+				1,
+				Par::Seq.shape(),
+			);
+			let mut mem = MemBuffer::new(req);
+			upgrade_householder_factor(
 			sequential.as_mut(),
 			basis.as_ref(),
 			n,
 			1,
 			Par::Seq,
-		);
+		 MemStack::new(&mut mem))
+		};
 		let mut threaded = Mat::<f64>::zeros(n, n);
 		taus(&mut threaded);
 		crate::team::with_team(4, |par| {
-			upgrade_householder_factor(
+			{ let req=upgrade_householder_factor_scratch::<f64>(basis.nrows(),basis.ncols(),n,1,par.shape()); let mut mem=MemBuffer::new(req); upgrade_householder_factor(
 				threaded.as_mut(),
 				basis.as_ref(),
 				n,
 				1,
 				par,
-			)
+			 MemStack::new(&mut mem)) }
 		});
 		for col in 0..n {
 			for row in 0..n {
@@ -1373,7 +1593,10 @@ mod gate_tests {
 	//! the decision itself is what `utils::cost` tests.
 	use super::*;
 	use crate::c64;
-	use crate::linalg::matmul::triangular::{BlockStructure, matmul as tmatmul};
+	use crate::linalg::matmul::triangular::{
+		BlockStructure, matmul as tmatmul,
+	};
+	use dyn_stack::MemBuffer;
 
 	fn fill<T: ComplexField<Real = f64>>(m: usize, n: usize, seed: usize) -> Mat<T> {
 		Mat::from_fn(m, n, |i, j| {
@@ -1437,13 +1660,34 @@ mod gate_tests {
 		});
 	}
 
-	fn upgrade<T: ComplexField<Real = f64>>(m: usize, n: usize, par: Par) -> Mat<T> {
+	fn upgrade<T: ComplexField<Real = f64>>(
+		m: usize,
+		n: usize,
+		par: Par,
+	) -> Mat<T> {
 		let essentials = fill::<T>(m, n, 4);
 		let mut factor = Mat::<T>::zeros(n, n);
 		for i in 0..n {
 			factor[(i, i)] = from_f64::<T>(1.5);
 		}
-		upgrade_householder_factor(factor.as_mut(), essentials.as_ref(), n, 1, par);
+		{
+			let req = upgrade_householder_factor_scratch::<T>(
+				essentials.nrows(),
+				essentials.ncols(),
+				n,
+				1,
+				par.shape(),
+			);
+			let mut mem = MemBuffer::new(req);
+			upgrade_householder_factor(
+				factor.as_mut(),
+				essentials.as_ref(),
+				n,
+				1,
+				par,
+				MemStack::new(&mut mem),
+			)
+		};
 		factor
 	}
 

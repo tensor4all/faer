@@ -1307,7 +1307,9 @@ mod tests {
 			core::assert!(err <= 1e-9, "{what}: error {err}");
 		}
 
-		fn check<T: crate::ComplexField<Real = f64>>(compare_complex_factors: bool) {
+		fn check<T: crate::ComplexField<Real = f64>>(
+			compare_complex_factors: bool,
+		) {
 			let a0 = fill::<T>(N, 1);
 			let sym = &a0 + a0.adjoint();
 			// results with a given par and `Fixed(1)`
@@ -1385,6 +1387,7 @@ mod tests {
 				let mut mem = MemBuffer::new(bidiag::bidiag_in_place_scratch::<T>(
 					N,
 					N,
+					8,8,
 					par.shape(),
 					params.into(),
 				));
@@ -1461,6 +1464,7 @@ mod tests {
 				params.par_threshold = ParThreshold::Fixed(1);
 				let mut mem = MemBuffer::new(tridiag::tridiag_in_place_scratch::<T>(
 					N,
+					8,
 					par.shape(),
 					params.into(),
 				));

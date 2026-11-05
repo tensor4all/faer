@@ -24,6 +24,7 @@ fn reconstruction_error(m: usize, n: usize, bl: usize) -> f64 {
 	let mut mem = MemBuffer::new(bidiag::bidiag_in_place_scratch::<f64>(
 		m,
 		n,
+		bl,bl,
 		Par::Seq.shape(),
 		Default::default(),
 	));

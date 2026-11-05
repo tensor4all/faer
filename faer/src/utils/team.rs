@@ -1071,7 +1071,7 @@ mod tests {
 				let mut a = &x + x.transpose();
 				let bs = 8;
 				let mut h = Mat::<f64>::zeros(bs, n - 1);
-				let req = linalg::evd::tridiag::tridiag_in_place_scratch::<f64>(n, par.shape(), Default::default());
+				let req = linalg::evd::tridiag::tridiag_in_place_scratch::<f64>(n, bs,par.shape(), Default::default());
 				linalg::evd::tridiag::tridiag_in_place(a.as_mut(), h.as_mut(), par, MemStack::new(&mut MemBuffer::new(req)), Default::default());
 				vec![a, h]
 			}),
@@ -1081,7 +1081,7 @@ mod tests {
 				let bs = 8;
 				let mut hl = Mat::<f64>::zeros(bs, n);
 				let mut hr = Mat::<f64>::zeros(bs, n - 1);
-				let req = linalg::svd::bidiag::bidiag_in_place_scratch::<f64>(m, n, par.shape(), Default::default());
+				let req = linalg::svd::bidiag::bidiag_in_place_scratch::<f64>(m, n,bs,bs,par.shape(), Default::default());
 				linalg::svd::bidiag::bidiag_in_place(a.as_mut(), hl.as_mut(), hr.as_mut(), par, MemStack::new(&mut MemBuffer::new(req)), Default::default());
 				vec![a, hl, hr]
 			}),
@@ -1136,7 +1136,9 @@ mod tests {
 				let (rows, b) = (4000, 16);
 				let essentials = rand_mat(rows, b, 26);
 				let mut factor = Mat::<f64>::from_fn(b, b, |i, j| if i == j { 1.25 } else { 0.0 });
-				linalg::householder::upgrade_householder_factor(factor.as_mut(), essentials.as_ref(), b, 1, par);
+				let req=linalg::householder::upgrade_householder_factor_scratch::<f64>(rows,b,b,1,par.shape());
+                let mut mem=MemBuffer::new(req);
+                linalg::householder::upgrade_householder_factor(factor.as_mut(), essentials.as_ref(), b, 1, par,MemStack::new(&mut mem));
 				vec![factor]
 			}),
 			("sparse product", |par| {
@@ -1218,7 +1220,7 @@ mod tests {
 				let mut hl = Mat::<f64>::zeros(8, n);
 				let mut hr = Mat::<f64>::zeros(8, n - 1);
 				let params = BidiagParams { par_threshold: ParThreshold::Never, ..<BidiagParams as crate::Auto<f64>>::auto() };
-				let req = bidiag_in_place_scratch::<f64>(m, n, par.shape(), params.into());
+				let req = bidiag_in_place_scratch::<f64>(m, n,8,8,par.shape(), params.into());
 				bidiag_in_place(a.as_mut(), hl.as_mut(), hr.as_mut(), par, MemStack::new(&mut MemBuffer::new(req)), params.into());
 			}
 			stats::enable(false);
