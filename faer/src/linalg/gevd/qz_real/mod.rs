@@ -3768,4 +3768,66 @@ mod tests {
 			}
 		}
 	}
+	// #253: at n = 96 the kernel clamps the deflation window to the
+	// even-rounded `(n - 3) / 3 = 32`, so its AED branch needs the two 32x32
+	// QC/ZC panel copies and the 96x32 Q/Z update. The query used the
+	// unrounded 31 and reserved none of them.
+	#[test]
+	fn qz_scratch_covers_the_even_rounded_aed_window() {
+		extern "C" fn window(_: usize, _: usize) -> usize {
+			32
+		}
+		let n = 96;
+		let mut params: GeneralizedSchurParams = auto!(f64);
+		params.recommended_deflation_window = window;
+		let req =
+			hessenberg_to_qz_blocked_scratch::<f64>(n, ParShape::Seq, params);
+		let aed_branch = StackReq::all_of(&[
+			linalg::temp_mat_scratch::<f64>(32, 32),
+			linalg::temp_mat_scratch::<f64>(32, 32),
+			aed_scratch::<f64>(n, 32, ParShape::Seq, params),
+		]);
+		assert!(req.size_bytes() >= aed_branch.size_bytes());
+
+		let a_orig = Mat::<f64>::from_fn(n, n, |i, j| {
+			if i <= j + 1 {
+				((17 * i + 13 * j + 7) % 101) as f64 / 101.0 - 0.5
+			} else {
+				0.0
+			}
+		});
+		let b_orig = Mat::<f64>::from_fn(n, n, |i, j| {
+			if i == j {
+				2.0
+			} else if i < j {
+				0.01 * ((7 * i + 11 * j + 3) % 97) as f64 / 97.0
+			} else {
+				0.0
+			}
+		});
+		let mut a = a_orig.clone();
+		let mut b = b_orig.clone();
+		let mut q = Mat::<f64>::identity(n, n);
+		let mut z = Mat::<f64>::identity(n, n);
+		let mut ar = Col::<f64>::zeros(n);
+		let mut ai = Col::<f64>::zeros(n);
+		let mut beta = Col::<f64>::zeros(n);
+		let mut mem = MemBuffer::new(req);
+		hessenberg_to_qz(
+			a.as_mut(),
+			b.as_mut(),
+			Some(q.as_mut()),
+			Some(z.as_mut()),
+			ar.as_mut(),
+			ai.as_mut(),
+			beta.as_mut(),
+			linalg::evd::ComputeEigenvectors::Yes,
+			Par::Seq,
+			params,
+			MemStack::new(&mut mem),
+		);
+		let zt = z.transpose();
+		assert!((&q * &a * zt - &a_orig).norm_max() < 1e-10);
+		assert!((&q * &b * zt - &b_orig).norm_max() < 1e-10);
+	}
 }
