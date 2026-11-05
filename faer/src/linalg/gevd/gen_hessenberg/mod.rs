@@ -22,23 +22,27 @@ pub fn generalized_hessenberg_scratch<T: ComplexField>(
 }
 pub(crate) fn make_givens<T: ComplexField>(f: T, g: T) -> (T::Real, T, T) {
 	if g == zero() {
-		(one(), zero(), f)
-	} else if f == zero() {
-		let c = zero::<T::Real>();
-		let d = g.abs();
-		let d_inv = d.recip();
-		let s = g.conj().mul_real(&d_inv);
-		let r = d.to_cplx();
-		(c, s, r)
+		return (one(), zero(), f);
+	}
+	if const { T::IS_REAL } {
+		let f = f.real();
+		let g = g.real();
+		// The existing ratio-based real rotation computes its coefficients
+		// without reciprocating a tiny norm or deriving them from rounded r.
+		let rotation =
+			linalg::jacobi::JacobiRotation::make_givens(f.copy(), g.copy());
+		let phase = if f < zero() { -one::<T::Real>() } else { one() };
+		let c = rotation.c * &phase;
+		let s = -rotation.s * &phase;
+		// The dominant coefficient is at least 1/sqrt(2): this division
+		// neither reciprocates a tiny cosine nor sums rounded subnormal products.
+		let r = if c >= s.abs() { &f / &c } else { &g / &s };
+		(c, s.to_cplx(), r.to_cplx())
 	} else {
-		let f1 = f.abs();
-		let g1 = g.abs();
-		let h1 = f1.hypot(g1);
-		let ref h1_inv = h1.recip();
-		let c = f1 * h1_inv;
-		let r = f.mul_real(c.recip());
-		let s = g.conj() * r.mul_real(h1_inv).mul_real(h1_inv);
-		(c, s, r)
+		let (rotation, r) = linalg::jacobi::JacobiRotation::rotg(f, g);
+		// Jacobi stores [[c,-conj(s)],[s,c]]; this module's rot uses
+		// [[c,s],[-conj(s),c]]. Convert the convention, not the arithmetic.
+		(rotation.c.real(), -rotation.s.conj(), r)
 	}
 }
 pub(crate) fn rot<T: ComplexField>(

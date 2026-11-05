@@ -48,6 +48,8 @@ jobs:
       - name: Build once and run all numerical families
         timeout-minutes: 60 # the hosted arm64 runners are slower than the x86_64 ones
         run: scripts/run-lapack-validation.sh --limit-scale 3
+      - name: Validate recursive QZ workspace bounds
+        run: cargo test -p t4a-faer --test qz_scratch recursive -- --ignored 2>&1 | tee target/lapack-validation/qz-recursive.log
       - name: Summarize known and new failures
         if: always()
         run: python3 scripts/summarize-lapack-failures.py --output target/lapack-validation | tee -a "$GITHUB_STEP_SUMMARY"
