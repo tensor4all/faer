@@ -5,6 +5,11 @@ upstream `faer`.
 
 ## Pending public API extension
 
+- EXPERIMENT: caller-provided kernel workspace for the canonical owning LLT
+  constructor, with an associated query; owning output storage remains separate
+  (faer #268; AtelierArith/Colmat.jl#22). The existing automatic-workspace matrix convenience
+  retains its behavior. [Design and pending acceptance](docs/worklogs/2026-11-05-llt-constructor-scratch.md).
+
 - EXPERIMENT: `SymbolicQr::raw()` exposes a read-only borrowed reference to the
   already public symbolic variant, enabling downstream algorithm inspection
   without private-layout assumptions (AtelierArith/Colmat.jl#2). This adds no

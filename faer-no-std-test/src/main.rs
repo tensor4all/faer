@@ -68,5 +68,17 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 	let m = faer::mat![[2.0, 1.0]];
 	libc_print::libc_println!("{m:?}");
 	libc_print::libc_println!("{:?}", m.transpose() * &m);
+	let a = faer::mat![[4.0_f64, 0.0], [0.0, 9.0]];
+	let req =
+		faer::linalg::solvers::Llt::<f64>::new_scratch(2, faer::ParShape::Seq);
+	let mut memory = faer::dyn_stack::MemBuffer::new(req);
+	let f = faer::linalg::solvers::Llt::new(
+		a.as_ref(),
+		faer::Side::Lower,
+		faer::Par::Seq,
+		faer::dyn_stack::MemStack::new(&mut memory),
+	)
+	.unwrap();
+	assert!(f.L()[(1, 1)] == 3.0);
 	0
 }

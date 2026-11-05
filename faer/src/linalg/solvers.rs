@@ -453,7 +453,13 @@ impl<
 		side: Side,
 		par: Par<'_>,
 	) -> Result<Llt<C::Canonical>, LltError> {
-		Llt::new(self.rb(), side, par)
+		let a = self.rb();
+		assert!(a.nrows() == a.ncols());
+		let mut memory = MemBuffer::new(Llt::<C::Canonical>::new_scratch(
+			a.nrows(),
+			par.shape(),
+		));
+		Llt::new(a, side, par, MemStack::new(&mut memory))
 	}
 
 	#[track_caller]
@@ -628,7 +634,7 @@ fn self_adjoint_gevd_reduce<C: Conjugate>(
 ) -> Result<(Llt<C::Canonical>, Mat<C::Canonical>), SelfAdjointGevdError> {
 	let n = a.nrows();
 	assert!(a.ncols() == n && b.nrows() == n && b.ncols() == n);
-	let l = Llt::new(b, Side::Lower, par.reborrow())
+	let l = b.llt(Side::Lower, par.reborrow())
 		.map_err(|_| SelfAdjointGevdError::NonPositiveDefinite)?;
 	let mut c = Mat::zeros(n, n);
 	c.copy_from_triangular_lower(a);
@@ -974,34 +980,70 @@ pub struct GeneralizedEigen<T> {
 	S_b: Diag<Complex<T>>,
 }
 impl<T: ComplexField> Llt<T> {
+	/// Workspace for [`Self::new`], excluding its owning factor output.
+	/// The requirement uses the same default Cholesky parameters as
+	/// construction.
+	///
+	/// # Panics
+	/// Panics if the workspace size overflows.
+	pub fn new_scratch(dim: usize, par: ParShape) -> StackReq {
+		linalg::cholesky::llt::factor::cholesky_in_place_scratch::<T>(
+			dim,
+			par,
+			default(),
+		)
+	}
+
 	/// returns the $L L^\top$ decomposition of $A$
+	///
+	/// The owning factor is allocated independently of the input. Kernel
+	/// temporary memory comes from `stack`, which must hold
+	/// [`Self::new_scratch`] for the same dimension and token shape. Use
+	/// [`MatRef::llt`] for automatic workspace. Only the selected triangle is
+	/// read (conjugated for `Side::Upper`).
+	///
+	/// # Errors
+	/// Returns [`LltError::NonPositivePivot`] when a nonpositive pivot is
+	/// encountered. The input is borrowed and remains unchanged on success or
+	/// failure.
+	///
+	/// # Examples
+	/// ```
+	/// use faer::{mat, Par, ParShape, Side};
+	/// use faer::dyn_stack::{MemBuffer, MemStack};
+	/// use faer::linalg::solvers::Llt;
+	/// let a = mat![[4.0_f64, 0.0], [0.0, 9.0]];
+	/// let mut mem = MemBuffer::new(Llt::<f64>::new_scratch(2, ParShape::Seq));
+	/// let f = Llt::new(a.as_ref(), Side::Lower, Par::Seq, MemStack::new(&mut mem)).unwrap();
+	/// assert_eq!(f.L()[(1, 1)], 3.0);
+	/// ```
+	///
+	/// # Panics
+	/// Panics if `A` is not square or the workspace is insufficient.
 	#[track_caller]
 	pub fn new<C: Conjugate<Canonical = T>>(
 		A: MatRef<'_, C>,
 		side: Side,
 		par: Par<'_>,
+		stack: &mut MemStack,
 	) -> Result<Self, LltError> {
 		assert!(all(A.nrows() == A.ncols()));
 		let n = A.nrows();
+		assert!(stack.can_hold(Self::new_scratch(n, par.shape())));
 		let mut L = Mat::zeros(n, n);
 		match side {
 			Side::Lower => L.copy_from_triangular_lower(A),
 			Side::Upper => L.copy_from_triangular_lower(A.adjoint()),
 		}
-		Self::new_imp(L, par)
+		Self::new_imp(L, par, stack)
 	}
 
 	#[track_caller]
-	fn new_imp(mut L: Mat<T>, par: Par<'_>) -> Result<Self, LltError> {
-		let n = L.nrows();
-		let mut mem = MemBuffer::new(
-			linalg::cholesky::llt::factor::cholesky_in_place_scratch::<T>(
-				n,
-				par.shape(),
-				default(),
-			),
-		);
-		let stack = MemStack::new(&mut mem);
+	fn new_imp(
+		mut L: Mat<T>,
+		par: Par<'_>,
+		stack: &mut MemStack,
+	) -> Result<Self, LltError> {
 		linalg::cholesky::llt::factor::cholesky_in_place(
 			L.as_mut(),
 			Default::default(),
