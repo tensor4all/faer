@@ -72,6 +72,9 @@ impl<I: Index> SymbolicQr<I> {
 }
 impl<I: Index> SymbolicLu<I> {
 	/// returns the symbolic $LU$ factorization of the input matrix
+	///
+	/// # Panics
+	/// Panics if the matrix is not square.
 	#[track_caller]
 	pub fn try_new(
 		mat: SymbolicSparseColMatRef<'_, I>,
@@ -82,6 +85,9 @@ impl<I: Index> SymbolicLu<I> {
 	///
 	/// # Errors
 	/// Returns an allocation or index overflow error when symbolic analysis fails.
+	///
+	/// # Panics
+	/// Panics if the matrix is not square.
 	///
 	/// # Examples
 	/// ```
@@ -604,6 +610,9 @@ impl<
 	}
 
 	/// returns the $LU$ decomposition of `self` with partial (row) pivoting
+	///
+	/// # Panics
+	/// Panics if `self` is not square.
 	#[track_caller]
 	pub fn sp_lu(&self, par: Par<'_>) -> Result<Lu<I, T>, LuError> {
 		let this = self.rb();
@@ -735,6 +744,9 @@ impl<
 	}
 
 	/// returns the $LU$ decomposition of `self` with partial (row) pivoting
+	///
+	/// # Panics
+	/// Panics if `self` is not square.
 	#[track_caller]
 	pub fn sp_lu(&self, par: Par<'_>) -> Result<Lu<I, T>, LuError> {
 		let this = self.rb().to_col_major()?;
