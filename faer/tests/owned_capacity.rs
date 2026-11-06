@@ -1,6 +1,7 @@
 use faer::diag::Diag;
 use faer::traits::ComplexField;
 use faer::{Col, Mat, Row, c32, c64};
+use std::sync::Mutex;
 
 fn native_capacity<T: ComplexField + Copy>(value: T, fill: T) {
 	let mut a = Mat::<T>::with_capacity(11, 13);
@@ -110,6 +111,63 @@ fn typed_shapes_preserve_capacities() {
 	assert_eq!(row.capacity(), capacity);
 	let diagonal = row.into_diagonal();
 	assert_eq!(diagonal.capacity(), capacity);
+}
+
+#[test]
+fn zero_sized_elements_reserve_without_panicking() {
+	// the row padding that keeps every column aligned divides by
+	// `size_of::<T>()`, which is zero here (tensor4all/faer#286)
+	let empty = Mat::<()>::with_capacity(0, 0);
+	assert_eq!(empty.shape(), (0, 0));
+
+	let mut a = Mat::<()>::with_capacity(1, 1);
+	assert_eq!(a.shape(), (0, 0));
+	assert!(a.row_capacity() >= 1 && a.col_capacity() >= 1);
+	a.resize_with(1, 1, |_, _| ());
+	assert_eq!(a.shape(), (1, 1));
+	a.try_reserve(9, 7).unwrap();
+	a.resize_with(9, 7, |_, _| ());
+	assert_eq!(a.shape(), (9, 7));
+
+	let mut b = Mat::<f64>::with_capacity(1, 1);
+	assert_eq!(b.shape(), (0, 0));
+	b.resize_with(1, 1, |_, _| 4.0);
+	assert_eq!(b[(0, 0)], 4.0);
+}
+
+#[test]
+fn cleanup_of_aligned_and_zero_sized_elements_uses_a_byte_stride() {
+	// `DropMat` advances its column pointer in bytes, so it needs
+	// `row_capacity * size_of::<T>()` here, not the element count
+	// (tensor4all/faer#286)
+	static DROPPED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+	#[repr(align(8))]
+	struct Aligned(u32);
+	impl Drop for Aligned {
+		fn drop(&mut self) {
+			DROPPED.lock().unwrap().push(self.0);
+		}
+	}
+	let mut a = Mat::from_fn(1, 3, |_, j| Aligned(j as u32));
+	a.truncate(1, 0);
+	let mut dropped = DROPPED.lock().unwrap().clone();
+	dropped.sort_unstable();
+	assert_eq!(dropped, [0, 1, 2]);
+
+	DROPPED.lock().unwrap().clear();
+	// a zero-sized element keeps every column at the same address
+	#[repr(align(64))]
+	struct AlignedZst;
+	impl Drop for AlignedZst {
+		fn drop(&mut self) {
+			DROPPED.lock().unwrap().push(7);
+		}
+	}
+	let mut b = Mat::from_fn(1, 3, |_, _| AlignedZst);
+	assert_eq!(b.shape(), (1, 3));
+	b.truncate(1, 0);
+	assert_eq!(DROPPED.lock().unwrap().as_slice(), [7, 7, 7]);
 }
 
 #[test]

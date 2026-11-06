@@ -71,7 +71,10 @@ impl<T> RawMatUnit<T> {
 		let size = core::mem::size_of::<T>();
 		let prev_align = core::mem::align_of::<T>();
 		let align = align_for(size, prev_align, core::mem::needs_drop::<T>());
-		if align > size {
+		// rows are padded so that the byte stride `row_capacity * size` is a
+		// multiple of `align`; a zero-sized element has a zero stride, so there
+		// is nothing to pad and `align / size` is undefined
+		if size > 0 && align > size {
 			row_capacity = row_capacity
 				.msrv_checked_next_multiple_of(align / size)
 				.ok_or(TryReserveError::CapacityOverflow)?;
@@ -353,7 +356,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 			ptr,
 			nrows: new_nrows.unbound() - old_nrows.unbound(),
 			ncols: 0,
-			byte_col_stride: stride,
+			byte_col_stride: stride * core::mem::size_of::<T>(),
 		};
 		for j in Cols::indices(old_ncols, new_ncols) {
 			let old = ptr;
@@ -539,7 +542,7 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 					.wrapping_add(stride * new_ncols.unbound()),
 				nrows: self.0.nrows.unbound(),
 				ncols: self.0.ncols.unbound() - new_ncols.unbound(),
-				byte_col_stride: stride,
+				byte_col_stride: stride * core::mem::size_of::<T>(),
 			});
 			self.0.ncols = new_ncols;
 		}
