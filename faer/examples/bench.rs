@@ -1684,7 +1684,12 @@ fn llt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	.into();
 	#[cfg(any(openblas, mkl, blis))]
 	let lwork = unsafe {
-		if T::IS_NATIVE_F32 {
+		if !Lib::LAPACK {
+			// the answer is not the faer arm's, and a parallel row would ask for it on a team
+			// leader pinned to one CPU (threadteam 0.5), where a vendor query builds a one-CPU
+			// vendor team. The seven queries below are the same.
+			0
+		} else if T::IS_NATIVE_F32 {
 			let mut lwork = core::mem::zeroed();
 			la::ssytrf_(
 				&(b'L' as _),
@@ -1912,7 +1917,9 @@ fn llt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	.into();
 	#[cfg(any(openblas, mkl, blis))]
 	let lwork = unsafe {
-		if T::IS_NATIVE_F32 {
+		if !Lib::LAPACK {
+			0
+		} else if T::IS_NATIVE_F32 {
 			let mut lwork = core::mem::zeroed();
 			la::ssytrf_(
 				&(b'L' as _),
@@ -2191,7 +2198,9 @@ fn llt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	let mut QR = Mat::zeros(m, n);
 	#[cfg(any(openblas, mkl, blis))]
 	let lwork = unsafe {
-		if T::IS_NATIVE_F32 {
+		if !Lib::LAPACK {
+			0
+		} else if T::IS_NATIVE_F32 {
 			let mut lwork = core::mem::zeroed();
 			la::sgeqrf_(
 				(&m) as *const _ as *const _,
@@ -2369,7 +2378,9 @@ fn llt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	let rwork = &mut *avec![zero::<T>(); 2 * n];
 	#[cfg(any(openblas, mkl, blis))]
 	let lwork = unsafe {
-		if T::IS_NATIVE_F32 {
+		if !Lib::LAPACK {
+			0
+		} else if T::IS_NATIVE_F32 {
 			let mut lwork = core::mem::zeroed();
 			la::sgeqp3_(
 				(&m) as *const _ as *const _,
@@ -2783,7 +2794,9 @@ fn llt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	let iwork = &mut *avec![0usize; Ord::min(m, n) * 8];
 	#[cfg(any(openblas, mkl, blis))]
 	let lwork = unsafe {
-		if T::IS_NATIVE_F32 {
+		if !Lib::LAPACK {
+			0
+		} else if T::IS_NATIVE_F32 {
 			let mut work = core::mem::zeroed();
 			la::sgesdd_(
 				&(b'A' as _),
@@ -3017,7 +3030,9 @@ fn llt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	#[cfg(any(openblas, mkl, blis))]
 	let (lwork, lrwork, liwork) = unsafe {
 		clone.copy_from(&A);
-		if T::IS_NATIVE_F32 {
+		if !Lib::LAPACK {
+			(0, 0, 0)
+		} else if T::IS_NATIVE_F32 {
 			let mut work = core::mem::zeroed();
 			let mut iwork = 0usize;
 			la::ssyevd_(
@@ -3240,7 +3255,9 @@ fn llt<T: Scalar, Lib: self::Lib, Thd: self::Thread>(
 	let rwork = &mut *avec![zero::<T>(); 2 * n];
 	#[cfg(any(openblas, mkl, blis))]
 	let lwork = unsafe {
-		if T::IS_NATIVE_F32 {
+		if !Lib::LAPACK {
+			0
+		} else if T::IS_NATIVE_F32 {
 			let mut work = core::mem::zeroed();
 			la::sgeev_(
 				&(b'V' as _),

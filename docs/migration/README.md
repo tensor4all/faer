@@ -24,8 +24,9 @@ faer = { package = "t4a-faer", version = "0.28" }
 
 These examples use the default features, which include `std` and `threadteam`.
 Without `threadteam`, there is no `Par::Team` or `faer::team` module.
-The examples build a `threadteam::Pool` directly, so add `threadteam = "0.3"` alongside the faer
-dependency.
+The examples build a `threadteam::Pool` directly, so add `threadteam` alongside the faer
+dependency, at the version faer itself resolves: `Par::Team` carries a `threadteam::TeamExec`, and
+two threadteam minors are two distinct types.
 
 Upstream faer exposed process wide parallelism controls backed by a global Rayon pool.
 This fork removes `set_global_parallelism`, `get_global_parallelism`, and `Par::Rayon`.

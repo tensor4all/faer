@@ -82,6 +82,15 @@ use threadteam::TeamExec;
 /// }
 /// ```
 ///
+/// While the team lives, the calling thread is placed: `into_team` pins it to the one CPU no member
+/// takes, for the whole scope (`threadteam` 0.5), wherever threadteam could place the team (pinning
+/// on, Linux, a mask at least as wide as the team, a team wider than one); elsewhere nothing is
+/// pinned. The mask comes back when the `Team` is dropped, or turned back into its pool on that same
+/// thread. A vendor BLAS/LAPACK or OpenMP call made directly by a placed leader therefore builds a
+/// one-thread team; `threadteam::TeamExec::external(|| vendor_call())` widens the mask to the whole
+/// set for that call, at two affinity syscalls per call, so wrap the vendor region rather than each
+/// vendor call. faer itself calls no vendor library.
+///
 /// Panics if the team cannot be built or acquired: the closure's members wake asynchronously, so
 /// the acquisition waits as long as the team tests do (30 s) instead of threadteam's 2 ms default,
 /// which a loaded machine can miss.

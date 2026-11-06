@@ -15,7 +15,7 @@ In `Cargo.toml`, use the package name `t4a-faer` and the Rust crate name `faer`:
 faer = { package = "t4a-faer", version = "0.28" }
 ```
 
-The default features include dense and sparse linear algebra and `threadteam`. Rust 1.89 or newer is required. If you disable default features, enable the features needed by your application. Without `threadteam` only sequential execution is available. To manage a pool directly, also add a compatible `threadteam` 0.3 dependency. The fork and upstream are distinct Cargo packages, so their matrix and parallelism types are not interchangeable.
+The default features include dense and sparse linear algebra and `threadteam`. Rust 1.89 or newer is required. If you disable default features, enable the features needed by your application. Without `threadteam` only sequential execution is available. To manage a pool directly, also add a `threadteam` dependency at the version faer itself resolves. The fork and upstream are distinct Cargo packages, so their matrix and parallelism types are not interchangeable.
 
 ## Common operations
 
@@ -97,7 +97,7 @@ This fork has no `Par::rayon`, `Par::Rayon`, or global faer parallelism setter. 
 
 ## Explicit parallelism
 
-Owning a team is the primary route, and the one we measure and publish. Build the pool once, reserve the team once, and take an execution token for each call with `team.exec(width)`; `Exec::team` lends that token to the operations of the call, and dropping the `exec` frees it for the next one. The requested width includes the calling thread. A width of one, or zero, selects sequential execution. The default `threadteam` feature is required; add `threadteam = "0.3"` alongside the faer dependency to name the pool and team types:
+Owning a team is the primary route, and the one we measure and publish. Build the pool once, reserve the team once, and take an execution token for each call with `team.exec(width)`; `Exec::team` lends that token to the operations of the call, and dropping the `exec` frees it for the next one. The requested width includes the calling thread. A width of one, or zero, selects sequential execution. The default `threadteam` feature is required; add `threadteam` alongside the faer dependency, at the version faer itself resolves, to name the pool and team types. `Par::Team` carries a `threadteam::TeamExec`, and two threadteam minors are two distinct types, so the versions have to agree.
 
 ```rust
 use faer::linalg::matmul::matmul;
