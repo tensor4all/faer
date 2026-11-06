@@ -12,6 +12,14 @@ fn idx_to_pair<T, R>(f: impl FnMut(T) -> R) -> impl FnMut(T, usize) -> R {
 	move |i, _| f(i)
 }
 impl<T, Rows: Shape> Col<T, Rows> {
+	/// returns the allocated storage capacity, in scalar elements.
+	///
+	/// this may exceed the logical dimension because of alignment padding.
+	#[inline]
+	pub fn capacity(&self) -> usize {
+		self.0.column.row_capacity()
+	}
+
 	/// returns a new column with dimension `nrows`, filled with the provided
 	/// function
 	pub fn from_fn(nrows: Rows, f: impl FnMut(Idx<Rows>) -> T) -> Self {
@@ -573,7 +581,8 @@ impl<T, Rows: Shape> Col<T, Rows> {
 	/// see [`ColMut::iter_mut`]
 	pub fn iter_mut(
 		&mut self,
-	) -> impl '_ + ExactSizeIterator + DoubleEndedIterator<Item = &'_ mut T> {
+	) -> impl '_ + ExactSizeIterator + DoubleEndedIterator<Item = &'_ mut T>
+	{
 		self.as_mut().iter_mut()
 	}
 

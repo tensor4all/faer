@@ -11,6 +11,14 @@ impl<T: core::fmt::Debug, Dim: Shape> core::fmt::Debug for Own<T, Dim> {
 	}
 }
 impl<T, Dim: Shape> Diag<T, Dim> {
+	/// returns the allocated storage capacity, in scalar elements.
+	///
+	/// this may exceed the logical dimension because of alignment padding.
+	#[inline]
+	pub fn capacity(&self) -> usize {
+		self.0.inner.capacity()
+	}
+
 	/// returns the stride of the diagonal, specified in number of elements, not
 	/// in bytes
 	#[inline(always)]

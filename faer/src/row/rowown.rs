@@ -6,6 +6,14 @@ pub struct Own<T, Cols: Shape = usize> {
 	pub(crate) trans: Col<T, Cols>,
 }
 impl<T, Cols: Shape> Row<T, Cols> {
+	/// returns the allocated storage capacity, in scalar elements.
+	///
+	/// this may exceed the logical dimension because of alignment padding.
+	#[inline]
+	pub fn capacity(&self) -> usize {
+		self.0.trans.capacity()
+	}
+
 	/// returns a new row with dimension `ncols`, filled with the provided
 	/// function
 	#[inline]
@@ -486,7 +494,8 @@ impl<T, Cols: Shape> Row<T, Cols> {
 	/// see [`RowMut::iter_mut`]
 	pub fn iter_mut(
 		&mut self,
-	) -> impl '_ + ExactSizeIterator + DoubleEndedIterator<Item = &'_ mut T> {
+	) -> impl '_ + ExactSizeIterator + DoubleEndedIterator<Item = &'_ mut T>
+	{
 		self.rb_mut().iter_mut()
 	}
 

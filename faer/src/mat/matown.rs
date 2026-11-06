@@ -588,8 +588,8 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 	/// # safety
 	/// the behavior is undefined if any of the following conditions are
 	/// violated:
-	/// - `nrows < self.row_capacity()`
-	/// - `ncols < self.col_capacity()`
+	/// - `nrows <= self.row_capacity()`
+	/// - `ncols <= self.col_capacity()`
 	/// - the elements that were previously out of bounds but are now in bounds
 	///   must be
 	/// initialized
@@ -612,6 +612,23 @@ impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
 	}
 }
 impl<T, Rows: Shape, Cols: Shape> Mat<T, Rows, Cols> {
+	/// returns the allocated row capacity, in scalar elements per column.
+	///
+	/// this may exceed the requested minimum because of alignment padding.
+	/// dimensions within both capacities can be reached without reallocating.
+	#[inline]
+	pub fn row_capacity(&self) -> usize {
+		self.0.raw.row_capacity
+	}
+
+	/// returns the allocated column capacity.
+	///
+	/// dimensions within both capacities can be reached without reallocating.
+	#[inline]
+	pub fn col_capacity(&self) -> usize {
+		self.0.raw.col_capacity
+	}
+
 	/// returns the number of rows of the matrix
 	#[inline]
 	pub fn nrows(&self) -> Rows {
