@@ -14,7 +14,12 @@ Changes since `t4a-faer` 0.30.0 (tag `faer-v0.30.0`). Numbers are tensor4all/fae
   test is what makes the second implementation acceptable. **No performance figure is claimed for this part**: it
   landed after the run that produced the numbers above.
 - The unit-lower triangular solve stages an aliased right-hand side, and stages only when a set receives 24 lines
-  (#276). Cholesky at 1024 with 8 threads is 0.60 against MKL.
+  (#276). **This entry claims no figure.** Earlier versions of it quoted a Cholesky ratio of 0.60 against MKL at
+  1024 with 8 threads, which cannot be attributed to this change: `Llt` solves its diagonal blocks through the
+  non-unit lower solve (`faer/src/linalg/cholesky/ldlt/factor.rs:421`), while the staging is applied only inside
+  `solve_unit_lower_triangular_in_place_imp` (`faer/src/linalg/triangular_solve.rs:673`). A column-major Cholesky
+  ratio of about 0.58 against MKL is reproducible without the staging, so the improvement seen there has another
+  cause or is a property of the baseline; the measurement that would settle it is tracked in #279.
 
 ## Correctness
 
