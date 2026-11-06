@@ -15,6 +15,21 @@ impl<T, Rows: Shape> Col<T, Rows> {
 	/// returns the allocated storage capacity, in scalar elements.
 	///
 	/// this may exceed the logical dimension because of alignment padding.
+	///
+	/// # Examples
+	///
+	/// ```
+	/// use faer::Col;
+	/// let mut vector = Col::<f64>::zeros(3);
+	/// vector.reserve(17);
+	/// let capacity = vector.capacity();
+	/// let pointer = vector.as_ptr();
+	/// assert!(capacity >= 17);
+	/// vector.resize_with(capacity, |_| 2.0);
+	/// assert_eq!(vector.as_ptr(), pointer);
+	/// assert_eq!(vector[0], 0.0);
+	/// assert_eq!(vector[capacity - 1], 2.0);
+	/// ```
 	#[inline]
 	pub fn capacity(&self) -> usize {
 		self.0.column.row_capacity()
@@ -581,8 +596,7 @@ impl<T, Rows: Shape> Col<T, Rows> {
 	/// see [`ColMut::iter_mut`]
 	pub fn iter_mut(
 		&mut self,
-	) -> impl '_ + ExactSizeIterator + DoubleEndedIterator<Item = &'_ mut T>
-	{
+	) -> impl '_ + ExactSizeIterator + DoubleEndedIterator<Item = &'_ mut T> {
 		self.as_mut().iter_mut()
 	}
 

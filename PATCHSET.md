@@ -5,6 +5,13 @@ upstream `faer`.
 
 ## Pending public API extension
 
+- EXPERIMENT: owned `Mat::row_capacity/col_capacity` and
+  `Col/Row/Diag::capacity` expose the current allocation metadata without private
+  layout assumptions ([#284](https://github.com/tensor4all/faer/issues/284)).
+  They change no allocation, numerical path or dispatch; public-contract and
+  executable-example validation belong to the proposing PR. No performance
+  claim or campaign adoption is made. [Design and verification scope](docs/worklogs/2026-11-06-owned-capacity-queries.md).
+
 - EXPERIMENT: `SymbolicQr::raw()` exposes a read-only borrowed reference to the
   already public symbolic variant, enabling downstream algorithm inspection
   without private-layout assumptions (AtelierArith/Colmat.jl#2). This adds no

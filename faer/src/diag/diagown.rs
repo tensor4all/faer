@@ -14,6 +14,18 @@ impl<T, Dim: Shape> Diag<T, Dim> {
 	/// returns the allocated storage capacity, in scalar elements.
 	///
 	/// this may exceed the logical dimension because of alignment padding.
+	///
+	/// # Examples
+	///
+	/// ```
+	/// use faer::Col;
+	/// let diagonal = Col::from_fn(3, |i| i as f64).into_diagonal();
+	/// let capacity = diagonal.capacity();
+	/// assert!(capacity >= 3);
+	/// let column = diagonal.into_column_vector();
+	/// assert_eq!(column.capacity(), capacity);
+	/// assert_eq!(column[2], 2.0);
+	/// ```
 	#[inline]
 	pub fn capacity(&self) -> usize {
 		self.0.inner.capacity()
