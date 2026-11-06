@@ -1,3 +1,21 @@
+# t4a-faer 0.31.1 (tensor4all fork; with t4a-faer-traits 0.24.3)
+
+Changes since `t4a-faer` 0.31.0 (tag `faer-v0.31.0`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`. No public API change.
+
+## Correctness
+
+- The owned dense storage no longer divides by zero for a zero-sized element type. `RawMatUnit::try_with_capacity` padded the row capacity to
+  a multiple of `align / size`, which is a division by `size_of::<T>()` and a panic for `T` with no size: `Mat::<()>::with_capacity(1, 1)` panicked.
+  A zero-sized element has a byte stride of 0 for every capacity, so the padding is skipped in that case (#286, #288).
+- Fixing that made reachable a second, older defect on the same invariant: `DropMat` advances its column pointer in **bytes**, but the unwind
+  guard in `init_with` and the column branch of `truncate` passed it an **element** count (`faer/src/mat/matown.rs:359`, `:545`), so an element
+  whose alignment exceeds its size was dropped at a misaligned address. That one is undefined behaviour on 0.31.0 independently of zero-sized
+  elements -- `#[repr(align(8))] struct S(u32)` reached it through `Mat::<S>::truncate` -- and both sites now pass
+  `row_capacity * size_of::<T>()`, as the other two `DropMat` sites already did. Upstream `faer` carries both defects as well (#288).
+
+No performance claim: one branch outside any inner loop and one multiply on the cleanup path. `cargo +nightly miri test -p t4a-faer --test
+owned_capacity` is clean, and the two new tests in `faer/tests/owned_capacity.rs` fail before the change and pass after it.
+
 # t4a-faer 0.31.0 (tensor4all fork; with t4a-faer-traits 0.24.3)
 
 Changes since `t4a-faer` 0.30.0 (tag `faer-v0.30.0`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`. No public API change.
