@@ -1,6 +1,14 @@
-# t4a-faer 0.31.1 (tensor4all fork; with t4a-faer-traits 0.24.3)
+# t4a-faer 0.32.0 (tensor4all fork; with t4a-faer-traits 0.24.3)
 
-Changes since `t4a-faer` 0.31.0 (tag `faer-v0.31.0`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`. No public API change.
+Changes since `t4a-faer` 0.31.0 (tag `faer-v0.31.0`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`.
+
+## Breaking: the `threadteam` pin moves to 0.5
+
+This release requires `threadteam` 0.5 (0.5.1 or newer), not 0.4. `Par::Team` carries a `threadteam::TeamExec`, and two `threadteam` minors are two
+distinct types, so a dependency tree that holds both 0.4 and 0.5 will not compile. If you name the pool or team types yourself, add `threadteam` at
+the version this crate resolves rather than pinning it separately. Nothing else in the public API changed, and code that only calls `par()` or
+passes a team it already obtained needs no edit. This is why the version is 0.32.0 and not a patch: `cargo` cannot see the break in a 0.x minor, so
+this paragraph is the only place it is announced (#287).
 
 ## Correctness
 
