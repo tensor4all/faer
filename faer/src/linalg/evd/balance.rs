@@ -132,8 +132,9 @@ pub fn balance_in_place<T: ComplexField>(
 /// Returns the zero-based, half-open active range `ilo..ihi`. Outside this range the
 /// permutation (when `job` includes it) isolates eigenvalues in triangular blocks.
 ///
-/// [`BalanceJob::None`] returns `0..n` and touches no output; [`BalanceJob::Scale`] scales
-/// without permuting and also returns `0..n`; [`BalanceJob::Permute`] and
+/// [`BalanceJob::None`] returns `0..n`, leaves the matrix alone and sets the metadata to
+/// the identity; [`BalanceJob::Scale`] scales without permuting (the metadata keeps the
+/// identity permutation) and also returns `0..n`; [`BalanceJob::Permute`] and
 /// [`BalanceJob::Both`] return the isolated range.
 ///
 /// On return `b[i,j] = a[perm[i],perm[j]] * scale[j] / scale[i]`:
