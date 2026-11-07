@@ -95,14 +95,34 @@ pub struct BicgInfo<T> {
 	pub non_exhaustive: NonExhaustive,
 }
 /// algorithm error
+///
+/// Both variants carry the residual of the last finite iterate, so a caller can restart
+/// from the returned `out`. A [`Breakdown`](BicgError::Breakdown) is a numerical
+/// breakdown (a vanishing direction, `rho`/`alpha`/`omega` in the scalar recurrences);
+/// [`NoConvergence`](BicgError::NoConvergence) means `max_iters` was reached.
 #[derive(Copy, Clone, Debug)]
+#[non_exhaustive]
 pub enum BicgError<T> {
-	/// convergence failure
+	/// convergence failure: `max_iters` was reached
 	NoConvergence {
 		/// absolute residual at the final step
 		abs_residual: T,
 		/// relative residual at the final step
 		rel_residual: T,
+	},
+	/// numerical breakdown: a direction or a step vanished
+	///
+	/// In the scalar recurrences this is `rho = 0`, `alpha = 0` or `omega = 0`; in this
+	/// block implementation it is the equivalent rank test on `r̃ᵀ v`, a half step that is
+	/// not finite, or a new residual that is not finite. The last finite iterate stays in
+	/// `out`, and one usually restarts from it rather than raising `max_iters`.
+	Breakdown {
+		/// absolute residual at the last finite iterate
+		abs_residual: T,
+		/// relative residual at the last finite iterate
+		rel_residual: T,
+		/// number of iterations executed, the breakdown included
+		iter_count: usize,
 	},
 }
 /// executes bicgstab using the provided preconditioners
@@ -118,8 +138,10 @@ pub enum BicgError<T> {
 /// half step included) remains in `out` and the error carries its residual.
 ///
 /// # Errors
-/// Returns the solver's existing numerical breakdown or nonconvergence error
-/// when iteration fails before a callback stop or convergence.
+/// Returns [`BicgError::Breakdown`] when the iteration breaks down -- the rank test on
+/// `r̃ᵀ v` reports no direction left, the half step is not finite, or the new residual is
+/// not finite -- and [`BicgError::NoConvergence`] when `max_iters` is reached first. Both
+/// carry the residual of the last finite iterate.
 #[track_caller]
 pub fn bicgstab<T: ComplexField, C: IterationControl>(
 	out: MatMut<'_, T>,
@@ -209,6 +231,9 @@ pub fn bicgstab<T: ComplexField, C: IterationControl>(
 		}
 		p.copy_from(&r);
 		r_tilde.copy_from(&r);
+		// the iteration a numerical breakdown stopped at, if one did: it is what tells
+		// the two error variants apart (`max_iters` exhaustion is the other one)
+		let mut breakdown = None;
 		for iter in 0..params.max_iters {
 			let (mut v, stack) =
 				unsafe { temp_mat_uninit::<T, _, _>(n, k, stack) };
@@ -270,6 +295,7 @@ pub fn bicgstab<T: ComplexField, C: IterationControl>(
 			if rank == 0 {
 				// breakdown: no direction left; `x` is the last iterate and `r`
 				// its residual
+				breakdown = Some(iter + 1);
 				break;
 			}
 			let s_norm;
@@ -321,6 +347,7 @@ pub fn bicgstab<T: ComplexField, C: IterationControl>(
 				s_norm = s.norm_l2();
 				if !s_norm.is_finite() {
 					// the step is not usable: keep `x` and `r` as they are
+					breakdown = Some(iter + 1);
 					break;
 				}
 				crate::linalg::matmul::matmul(
@@ -386,6 +413,7 @@ pub fn bicgstab<T: ComplexField, C: IterationControl>(
 			if !norm.is_finite() {
 				// `x` keeps the first half step, whose residual is `s`
 				abs_residual = s_norm;
+				breakdown = Some(iter + 1);
 				break;
 			}
 			z!(&mut x, &z).for_each(|uz!(x, z)| *x += w * z);
@@ -453,6 +481,13 @@ pub fn bicgstab<T: ComplexField, C: IterationControl>(
 				par.reborrow(),
 			);
 			z!(&mut p, &r, &tmp).for_each(|uz!(p, r, tmp)| *p = r - tmp);
+		}
+		if let Some(iter_count) = breakdown {
+			return Err(BicgError::Breakdown {
+				rel_residual: &abs_residual / b_norm,
+				abs_residual,
+				iter_count,
+			});
 		}
 		Err(BicgError::NoConvergence {
 			rel_residual: &abs_residual / b_norm,
@@ -576,10 +611,14 @@ mod tests {
 				ParShape::Seq,
 			))),
 		);
+		let err = result.unwrap_err();
 		let BicgError::NoConvergence {
 			abs_residual,
 			rel_residual,
-		} = result.unwrap_err();
+		} = err
+		else {
+			panic!("expected NoConvergence, got {err:?}");
+		};
 		let true_residual = (rhs - A * &*out).norm_l2();
 		assert!((abs_residual - true_residual).abs() < 1e-12);
 		assert!((rel_residual - true_residual / rhs.norm_l2()).abs() < 1e-12);
@@ -617,8 +656,16 @@ mod tests {
 					ParShape::Seq,
 				))),
 			);
-			let BicgError::NoConvergence { abs_residual, .. } =
-				result.unwrap_err();
+			let err = result.unwrap_err();
+			let BicgError::Breakdown {
+				abs_residual,
+				iter_count,
+				..
+			} = err
+			else {
+				panic!("expected Breakdown, got {err:?}");
+			};
+			assert!(iter_count >= 1);
 			assert!(out.norm_l2().is_finite());
 			let true_residual = (rhs - A * &*out).norm_l2();
 			assert!((abs_residual - true_residual).abs() < 1e-12);
@@ -652,7 +699,10 @@ mod tests {
 				ParShape::Seq,
 			))),
 		);
-		let BicgError::NoConvergence { abs_residual, .. } = result.unwrap_err();
+		let err = result.unwrap_err();
+		let BicgError::Breakdown { abs_residual, .. } = err else {
+			panic!("expected Breakdown, got {err:?}");
+		};
 		assert!(out.norm_l2() == 0.0);
 		assert!(abs_residual == 1.0);
 	}
@@ -686,7 +736,10 @@ mod tests {
 				ParShape::Seq,
 			))),
 		);
-		let BicgError::NoConvergence { abs_residual, .. } = result.unwrap_err();
+		let err = result.unwrap_err();
+		let BicgError::Breakdown { abs_residual, .. } = err else {
+			panic!("expected Breakdown, got {err:?}");
+		};
 		assert!(out.norm_l2() == 0.0);
 		assert!(abs_residual == 1.0);
 	}
@@ -719,7 +772,10 @@ mod tests {
 				ParShape::Seq,
 			))),
 		);
-		let BicgError::NoConvergence { abs_residual, .. } = result.unwrap_err();
+		let err = result.unwrap_err();
+		let BicgError::Breakdown { abs_residual, .. } = err else {
+			panic!("expected Breakdown, got {err:?}");
+		};
 		assert!(out.norm_l2().is_finite());
 		assert!((abs_residual - (rhs - A * &*out).norm_l2()).abs() < 1e-12);
 		assert!((abs_residual - 0.5).abs() < 1e-12);
@@ -752,7 +808,10 @@ mod tests {
 				ParShape::Seq,
 			))),
 		);
-		let BicgError::NoConvergence { abs_residual, .. } = result.unwrap_err();
+		let err = result.unwrap_err();
+		let BicgError::NoConvergence { abs_residual, .. } = err else {
+			panic!("expected NoConvergence, got {err:?}");
+		};
 		assert!(out[(0, 0)] == 0.0);
 		assert!(abs_residual == 1.0);
 	}
