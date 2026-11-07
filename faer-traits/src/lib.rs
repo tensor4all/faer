@@ -429,7 +429,7 @@ impl<T> ByRef<T> for T {
 impl<T> ByRef<T> for &T {
 	#[inline]
 	fn by_ref(&self) -> &T {
-		*self
+		self
 	}
 }
 #[repr(transparent)]
@@ -819,6 +819,10 @@ impl<T: ComplexField, S: Simd> SimdCtx<T, S> {
 		T::simd_first_true_mask(&self.0, value)
 	}
 
+	/// # Safety
+	///
+	/// For every lane enabled in `mask`, the corresponding address in `ptr`
+	/// must satisfy the requirements of [`core::ptr::read`].
 	#[inline(always)]
 	pub unsafe fn mask_load(
 		&self,
@@ -828,6 +832,10 @@ impl<T: ComplexField, S: Simd> SimdCtx<T, S> {
 		unsafe { T::simd_mask_load(&self.0, mask, ptr) }
 	}
 
+	/// # Safety
+	///
+	/// For every lane enabled in `mask`, the corresponding address in `ptr`
+	/// must satisfy the requirements of [`core::ptr::write`].
 	#[inline(always)]
 	pub unsafe fn mask_store(
 		&self,
@@ -852,6 +860,14 @@ impl<T: ComplexField, S: Simd> SimdCtx<T, S> {
 		}
 	}
 }
+/// # Safety
+///
+/// `Self`, `Self::Conj` and `Self::Canonical` must have the same size,
+/// alignment and bit validity: callers reinterpret a pointer to one as a
+/// pointer to another (`MatRef::conjugate`, `MatRef::canonical`), so the same
+/// bits must be a valid value of each. `Self::Conj` reads those bits as the
+/// complex conjugate of `Self`, and `IS_CANONICAL` must be `true` exactly when
+/// `Self` is `Self::Canonical`.
 pub unsafe trait Conjugate:
 	Send + Sync + core::fmt::Debug + Imply<Self::Canonical, Is: RefOps>
 {
@@ -1284,6 +1300,8 @@ pub trait ComplexField:
 	fn mul_real_impl(lhs: &Self, rhs: &Self::Real) -> Self;
 	fn mul_pow2_impl(lhs: &Self, rhs: &Self::Real) -> Self;
 	fn is_finite_impl(value: &Self) -> bool;
+	// reason: `value != value` is the generic NaN test; `Self` has no is_nan.
+	#[allow(clippy::eq_op)]
 	fn is_nan_impl(value: &Self) -> bool {
 		value != value
 	}
@@ -1299,11 +1317,19 @@ pub trait ComplexField:
 		start: Self::Index,
 		end: Self::Index,
 	) -> Self::SimdMemMask<S>;
+	/// # Safety
+	///
+	/// For every lane enabled in `mask`, the corresponding address in `ptr`
+	/// must satisfy the requirements of [`core::ptr::read`].
 	unsafe fn simd_mask_load_raw<S: Simd>(
 		ctx: &Self::SimdCtx<S>,
 		mask: Self::SimdMemMask<S>,
 		ptr: *const Self::SimdVec<S>,
 	) -> Self::SimdVec<S>;
+	/// # Safety
+	///
+	/// For every lane enabled in `mask`, the corresponding address in `ptr`
+	/// must satisfy the requirements of [`core::ptr::write`].
 	unsafe fn simd_mask_store_raw<S: Simd>(
 		ctx: &Self::SimdCtx<S>,
 		mask: Self::SimdMemMask<S>,
@@ -1515,6 +1541,10 @@ pub trait ComplexField:
 			panic!();
 		}
 	}
+	/// # Safety
+	///
+	/// For every lane enabled in `mask`, the corresponding address in `ptr`
+	/// must satisfy the requirements of [`core::ptr::read`].
 	#[inline(always)]
 	unsafe fn simd_mask_load<S: Simd>(
 		ctx: &Self::SimdCtx<S>,
@@ -1531,6 +1561,10 @@ pub trait ComplexField:
 			panic!();
 		}
 	}
+	/// # Safety
+	///
+	/// For every lane enabled in `mask`, the corresponding address in `ptr`
+	/// must satisfy the requirements of [`core::ptr::write`].
 	#[inline(always)]
 	unsafe fn simd_mask_store<S: Simd>(
 		ctx: &Self::SimdCtx<S>,
@@ -3332,7 +3366,7 @@ impl ComplexField for ComplexImpl<f32> {
 	#[inline]
 	fn from_real_impl(real: &Self::Real) -> Self {
 		Complex {
-			re: real.clone(),
+			re: *real,
 			im: f32::zero_impl(),
 		}
 		.into()
@@ -3349,23 +3383,23 @@ impl ComplexField for ComplexImpl<f32> {
 
 	#[inline]
 	fn real_part_impl(value: &Self) -> Self::Real {
-		value.0.re.clone()
+		value.0.re
 	}
 
 	#[inline]
 	fn imag_part_impl(value: &Self) -> Self::Real {
-		value.0.im.clone()
+		value.0.im
 	}
 
 	#[inline]
 	fn copy_impl(value: &Self) -> Self {
-		value.clone()
+		*value
 	}
 
 	#[inline]
 	fn conj_impl(value: &Self) -> Self {
 		Complex {
-			re: value.0.re.clone(),
+			re: value.0.re,
 			im: value.0.im.neg_by_ref(),
 		}
 		.into()
@@ -3373,19 +3407,19 @@ impl ComplexField for ComplexImpl<f32> {
 
 	#[inline]
 	fn recip_impl(value: &Self) -> Self {
-		let (re, im) = recip_impl(value.0.re.clone(), value.0.im.clone());
+		let (re, im) = recip_impl(value.0.re, value.0.im);
 		Complex { re, im }.into()
 	}
 
 	#[inline]
 	fn sqrt_impl(value: &Self) -> Self {
-		let (re, im) = sqrt_impl(value.0.re.clone(), value.0.im.clone());
+		let (re, im) = sqrt_impl(value.0.re, value.0.im);
 		Complex { re, im }.into()
 	}
 
 	#[inline]
 	fn abs_impl(value: &Self) -> Self::Real {
-		abs_impl(value.0.re.clone(), value.0.im.clone())
+		abs_impl(value.0.re, value.0.im)
 	}
 
 	#[inline]
@@ -3999,7 +4033,7 @@ impl ComplexField for ComplexImpl<f64> {
 	#[inline]
 	fn from_real_impl(real: &Self::Real) -> Self {
 		Complex {
-			re: real.clone(),
+			re: *real,
 			im: f64::zero_impl(),
 		}
 		.into()
@@ -4016,23 +4050,23 @@ impl ComplexField for ComplexImpl<f64> {
 
 	#[inline]
 	fn real_part_impl(value: &Self) -> Self::Real {
-		value.0.re.clone()
+		value.0.re
 	}
 
 	#[inline]
 	fn imag_part_impl(value: &Self) -> Self::Real {
-		value.0.im.clone()
+		value.0.im
 	}
 
 	#[inline]
 	fn copy_impl(value: &Self) -> Self {
-		value.clone()
+		*value
 	}
 
 	#[inline]
 	fn conj_impl(value: &Self) -> Self {
 		Complex {
-			re: value.0.re.clone(),
+			re: value.0.re,
 			im: value.0.im.neg_by_ref(),
 		}
 		.into()
@@ -4040,19 +4074,19 @@ impl ComplexField for ComplexImpl<f64> {
 
 	#[inline]
 	fn recip_impl(value: &Self) -> Self {
-		let (re, im) = recip_impl(value.0.re.clone(), value.0.im.clone());
+		let (re, im) = recip_impl(value.0.re, value.0.im);
 		Complex { re, im }.into()
 	}
 
 	#[inline]
 	fn sqrt_impl(value: &Self) -> Self {
-		let (re, im) = sqrt_impl(value.0.re.clone(), value.0.im.clone());
+		let (re, im) = sqrt_impl(value.0.re, value.0.im);
 		Complex { re, im }.into()
 	}
 
 	#[inline]
 	fn abs_impl(value: &Self) -> Self::Real {
-		abs_impl(value.0.re.clone(), value.0.im.clone())
+		abs_impl(value.0.re, value.0.im)
 	}
 
 	#[inline]
@@ -4846,7 +4880,6 @@ impl ComplexField for Symbolic {
 		_: Self::Index,
 		_: Self::Index,
 	) -> Self::SimdMemMask<S> {
-		()
 	}
 
 	unsafe fn simd_mask_load_raw<S: pulp::Simd>(
@@ -4854,7 +4887,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdMemMask<S>,
 		_: *const Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	unsafe fn simd_mask_store_raw<S: pulp::Simd>(
@@ -4863,21 +4895,18 @@ impl ComplexField for Symbolic {
 		_: *mut Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) {
-		()
 	}
 
 	fn simd_splat<S: pulp::Simd>(
 		_: &Self::SimdCtx<S>,
 		_: &Self,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_splat_real<S: pulp::Simd>(
 		_: &Self::SimdCtx<S>,
 		_: &Self::Real,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_add<S: pulp::Simd>(
@@ -4885,7 +4914,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_sub<S: pulp::Simd>(
@@ -4893,35 +4921,30 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_neg<S: pulp::Simd>(
 		_: &Self::SimdCtx<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_conj<S: pulp::Simd>(
 		_: &Self::SimdCtx<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_abs1<S: pulp::Simd>(
 		_: &Self::SimdCtx<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_abs_max<S: pulp::Simd>(
 		_: &Self::SimdCtx<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_mul_real<S: pulp::Simd>(
@@ -4929,7 +4952,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_mul_pow2<S: pulp::Simd>(
@@ -4937,7 +4959,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_mul<S: pulp::Simd>(
@@ -4945,7 +4966,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_conj_mul<S: pulp::Simd>(
@@ -4953,7 +4973,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_mul_add<S: pulp::Simd>(
@@ -4962,7 +4981,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_conj_mul_add<S: pulp::Simd>(
@@ -4971,14 +4989,12 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_abs2<S: pulp::Simd>(
 		_: &Self::SimdCtx<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_abs2_add<S: pulp::Simd>(
@@ -4986,7 +5002,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_reduce_sum<S: pulp::Simd>(
@@ -5008,7 +5023,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdMask<S> {
-		()
 	}
 
 	fn simd_less_than<S: pulp::Simd>(
@@ -5016,7 +5030,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdMask<S> {
-		()
 	}
 
 	fn simd_less_than_or_equal<S: pulp::Simd>(
@@ -5024,7 +5037,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdMask<S> {
-		()
 	}
 
 	fn simd_greater_than<S: pulp::Simd>(
@@ -5032,7 +5044,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdMask<S> {
-		()
 	}
 
 	fn simd_greater_than_or_equal<S: pulp::Simd>(
@@ -5040,7 +5051,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdMask<S> {
-		()
 	}
 
 	fn simd_select<S: pulp::Simd>(
@@ -5049,7 +5059,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdVec<S>,
 		_: Self::SimdVec<S>,
 	) -> Self::SimdVec<S> {
-		()
 	}
 
 	fn simd_index_select<S: pulp::Simd>(
@@ -5058,14 +5067,12 @@ impl ComplexField for Symbolic {
 		_: Self::SimdIndex<S>,
 		_: Self::SimdIndex<S>,
 	) -> Self::SimdIndex<S> {
-		()
 	}
 
 	fn simd_index_splat<S: pulp::Simd>(
 		_: &Self::SimdCtx<S>,
 		_: Self::Index,
 	) -> Self::SimdIndex<S> {
-		()
 	}
 
 	fn simd_index_add<S: pulp::Simd>(
@@ -5073,7 +5080,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdIndex<S>,
 		_: Self::SimdIndex<S>,
 	) -> Self::SimdIndex<S> {
-		()
 	}
 
 	fn simd_and_mask<S: pulp::Simd>(
@@ -5081,7 +5087,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdMask<S>,
 		_: Self::SimdMask<S>,
 	) -> Self::SimdMask<S> {
-		()
 	}
 
 	fn simd_or_mask<S: pulp::Simd>(
@@ -5089,14 +5094,12 @@ impl ComplexField for Symbolic {
 		_: Self::SimdMask<S>,
 		_: Self::SimdMask<S>,
 	) -> Self::SimdMask<S> {
-		()
 	}
 
 	fn simd_not_mask<S: Simd>(
 		_: &Self::SimdCtx<S>,
 		_: Self::SimdMask<S>,
 	) -> Self::SimdMask<S> {
-		()
 	}
 
 	fn simd_first_true_mask<S: pulp::Simd>(
@@ -5111,7 +5114,6 @@ impl ComplexField for Symbolic {
 		_: Self::Index,
 		_: Self::Index,
 	) -> Self::SimdMask<S> {
-		()
 	}
 
 	fn simd_index_less_than<S: Simd>(
@@ -5119,7 +5121,6 @@ impl ComplexField for Symbolic {
 		_: Self::SimdIndex<S>,
 		_: Self::SimdIndex<S>,
 	) -> Self::SimdMask<S> {
-		()
 	}
 }
 pub type c64 = Complex<f64>;
@@ -5304,20 +5305,8 @@ impl ComplexField for fx128 {
 		values: Self::SimdVec<S>,
 	) {
 		unsafe {
-			Quad(
-				f64::simd_mask_store_raw(
-					ctx,
-					mask.0,
-					&raw mut (*ptr).0,
-					values.0,
-				),
-				f64::simd_mask_store_raw(
-					ctx,
-					mask.1,
-					&raw mut (*ptr).1,
-					values.1,
-				),
-			);
+			f64::simd_mask_store_raw(ctx, mask.0, &raw mut (*ptr).0, values.0);
+			f64::simd_mask_store_raw(ctx, mask.1, &raw mut (*ptr).1, values.1);
 		}
 	}
 
@@ -5568,7 +5557,7 @@ impl ComplexField for fx128 {
 		ctx: &Self::SimdCtx<S>,
 		value: Self::Index,
 	) -> Self::SimdIndex<S> {
-		ctx.splat_u64s(value as u64)
+		ctx.splat_u64s(value)
 	}
 
 	#[inline(always)]
