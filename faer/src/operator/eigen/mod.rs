@@ -1189,7 +1189,9 @@ pub fn partial_self_adjoint_eigen_scratch<T: ComplexField>(
 			temp_mat_scratch::<T>(max_dim + 1, max_dim),
 			temp_mat_scratch::<T>(n, max_dim + 1),
 			temp_mat_scratch::<T>(n, max_dim),
-			// then the workspace of the dense path
+			// then the workspace of the dense path: the materialised operator
+			// and the separate buffer that receives its eigenvectors
+			temp_mat_scratch::<T>(n, n),
 			temp_mat_scratch::<T>(n, n),
 			temp_mat_scratch::<T>(n, 1),
 			StackReq::new::<T>(n),
@@ -1791,6 +1793,56 @@ mod tests {
 		let A = &zip!(A).map(|unzip!(x)| Complex::from(*x));
 		for j in 0..info.n_converged_eigen {
 			assert!((A * V.col(j) - Scale(w[j]) * V.col(j)).norm_l2() < 1e-10);
+		}
+	}
+	#[test]
+	fn test_self_adjoint_full_subspace_exact_scratch_real() {
+		let rng = &mut StdRng::seed_from_u64(3);
+		let n = 64;
+		let n_eigval = 8;
+		let mat = CwiseMatDistribution {
+			nrows: n,
+			ncols: n,
+			dist: StandardNormal,
+		};
+		let mut a: Mat<f64> = mat.sample(rng);
+		for j in 0..n {
+			for i in 0..j {
+				let x = a[(i, j)];
+				a[(j, i)] = x;
+			}
+		}
+		let A = a.as_ref();
+		let par = Par::Seq;
+		let params = PartialEigenParams {
+			max_dim: n,
+			..Default::default()
+		};
+		// exact-size buffer: the full-subspace branch holds two n x n matrices,
+		// the materialised operator and the eigenvector buffer
+		let mem = &mut MemBuffer::new(partial_self_adjoint_eigen_scratch(
+			&A,
+			n_eigval,
+			par.shape(),
+			params,
+		));
+		let mut V = Mat::<f64>::zeros(n, n_eigval);
+		let mut w = vec![0.0f64; n_eigval];
+		let mut v0 = Col::<f64>::zeros(n);
+		v0[0] = 1.0;
+		let info = partial_self_adjoint_eigen(
+			V.rb_mut(),
+			&mut w,
+			&A,
+			v0.as_ref(),
+			f64::EPSILON * 128.0,
+			par,
+			MemStack::new(mem),
+			params,
+		);
+		assert_eq!(info.n_converged_eigen, n_eigval);
+		for j in 0..n_eigval {
+			assert!((A * V.col(j) - Scale(w[j]) * V.col(j)).norm_l2() < 1e-8);
 		}
 	}
 }
