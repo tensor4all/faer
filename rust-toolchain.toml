@@ -1,0 +1,7 @@
+# Pinned so a local run and CI lint the same compiler (#308). Moving names (`stable`, `nightly`)
+# are not used: the clippy floor recorded in `code-quality.yml` is only meaningful against a fixed
+# version. The MSRV and no-std jobs in `run-tests.yml` override this file with `RUSTUP_TOOLCHAIN`.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

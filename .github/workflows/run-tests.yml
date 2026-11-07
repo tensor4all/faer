@@ -11,6 +11,10 @@ jobs:
   msrv:
     name: msrv-${{ matrix.toolchain }}-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # rust-toolchain.toml outranks the toolchain the step below installs; without this the job
+    # would check the pinned 1.96.0 instead of the version it is named after.
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,6 +49,10 @@ jobs:
   nostd:
     name: nostd-${{ matrix.toolchain }}-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # rust-toolchain.toml outranks the toolchain the step below installs; without this the job
+    # would check the pinned 1.96.0 instead of the version it is named after.
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     strategy:
       fail-fast: false
       matrix:

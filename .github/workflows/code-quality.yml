@@ -19,8 +19,9 @@ jobs:
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
-          components: clippy, rustfmt, rust-src, miri
+          # Same version as rust-toolchain.toml, which is what cargo runs here anyway.
+          toolchain: 1.96.0
+          components: clippy, rustfmt
 
       - name: Formatting check
         run:
@@ -30,6 +31,12 @@ jobs:
         # want to get all quality issues
         continue-on-error: true
 
+      - name: Lint (clean crates only, blocking)
+        run: cargo clippy -p t4a-faer-traits --all-targets -- -D warnings
+
+        # t4a-faer: 2340 warnings on 1.96.0, measured 2026-11-07. Not a gate -- the number is a
+        # floor someone measured, not an assumption. A crate that reaches zero graduates into the
+        # blocking step above.
       - name: Linting check
         run:
           cargo clippy --all-targets &&
