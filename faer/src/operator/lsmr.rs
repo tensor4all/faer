@@ -31,7 +31,8 @@ impl<T: RealField> Default for LsmrParams<T> {
 /// algorithm result
 #[derive(Copy, Clone, Debug)]
 pub struct LsmrInfo<T> {
-	/// absolute residual at the final step
+	/// absolute residual at the final step (the preconditioned normal residual
+	/// `||M^H A^H (A x - b)||`, whose estimate the iteration tracks)
 	pub abs_residual: T,
 	/// relative residual at the final step
 	pub rel_residual: T,
@@ -53,6 +54,38 @@ pub enum LsmrError<T> {
 		/// relative residual at the final step
 		rel_residual: T,
 	},
+}
+/// The power of two nearest `x` (rounding to the nearer neighbour, so a value inside
+/// `[1/sqrt(2), sqrt(2))` gives one), or one when `x` is zero or non-finite.
+///
+/// `f64::powi` and `log2` need `std`, so the exponent is counted by repeated exact
+/// multiplication; this runs once per [`lsmr`] call.
+fn pow2_near<T: RealField>(x: T) -> T {
+	let two = from_f64::<T>(2.0);
+	let half = from_f64::<T>(0.5);
+	let one = one::<T>();
+	if x == zero::<T>() || !x.is_finite() {
+		return one;
+	}
+	// `m * 2^k` in `[1, 2)`, so `x` is `2^-k` times a mantissa in `[1, 2)`
+	let mut m = x;
+	let mut k = 0i32;
+	while m >= two {
+		m = m * &half;
+		k -= 1;
+	}
+	while m < one {
+		m = m * &two;
+		k += 1;
+	}
+	let ref sqrt2 = from_f64::<T>(1.4142135623730951);
+	let e = if m >= *sqrt2 { 1 - k } else { -k };
+	let base = if e >= 0 { two } else { half };
+	let mut f = one;
+	for _ in 0..e.unsigned_abs() {
+		f = f * &base;
+	}
+	f
 }
 /// computes the layout of required workspace for executing the lsmr
 /// algorithm
@@ -334,6 +367,17 @@ pub fn lsmr<T: ComplexField, C: IterationControl>(
 				start = end;
 			}
 		}
+		// `alpha` and `beta` carry the scale of `A`, while `zetabar` (their product) and the
+		// triangular solves by `rho`/`rhobar` carry its square or its inverse: an `A` at
+		// either end of the range pushes the recurrence out of it although the solution is
+		// representable. Divide the coefficients by the power of two nearest `|A|` and
+		// multiply the solution update by its inverse, which is exactly the iteration for
+		// `A / scale` -- the same arithmetic on a problem whose coefficients are near one.
+		// `beta`'s first block is `|b|` (see the bidiagonalization above), so it stays.
+		let ref scale = pow2_near::<T::Real>(alpha.rb().norm_max());
+		let ref scale_inv = scale.recip();
+		zip!(alpha.rb_mut())
+			.for_each(|unzip!(a)| *a = a.mul_real(scale_inv));
 		zetabar.fill(zero());
 		let mut start = 0;
 		while start < k {
@@ -367,6 +411,10 @@ pub fn lsmr<T: ComplexField, C: IterationControl>(
 		w.fill(zero());
 		wbar.fill(zero());
 		let mut norm;
+		// The reference is the initial preconditioned normal residual of the problem the
+		// recurrences now solve, `A / scale`, so `tmp` is brought to that scale before
+		// its norm is taken: `||A^H b||` itself underflows for an `A` near the bottom of
+		// the range.
 		let norm_ref = if params.initial_guess == InitialGuessStatus::Zero {
 			norm = zetabar.norm_l2();
 			norm.copy()
@@ -378,13 +426,24 @@ pub fn lsmr<T: ComplexField, C: IterationControl>(
 			let mut tmp = tmp.as_mat_mut();
 			A.adjoint_apply(tmp.rb_mut(), b, par.reborrow(), stack.rb_mut());
 			M.adjoint_apply_in_place(tmp.rb_mut(), par.reborrow(), stack.rb_mut());
+			zip!(tmp.rb_mut())
+				.for_each(|unzip!(x)| *x = x.mul_real(scale_inv));
 			tmp.norm_l2()
 		};
-		// The absolute residual tested below is the preconditioned normal residual,
-		// so `abs_tolerance` is on the same scale as `rel_tolerance * norm_ref`.
-		let threshold = params
-			.abs_tolerance
-			.fmax(&norm_ref * params.rel_tolerance);
+		// The estimate is the preconditioned normal residual of the scaled problem, so it
+		// is `scale` times smaller than the caller's: `abs_residual` is scaled back, and
+		// `abs_tolerance` is compared in the caller's units. `rel_tolerance` is relative
+		// to the initial normal residual, and its ratio is the same in both frames --
+		// forming the product `rel_tolerance * norm_ref` instead underflows when `|A|`
+		// sits near the bottom of the range. The ratio needs a finite reference to mean
+		// anything, so a non-finite one leaves the caller's absolute tolerance alone.
+		let abs_residual = |norm: &T::Real| norm.clone() * scale;
+		let rel_residual = |norm: &T::Real| norm.clone() / &norm_ref;
+		let converged = |norm: &T::Real| {
+			abs_residual(norm) <= params.abs_tolerance
+				|| (norm_ref.is_finite()
+					&& rel_residual(norm) <= params.rel_tolerance)
+		};
 		if norm_ref == zero::<T::Real>() {
 			x.fill(zero());
 			return Ok(LsmrInfo {
@@ -395,10 +454,10 @@ pub fn lsmr<T: ComplexField, C: IterationControl>(
 				non_exhaustive: NonExhaustive(()),
 			});
 		}
-		if norm <= threshold {
+		if converged(&norm) && x.rb().is_all_finite() {
 			return Ok(LsmrInfo {
-				rel_residual: &norm / &norm_ref,
-				abs_residual: norm,
+				rel_residual: rel_residual(&norm),
+				abs_residual: abs_residual(&norm),
 				iter_count: 0,
 				stopped: false,
 				non_exhaustive: NonExhaustive(()),
@@ -415,6 +474,11 @@ pub fn lsmr<T: ComplexField, C: IterationControl>(
 				vold.copy_from(&v);
 				M.apply_in_place(v.rb_mut(), par.reborrow(), stack.rb_mut());
 				A.apply(qr.rb_mut(), v.rb(), par.reborrow(), stack.rb_mut());
+				// `A v` enters the bidiagonalization in the same units as `alpha`, so the
+				// product is brought to the scale of the recurrences before the step's
+				// subtraction (`A / scale`'s bidiagonalization is the one being run).
+				zip!(qr.rb_mut())
+					.for_each(|unzip!(q)| *q = q.mul_real(scale_inv));
 				let mut start = 0;
 				while start < k {
 					let s = Ord::min(k - start, s);
@@ -443,6 +507,8 @@ pub fn lsmr<T: ComplexField, C: IterationControl>(
 				let mut qr = qr.as_mat_mut();
 				A.adjoint_apply(qr.rb_mut(), u.rb(), par.reborrow(), stack.rb_mut());
 				M.adjoint_apply_in_place(qr.rb_mut(), par.reborrow(), stack.rb_mut());
+				zip!(qr.rb_mut())
+					.for_each(|unzip!(q)| *q = q.mul_real(scale_inv));
 				let mut start = 0;
 				while start < k {
 					let s = Ord::min(k - start, s);
@@ -620,7 +686,7 @@ pub fn lsmr<T: ComplexField, C: IterationControl>(
 					},
 					wbar.rb(),
 					zeta.rb().get(.., ..actual_s),
-					one::<T>(),
+					scale_inv.to_cplx(),
 					par.reborrow(),
 				);
 				start = end;
@@ -628,17 +694,19 @@ pub fn lsmr<T: ComplexField, C: IterationControl>(
 			norm = zetabar.norm_l2();
 			if callback(x.rb()) {
 				return Ok(LsmrInfo {
-					rel_residual: &norm / &norm_ref,
-					abs_residual: norm,
+					rel_residual: rel_residual(&norm),
+					abs_residual: abs_residual(&norm),
 					iter_count: iter + 1,
 					stopped: true,
 					non_exhaustive: NonExhaustive(()),
 				});
 			}
-			if norm <= threshold {
+			// A convergence claim is a claim about the returned iterate, so a residual
+			// estimate below the tolerance is not enough when `x` itself is not finite.
+			if converged(&norm) && x.rb().is_all_finite() {
 				return Ok(LsmrInfo {
-					rel_residual: &norm / &norm_ref,
-					abs_residual: norm,
+					rel_residual: rel_residual(&norm),
+					abs_residual: abs_residual(&norm),
 					iter_count: iter + 1,
 					stopped: false,
 					non_exhaustive: NonExhaustive(()),
@@ -646,8 +714,8 @@ pub fn lsmr<T: ComplexField, C: IterationControl>(
 			}
 		}
 		Err(LsmrError::NoConvergence {
-			rel_residual: &norm / &norm_ref,
-			abs_residual: norm,
+			rel_residual: rel_residual(&norm),
+			abs_residual: abs_residual(&norm),
 		})
 	}
 	implementation(
