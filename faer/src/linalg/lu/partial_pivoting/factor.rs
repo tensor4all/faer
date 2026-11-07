@@ -280,9 +280,9 @@ fn lu_in_place_unblocked_scalar<I: Index, T: ComplexField>(
 /// rule of the thresholds design (provisional).
 const TRAILING_UPDATE_SECTIONS: u32 = 2;
 /// Sections of the swap stage of one level when both the columns left of the panel and the
-/// columns right of it are swapped: a split of the two blocks over the parallelism, then a
-/// split of the columns of each; memory bound, so a section costs more than its share of the
-/// work (provisional, from the thresholds design).
+/// columns right of it are swapped: the two blocks one after the other, each a split of its
+/// columns; memory bound, so a section costs more than its share of the work (provisional,
+/// from the thresholds design). No caller reaches it since #276 (#296).
 const SWAP_STAGE_SECTIONS: u32 = 4;
 /// Sections of the swap stage when one side holds every column (the first panel of a wide
 /// matrix, the last of a tall one): one split of the columns over the whole budget.
@@ -475,49 +475,21 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 				swap(A_right);
 			},
 		#[cfg(feature = "rayon")]
-			_ => {
-			let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
-				let nthreads = nthreads.get();
-				let len = (A_left.ncols() + A_right.ncols()) as f64;
-				let left_threads = Ord::min(
-					(nthreads as f64 * (A_left.ncols() as f64 / len)) as usize,
-					nthreads,
-				);
-				let (left_cols, right_cols) = (A_left.ncols(), A_right.ncols());
-				if left_cols == 0 || right_cols == 0 {
-					// one side holds every column: it takes the whole budget
-					let (A, _) = if left_cols == 0 { (A_right, A_left) } else { (A_left, A_right) };
-					crate::utils::thread::for_each(
-						par,
-						nthreads,
-						A.par_col_partition_mut(nthreads),
-						|A| swap(A),
-					);
-				} else {
-					// the two sides run on the two halves of the split, each on the
-					// parallelism it is handed
-					crate::utils::thread::join_sized(
-						par,
-						left_threads,
-						|par| {
-							let n = par.degree();
-							crate::utils::thread::for_each(
-								par,
-								n,
-								A_left.par_col_partition_mut(n),
-								|A| swap(A),
-							)
-						},
-						|par| {
-							let n = par.degree();
-							crate::utils::thread::for_each(
-								par,
-								n,
-								A_right.par_col_partition_mut(n),
-								|A| swap(A),
-							)
-						},
-					);
+			mut par => {
+				// The left recursion sees only its own columns and the right one ends at the
+				// last column (#276), so one side of a swap stage is empty and the other takes
+				// the whole budget. A caller with columns on both sides gets them one after the
+				// other, each on the whole budget.
+				let nthreads = par.degree();
+				for A in [A_left, A_right] {
+					if A.ncols() > 0 {
+						crate::utils::thread::for_each(
+							par.reborrow(),
+							nthreads,
+							A.par_col_partition_mut(nthreads),
+							&swap,
+						);
+					}
 				}
 			},
 		}

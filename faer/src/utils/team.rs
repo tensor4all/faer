@@ -1721,29 +1721,27 @@ mod tests {
 	}
 
 	#[test]
-	fn lu_swap_stage_splits_the_team_it_is_handed() {
-		let n = 513;
-		let a = rand_mat(n, n, 11);
+	fn lu_swap_stage_forks_the_team_it_is_handed() {
+		// The recursion on a wide panel: every trailing update is a few hundred MACs and stays
+		// sequential, while the top-level swap stage applies 32 swaps to the 8160 columns right
+		// of the panel, so a split recorded here is the swap stage's (`lu_in_place` would add
+		// the solve of those columns). Since #276 a swap stage has columns on one side only, and
+		// that side takes the whole team (#296).
+		let (m, n) = (32, 8192);
+		let a = rand_mat(m, n, 11);
 		let lu = |par: Par| {
 			let mut f = a.clone();
-			let mut perm = vec![0usize; n];
-			let mut perm_inv = vec![0usize; n];
-			let mut mem = dyn_stack::MemBuffer::new(
-				crate::linalg::lu::partial_pivoting::factor::lu_in_place_scratch::<usize, f64>(
-					n, n, par.shape(), Default::default(),
-				),
+			let mut trans = vec![0usize; m];
+			crate::linalg::lu::partial_pivoting::factor::lu_in_place_recursion(
+				f.as_mut(), 0, m, &mut trans, par, Default::default(),
 			);
-			crate::linalg::lu::partial_pivoting::factor::lu_in_place(
-				f.as_mut(), &mut perm, &mut perm_inv, par,
-				dyn_stack::MemStack::new(&mut mem), Default::default(),
-			);
-			f
+			(f, trans)
 		};
 		let want = lu(Par::Seq);
 		let (got, st) = counted(6, lu);
-		// a swap stage with columns on both sides runs its two sides on a split of the team
-		assert!(st.split.get(2).copied().unwrap_or(0) >= 1, "{:?}", st.split);
-		assert!(max_diff(want.as_ref(), got.as_ref()) < 1e-8);
+		assert!(st.split.iter().skip(2).any(|&c| c > 0), "{:?}", st.split);
+		assert_eq!(want.1, got.1);
+		assert!(max_diff(want.0.as_ref(), got.0.as_ref()) < 1e-8);
 	}
 
 	#[test]
