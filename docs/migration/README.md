@@ -7,7 +7,12 @@ Choose a guide by the library you already use. The tables map mathematical opera
 | --- | --- |
 | [C++: Eigen and BLAS](cpp.md) | `Mat`, `MatRef`, `MatMut`, factorization objects, and `matmul` |
 | [Fortran: LAPACK and BLAS](fortran.md) | Factor and solve routines with explicit scratch, or owning factorization objects |
+| [LAPACK routine names](lapack-names.md) | One flat table from `?getrf`, `?geqp3`, `?gesvd`, `?syevd`, `?potrf`, … to the call that replaces it |
 | [Julia: LinearAlgebra.jl](julia.md) | `partial_piv_lu`, `llt`, `qr`, `svd`, and vector products |
+| [Python: NumPy and SciPy](numpy.md) | `partial_piv_lu`, `qr`, `thin_svd`, `self_adjoint_eigen`, triangular solves |
+| [Rust: nalgebra](nalgebra.md) | `Mat<f64>`, `partial_piv_lu`, `llt`, `svd`, `self_adjoint_eigen` |
+| [Rust: ndarray and ndarray-linalg](ndarray.md) | `Mat<f64>`, the `Solve` trait, `llt`, `svd`, `matmul` |
+| [Rust: upstream faer](upstream-faer.md) | The same names with a trailing `Par`; the global parallelism setting is gone |
 | An owning matrix | `Mat<T>`; borrowed read and write views are `MatRef` and `MatMut` |
 | A library or vendor thread count setting | A caller owned `threadteam` team, passed to calls as `Par::Team` |
 | A call that must stay on the calling thread | `Par::Seq` |

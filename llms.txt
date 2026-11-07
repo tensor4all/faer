@@ -7,14 +7,24 @@ The tensor4all fork of faer provides the `t4a-faer` library (`faer`) and its sca
 
 ## Key documentation
 
-- [README](README.md): scope, API status, parallel execution, and upstream provenance.
+- [README](README.md): scope, API status, parallel execution, upstream provenance, and the
+  correctness and performance evidence (`## Why trust it`).
 - [API reference](https://docs.rs/t4a-faer): public types, operations, and feature flags.
+- [Usage skill for coding agents](skills/faer-usage/SKILL.md): which decomposition and entry point to
+  call, the borrow and in-place forms, error types, scratch sizing, and caller owned teams.
 - [Migration overview](docs/migration/README.md): dependency setup, caller owned parallel regions, nested team rules, and a checked example.
 - [C++ migration](docs/migration/cpp.md): Eigen and BLAS constructs mapped to matrix views, factors, and products.
 - [Fortran migration](docs/migration/fortran.md): LAPACK and BLAS calls, leading dimensions, permutations, and scratch memory.
+- [LAPACK routine table](docs/migration/lapack-names.md): flat `?getrf`/`?geqp3`/`?gesvd`/`?syevd`/`?potrf` to API table, with the no-equivalent entries.
 - [Julia migration](docs/migration/julia.md): LinearAlgebra.jl factorizations, vector products, and ownership differences.
+- [NumPy and SciPy migration](docs/migration/numpy.md): `numpy.linalg` and `scipy.linalg` calls, C-order versus column-major, permutation conventions.
+- [nalgebra migration](docs/migration/nalgebra.md): `DMatrix`, `lu`, `Cholesky`, `SVD`, `SymmetricEigen`, and the layout and lifetime differences.
+- [ndarray and ndarray-linalg migration](docs/migration/ndarray.md): `Array2`, the `Solve`/`Eigh`/`SVD` traits, and the row-major default.
+- [Upstream faer migration](docs/migration/upstream-faer.md): what changed from upstream, one call site at a time.
 - [Parallel API history](docs/par-team-migration.md): changes to `Par` and explicit team ownership.
 - [Benchmarks](https://tensor4all.org/faer-benchmark/): published measurements and their conditions.
+- [LAPACK numerical validation](docs/lapack-validation.md): the 16 ported families, the call counts, and what is omitted.
+- [Upstream defect reports](upstream-reports/README.md): 40 defects reproduced against the published crates.
 - [PATCHSET](PATCHSET.md): differences from upstream and the status and evidence for each change.
 - [Adoption protocol](docs/adoption-protocol.md): verification and performance acceptance requirements for changes.
 

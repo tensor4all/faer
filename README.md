@@ -9,7 +9,54 @@ faer does not use an implicit global thread pool. See the [migration guide](docs
 [Benchmarks](https://tensor4all.org/faer-benchmark/): published measurements and their conditions live here.
 **Status:** Published versions follow semver; APIs can change in incompatible releases.
 
-See the [migration guides](docs/migration/README.md) for Eigen, BLAS, LAPACK, and Julia users.
+See the [migration guides](docs/migration/README.md) for Eigen, BLAS, LAPACK, Julia, NumPy/SciPy,
+nalgebra, ndarray, and upstream faer users. The [LAPACK routine table](docs/migration/lapack-names.md)
+maps `?getrf`, `?geqp3`, `?gesvd`, `?syevd`, `?potrf` and the rest to the call that replaces each.
+Coding agents in a downstream project can be given
+[`skills/faer-usage/SKILL.md`](skills/faer-usage/SKILL.md).
+
+# Why trust it
+
+Each item below is one click from a file in this repository. No number here is a projection; where a
+number is a snapshot of one run, the file and the run are named.
+
+- **Differential validation against LAPACK.** Sixteen families are ported from LAPACK 3.12.0's
+  `lapack-netlib/TESTING` (via the OpenBLAS snapshot recorded in
+  [`docs/lapack-validation-sources.json`](docs/lapack-validation-sources.json)): SVD, Hessenberg,
+  Schur, nonsymmetric EVD, QZ and Schur reordering, balancing, tridiagonal and self-adjoint EVD, LU,
+  Cholesky, indefinite LDL, QR, LQ, triangular solves and least squares
+  ([`docs/lapack-validation.md`](docs/lapack-validation.md)). The recorded combined run selects 325
+  tests: 71,856 principal calls and 50,952 dependent calls. The suite runs nightly and by hand
+  ([`.github/workflows/lapack-validation.yml`](.github/workflows/lapack-validation.yml)); a run is
+  green only when nothing fails outside [`scripts/lapack-known-failures.json`](scripts/lapack-known-failures.json),
+  which is **empty**, so nothing is currently excluded from the green.
+- **Allocation contracts are tested, not asserted.** A counting allocator proves zero heap
+  allocations in a steady-state call: `faer/tests/svd_values_no_alloc.rs` (values-only SVD, four
+  scalar types, 1×1 to 700×700), `faer/tests/no_step_alloc.rs`, `faer/tests/lq_no_alloc.rs`,
+  `faer/tests/evd_svd_vectors_no_alloc.rs` and
+  `faer/tests/generalized_schur_reorder_no_alloc.rs`. The reason a 0.20.1 transitive dependency
+  broke one of them is written next to the version pin in `faer/Cargo.toml`.
+- **Defects found in the published upstream crates are reproducible.** [`upstream-reports/`](upstream-reports/)
+  holds 40 defects, each a standalone Cargo project that depends only on the published crate, prints
+  expected and actual values and exits non-zero; 38 are against `faer` 0.24.4, two against `gemm` and
+  `private-gemm-x86` ([`upstream-reports/README.md`](upstream-reports/README.md)). Each entry names
+  the release it was confirmed against and whether a fix has reached upstream.
+- **CI gates the contract, not only the build.** [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+  builds the crates with and without default features, runs the selected no-`rayon` test targets,
+  checks that the migration guides are byte-identical to the examples CI runs
+  (`scripts/check-migration-examples.py`), builds and runs those examples, runs the doctests, and
+  checks the package contents. `.github/workflows/code-quality.yml` runs `cargo clippy -D warnings` as
+  a **blocking** gate for `t4a-faer-traits`, and the compiler is pinned in
+  [`rust-toolchain.toml`](rust-toolchain.toml) (1.96.0) so a local run lints with the same toolchain
+  as CI. `t4a-faer` itself has 2,340 clippy warnings on that toolchain and its clippy step is
+  therefore advisory — the count is recorded in the workflow file rather than hidden.
+- **Performance is measured on named hardware at pinned revisions, and published with its conditions.**
+  [tensor4all.org/faer-benchmark](https://tensor4all.org/faer-benchmark/) carries the acceptance
+  protocol and the host profiles. Pages recorded on the development host are marked *provisional* and
+  will be superseded by the dedicated measurement host's dataset (faer-benchmark,
+  `docs/provisional-and-clean-datasets.md`). Read them as conditions-bound numbers, not as a promise
+  of parity with any vendor library.
+
 
 This is a tensor4all fork of [faer](https://codeberg.org/sarah-quinones/faer).
 The [GitHub repository](https://github.com/sarah-quinones/faer-rs) is a mirror of upstream.
