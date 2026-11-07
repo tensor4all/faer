@@ -525,6 +525,39 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 	n_trans
 }
 /// $LU$ factorization tuning parameters
+///
+/// # Rank truncation
+///
+/// `max_rank`, `abs_tol` and `rel_tol` are all `None` by default, and then the factorization runs
+/// to `min(m, n)` exactly as without them and reports `rank = min(m, n)`. Setting any of them
+/// reports the number of accepted pivots in [`PartialPivLuInfo::rank`]:
+///
+/// - `max_rank = Some(r)`: only the first `r` columns are factored (clamped to `min(m, n)`): the
+///   `m x r` panel runs through the same recursion as the full factorization, its row swaps are
+///   applied to the other columns, and `U[:r, r:]` is one triangular solve. The Schur complement
+///   update of the trailing block is skipped, which is the saving: `O(m r^2 + r^2 (n - r))`
+///   instead of `O(m n min(m, n))`.
+/// - `abs_tol`, `rel_tol`: the pivot of step `k` is accepted while
+///   `|U[k, k]| > max(abs_tol, rel_tol * |U[0, 0]|)`, where `|.|` is the modulus and an absent
+///   tolerance counts as `0`; `rank` is the index of the first rejected pivot. `rel_tol` is
+///   measured against the **first** pivot `U[0, 0]`, **not** against the previous pivot;
+///   relative to the previous pivot would be a different stopping rule. Partial pivoting picks
+///   the largest entry of each column, so `|U[0, 0]|` is the largest entry of the first column,
+///   and its pivots are not rank-revealing in general: the rule is the same as the full pivoting
+///   one, its guarantee is weaker. The tolerance is checked on the computed factor, so it does
+///   not shorten the factorization; only `max_rank` does. An exactly zero pivot is rejected by
+///   any tolerance; with `max_rank` alone it is accepted, as in the full factorization.
+/// - Non-finite input: if the matrix holds a NaN or an infinity, the tolerances are ignored and
+///   `rank` is `min(m, n)` capped by `max_rank`, so a non-finite entry never shows up as a
+///   truncated rank. A NaN pivot is never rejected, and a tolerance is ignored when the threshold
+///   itself is not finite.
+///
+/// On `rank = r`: the first `r` entries of the permutation are the selected rows, and
+/// `L[:, :r]` (unit lower) and `U[:r, :]` are the factors. With `max_rank`, the trailing
+/// `(m - r) x (n - r)` block holds the row-permuted input, **not** the Schur complement. With a
+/// tolerance stop below `max_rank` the factorization of the columns past `r` is present but is
+/// not part of the rank-`r` factorization. The solve, inverse and reconstruct routines of this
+/// module assume the full factorization and must not be given a truncated one.
 #[derive(Copy, Clone, Debug)]
 pub struct PartialPivLuParams {
 	/// threshold at which the implementation should stop recursing
@@ -541,6 +574,14 @@ pub struct PartialPivLuParams {
 	/// sections, and past the row's last anchor a section's cost is an extrapolation that
 	/// misses its tail.
 	pub par_threshold: ParThreshold,
+	/// factor at most this many columns (see
+	/// [rank truncation](PartialPivLuParams#rank-truncation))
+	pub max_rank: Option<usize>,
+	/// absolute pivot tolerance (see [rank truncation](PartialPivLuParams#rank-truncation))
+	pub abs_tol: Option<f64>,
+	/// pivot tolerance relative to the first pivot (see
+	/// [rank truncation](PartialPivLuParams#rank-truncation))
+	pub rel_tol: Option<f64>,
 	#[doc(hidden)]
 	pub non_exhaustive: NonExhaustive,
 }
@@ -550,6 +591,9 @@ pub struct PartialPivLuInfo {
 	/// number of transpositions that were performed, can be used to compute
 	/// the determinant of $P$
 	pub transposition_count: usize,
+	/// number of accepted pivots: `min(m, n)` unless a
+	/// [rank truncation](PartialPivLuParams#rank-truncation) option is set
+	pub rank: usize,
 }
 /// error in the $LU$ factorization
 #[derive(Copy, Clone, Debug)]
@@ -588,6 +632,9 @@ impl<T: ComplexField> Auto<T> for PartialPivLuParams {
 			},
 			block_size: 64,
 			par_threshold: ParThreshold::Derived,
+			max_rank: None,
+			abs_tol: None,
+			rel_tol: None,
 			non_exhaustive: NonExhaustive(()),
 		}
 	}
@@ -656,6 +703,12 @@ pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 		return ret;
 	}
 	let size = Ord::min(n, m);
+	let config = params.config;
+	let has_tol = config.abs_tol.is_some() || config.rel_tol.is_some();
+	// a non-finite input switches the tolerances off (see the params' rank truncation section)
+	let reveal = has_tol && matrix.is_all_finite();
+	// `max_rank` factors only the leading `r` columns; without it `r = size`, as before
+	let r = config.max_rank.map_or(size, |r| Ord::min(r, size));
 	for i in 0..m {
 		let p = &mut perm[i];
 		*p = truncate(i);
@@ -663,32 +716,49 @@ pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 	let (mut transpositions, _) =
 		stack.rb_mut().make_with(size, |_| truncate(0));
 	let transpositions = transpositions.as_mut();
+	// the recursion applies its row swaps to the columns past `r` but leaves them otherwise
+	// untouched: the Schur complement update of a truncated factorization is never run
 	let n_transpositions = lu_in_place_recursion(
 		matrix.rb_mut(),
 		0,
-		size,
-		transpositions.as_mut(),
+		r,
+		&mut transpositions[..r],
 		par.reborrow(),
 		params,
 	);
-	for idx in 0..size {
+	for idx in 0..r {
 		let t = transpositions[idx];
 		perm.as_mut().swap(idx, idx + t.zx());
 	}
-	if m < n {
-		let (left, right) = matrix.split_at_col_mut(size);
+	// `U[:r, r:]`: for `r = size` this is the wide matrix's solve (`m < n`) and nothing otherwise
+	if r < n {
+		let (left, right) = matrix.rb_mut().split_at_col_mut(r);
 		linalg::triangular_solve::solve_unit_lower_triangular_in_place(
-			left.rb(),
-			right,
+			left.rb().get(..r, ..),
+			right.get_mut(..r, ..),
 			par,
 		);
 	}
 	for i in 0..m {
 		perm_inv[perm[i].zx()] = truncate(i);
 	}
+	let mut rank = r;
+	if reveal && r > 0 {
+		let threshold = linalg::lu::rank_threshold::<T>(
+			config.abs_tol,
+			config.rel_tol,
+			&matrix[(0, 0)].abs(),
+		);
+		if let Some(k) = (0..r)
+			.find(|&k| linalg::lu::rank_rejects::<T>(&matrix[(k, k)].abs(), &threshold))
+		{
+			rank = k;
+		}
+	}
 	(
 		PartialPivLuInfo {
 			transposition_count: n_transpositions,
+			rank,
 		},
 		unsafe { PermRef::new_unchecked(perm, perm_inv, m) },
 	)

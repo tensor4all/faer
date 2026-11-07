@@ -346,15 +346,27 @@ fn lu_in_place_unblocked<T: ComplexField>(
 	par: Par,
 	transpose: bool,
 	params: Spec<FullPivLuParams, T>,
-) -> usize {
+) -> (usize, usize) {
 	// the parallel arm is the only reader (absent without `rayon`)
 	let _ = &best;
 	let params = params.config;
+	// with any truncation option set the rank is revealed, unless the input holds a non-finite
+	// entry: then the tolerances are off and the rank is not truncated below `max_rank` (one pass
+	// over the input, skipped when no option is set)
+	let reveal = (params.max_rank.is_some()
+		|| params.abs_tol.is_some()
+		|| params.rel_tol.is_some())
+		&& A.is_all_finite();
 	let mut n_trans = 0;
 	let (m, n) = A.shape();
 	if m == 0 || n == 0 {
-		return 0;
+		return (0, 0);
 	}
+	let size = Ord::min(m, n);
+	// `max_rank` caps the steps; without it the loop runs to `size` as before
+	let max_rank = params.max_rank.map_or(size, |r| Ord::min(r, size));
+	let mut rank = max_rank;
+	let mut threshold = None;
 	let mut par = par;
 	// `Never` keeps the whole call sequential (the steps decide their own width otherwise)
 	if matches!(params.par_threshold, ParThreshold::Never) {
@@ -363,7 +375,28 @@ fn lu_in_place_unblocked<T: ComplexField>(
 	let mut A = A;
 	let (mut max_row, mut max_col, mut max_score) = best_in_matrix(A.rb());
 	for k in 0..Ord::min(m, n) {
-		if max_score < min_positive() {
+		// The stop of the rank truncation: `max_rank` pivots accepted, or the next pivot (the
+		// largest entry of the Schur complement, already found by the previous step's fused
+		// update) fails the tolerance. The Schur complement is left in the trailing block and
+		// the remaining steps -- their rank-one updates -- are not run.
+		let mut stop = k == max_rank;
+		if reveal && !stop && max_score >= min_positive() {
+			let pivot = A[(max_row, max_col)].abs();
+			if k == 0 {
+				threshold = linalg::lu::rank_threshold::<T>(
+					params.abs_tol,
+					params.rel_tol,
+					&pivot,
+				);
+			}
+			stop = linalg::lu::rank_rejects::<T>(&pivot, &threshold);
+		}
+		if stop || max_score < min_positive() {
+			// an exactly zero (or subnormal) Schur complement stopped the factorization before
+			// truncation existed; it counts as the stop when the rank is revealed
+			if reveal {
+				rank = k;
+			}
 			for (i, (row, col)) in
 				core::iter::zip(&mut row_trans[k..], &mut col_trans[k..])
 					.enumerate()
@@ -463,15 +496,52 @@ fn lu_in_place_unblocked<T: ComplexField>(
 		max_row += k + 1;
 		max_col += k + 1;
 	}
-	n_trans
+	(n_trans, rank)
 }
 /// $LU$ factorization tuning parameters
+///
+/// # Rank truncation
+///
+/// `max_rank`, `abs_tol` and `rel_tol` are all `None` by default, and then the factorization runs
+/// to `min(m, n)` exactly as without them and reports `rank = min(m, n)`. Setting any of them stops
+/// the factorization after `rank` pivots and reports that number in [`FullPivLuInfo::rank`]:
+///
+/// - `max_rank`: at most this many pivots are accepted (clamped to `min(m, n)`).
+/// - `abs_tol`, `rel_tol`: the pivot of step `k` is accepted while
+///   `|pivot_k| > max(abs_tol, rel_tol * |pivot_0|)`, where `|.|` is the modulus and an absent
+///   tolerance counts as `0`. `rel_tol` is measured against the **first** pivot `pivot_0`, which
+///   full pivoting picks as the largest entry of the matrix, **not** against the previous pivot;
+///   relative to the previous pivot would be a different stopping rule. The first rejected pivot
+///   ends the factorization. Since each pivot is the largest entry of the current Schur
+///   complement, a stop at step `r` bounds the residual `A - P^T L U Q^T` entrywise by the
+///   rejected pivot (up to the `abs1` versus modulus factor `sqrt(2)` for complex entries).
+/// - An exactly zero or subnormal Schur complement has always stopped this factorization; with
+///   any option set it is reported as the stop (`rank = k`), without them `rank` stays
+///   `min(m, n)` as before.
+/// - Non-finite input: if the matrix holds a NaN or an infinity, the tolerances are ignored and
+///   `rank` is `min(m, n)` capped by `max_rank`, so a non-finite entry never shows up as a
+///   truncated rank; it reaches the factors as in the untruncated factorization. (A tolerance is
+///   also ignored when the threshold itself is not finite.)
+///
+/// On a stop at `rank = r`: the first `r` entries of the row and column permutations are the
+/// selected pivots and the rest are the identity on the remaining indices, `L[:, :r]` (unit lower)
+/// and `U[:r, :]` are the factors, and the trailing `(m - r) x (n - r)` block holds the Schur
+/// complement `A22 - L21 U12` of the permuted matrix, which is the residual of the rank-`r`
+/// approximation. The solve, inverse and reconstruct routines of this module assume the full
+/// factorization and must not be given a truncated one.
 #[derive(Copy, Clone, Debug)]
 pub struct FullPivLuParams {
 	/// floor of the parallel regions: [`ParThreshold::Derived`] (the default) runs a step in
 	/// parallel when its serial time pays for one section; [`ParThreshold::Fixed`] counts
 	/// elements of the trailing block `(m-k-1)*(n-k-1)`
 	pub par_threshold: ParThreshold,
+	/// stop after at most this many pivots (see [rank truncation](FullPivLuParams#rank-truncation))
+	pub max_rank: Option<usize>,
+	/// absolute pivot tolerance (see [rank truncation](FullPivLuParams#rank-truncation))
+	pub abs_tol: Option<f64>,
+	/// pivot tolerance relative to the first pivot (see
+	/// [rank truncation](FullPivLuParams#rank-truncation))
+	pub rel_tol: Option<f64>,
 	#[doc(hidden)]
 	pub non_exhaustive: NonExhaustive,
 }
@@ -480,6 +550,9 @@ impl<T: ComplexField> Auto<T> for FullPivLuParams {
 	fn auto() -> Self {
 		Self {
 			par_threshold: ParThreshold::Derived,
+			max_rank: None,
+			abs_tol: None,
+			rel_tol: None,
 			non_exhaustive: NonExhaustive(()),
 		}
 	}
@@ -501,6 +574,9 @@ pub fn lu_in_place_scratch<I: Index, T: ComplexField>(
 #[derive(Copy, Clone, Debug)]
 pub struct FullPivLuInfo {
 	pub transposition_count: usize,
+	/// number of accepted pivots: `min(m, n)` unless a
+	/// [rank truncation](FullPivLuParams#rank-truncation) option stopped the factorization
+	pub rank: usize,
 }
 pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 	mat: MatMut<'_, T>,
@@ -551,7 +627,7 @@ pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 	let col_transpositions = col_transpositions.as_mut();
 	let (mut best, _) = stack.make_with(par.degree(), |_| (0usize, 0usize, zero::<T::Real>()));
 	let best = best.as_mut();
-	let n_transpositions = if mat.row_stride().abs() < mat.col_stride().abs() {
+	let (n_transpositions, rank) = if mat.row_stride().abs() < mat.col_stride().abs() {
 		lu_in_place_unblocked(
 			mat,
 			row_transpositions,
@@ -594,6 +670,7 @@ pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 		(
 			FullPivLuInfo {
 				transposition_count: n_transpositions,
+				rank,
 			},
 			PermRef::new_unchecked(row_perm, row_perm_inv, M),
 			PermRef::new_unchecked(col_perm, col_perm_inv, N),
