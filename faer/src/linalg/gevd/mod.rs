@@ -1548,10 +1548,11 @@ mod tests {
 		solve_shifted_1x1(smin, 1.0, 1.0, 1.0, &mut b, 1.0);
 		core::assert!(b.is_finite(), "{b}");
 		core::assert!(b > 0.0, "{b}");
-		// a subnormal, nonzero shift: dividing by it *and* by `smin` used to
-		// overflow
+		// a tiny, representable denominator: dividing by it *and* by `smin` used to
+		// overflow to infinity. `1.0 + 1e-16` was meant to be that denominator, but it
+		// rounds to `1.0` in f64, so it exercised the exact-zero branch instead.
 		let mut b = 1.0_f64;
-		solve_shifted_1x1(smin, 1.0, 1.0, 1.0, &mut b, 1.0 + 1e-16);
+		solve_shifted_1x1(smin, 1.0, 1e-300, 1.0, &mut b, 0.0);
 		core::assert!(b.is_finite(), "{b}");
 	}
 
