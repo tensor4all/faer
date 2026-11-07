@@ -558,7 +558,11 @@ pub struct PartialPivLuParams {
 	pub non_exhaustive: NonExhaustive,
 }
 /// information about the resulting $LU$ factorization
+///
+/// The type is `#[non_exhaustive]`, so a later version can add a field without breaking
+/// callers that only read the ones they need.
 #[derive(Copy, Clone, Debug)]
+#[non_exhaustive]
 pub struct PartialPivLuInfo {
 	/// number of transpositions that were performed, can be used to compute
 	/// the determinant of $P$

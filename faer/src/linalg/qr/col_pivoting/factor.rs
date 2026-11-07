@@ -91,6 +91,36 @@ fn update_mat_and_dot_simd<T: ComplexField>(
 	)
 }
 /// $QR$ factorization with column pivoting tuning parameters
+///
+/// # Rank truncation
+///
+/// `max_rank`, `abs_tol` and `rel_tol` are all `None` by default, and then the
+/// factorization runs to `min(m, n)` exactly as without them and reports
+/// `rank = min(m, n)`. Setting any of them reports the number of accepted pivots in
+/// [`ColPivQrInfo::rank`]:
+///
+/// - `max_rank = Some(r)`: only the first `r` steps are factored (clamped to `min(m, n)`),
+///   and the remaining steps' trailing updates are skipped, so the work is `O(m n r)`
+///   instead of `O(m n min(m, n))`. Rows `0..r` of the stored factor are the full
+///   factorization's first `r` rows, and the `(m - r) x (n - r)` block below them is the
+///   Schur complement after those steps.
+/// - `abs_tol`, `rel_tol`: the pivot of step `k` is accepted while
+///   `|R[k, k]| > max(abs_tol, rel_tol * |R[0, 0]|)`, where `|.|` is the modulus and an
+///   absent tolerance counts as `0`; `rank` is the index of the first rejected diagonal
+///   entry. `rel_tol` is measured against the **first** diagonal entry `R[0, 0]`, **not**
+///   against the previous one. Column pivoting picks the largest remaining column norm at
+///   every step, so this diagonal test is rank-revealing only up to that rule (LAPACK's
+///   `xgeqp3` + `xlaic1` estimate is incremental); the tolerance is checked on the computed
+///   factor, so it does not shorten the factorization; only `max_rank` does.
+/// - Non-finite input: if the matrix holds a NaN or an infinity, the tolerances are
+///   ignored and `rank` is `min(m, n)` capped by `max_rank`, so a non-finite entry never
+///   shows up as a truncated rank. A NaN diagonal entry is never rejected, and a tolerance
+///   is ignored when the threshold itself is not finite.
+///
+/// On `rank = r`: the first `r` entries of the permutation are the selected columns,
+/// `R[:r, :]` (with everything below its diagonal zero) and the first `r` reflectors are
+/// the rank-`r` factorization. The solve, inverse and reconstruct routines of this module
+/// assume the full factorization and must not be given a truncated one.
 #[derive(Copy, Clone, Debug)]
 pub struct ColPivQrParams {
 	/// threshold at which blocking algorithms should be disabled
@@ -99,6 +129,14 @@ pub struct ColPivQrParams {
 	/// parallel when its serial time pays for one section; [`ParThreshold::Fixed`] counts
 	/// elements of the trailing block `(m-k-1)*(n-k-1)`
 	pub par_threshold: ParThreshold,
+	/// factor at most this many steps (see
+	/// [rank truncation](ColPivQrParams#rank-truncation))
+	pub max_rank: Option<usize>,
+	/// absolute diagonal tolerance (see [rank truncation](ColPivQrParams#rank-truncation))
+	pub abs_tol: Option<f64>,
+	/// diagonal tolerance relative to the first one (see
+	/// [rank truncation](ColPivQrParams#rank-truncation))
+	pub rel_tol: Option<f64>,
 	#[doc(hidden)]
 	pub non_exhaustive: NonExhaustive,
 }
@@ -108,6 +146,9 @@ impl<T: ComplexField> Auto<T> for ColPivQrParams {
 		Self {
 			blocking_threshold: 48 * 48,
 			par_threshold: ParThreshold::Derived,
+			max_rank: None,
+			abs_tol: None,
+			rel_tol: None,
 			non_exhaustive: NonExhaustive(()),
 		}
 	}
@@ -126,6 +167,11 @@ fn qr_in_place_unblocked<'out, I: Index, T: ComplexField>(
 	let n = A.ncols();
 	let size = H.ncols();
 	let params = params.config;
+	// a non-finite input switches the tolerances off (see the params' rank truncation
+	// section), and `max_rank` factors only the leading `r` steps
+	let has_tol = params.abs_tol.is_some() || params.rel_tol.is_some();
+	let reveal = has_tol && A.rb().is_all_finite();
+	let steps = params.max_rank.map_or(size, |r| Ord::min(r, size));
 	let mut A = A;
 	let mut H = H;
 	let mut par = par;
@@ -171,7 +217,7 @@ fn qr_in_place_unblocked<'out, I: Index, T: ComplexField>(
 		// next step opens with when the update was not delayed
 		let mut width = par.degree();
 		'unscale: {
-			for k in 0..size {
+			for k in 0..steps {
 				let mut new_best = zero::<T::Real>();
 				let mut best_col = k;
 				for j in k..n {
@@ -244,6 +290,9 @@ fn qr_in_place_unblocked<'out, I: Index, T: ComplexField>(
 					householder::make_householder_in_place(B00, B10.rb_mut());
 				let ref tau_inv = tau.recip();
 				H[k] = tau.to_cplx();
+				// the last step of the full factorization has nothing left to update;
+				// a truncated one stops after this step's update instead (below), so
+				// its rows are the full factorization's first `steps` rows
 				if k + 1 == size {
 					if delayed_update {
 						zip!(B01.rb_mut(), dot.rb()).for_each(
@@ -265,48 +314,49 @@ fn qr_in_place_unblocked<'out, I: Index, T: ComplexField>(
 				);
 				if delayed_update {
 					let A10 = A10.col(k - 1).get(1..);
-					with_width(par.reborrow(), width, |par| {
-						match par {
-							Par::Seq => {
-								update_mat_and_dot_simd(
-									norm.rb_mut(),
-									dot.rb_mut(),
-									B01.rb_mut(),
-									B11.rb_mut().try_as_col_major_mut().unwrap(),
-									A10.try_as_col_major().unwrap(),
-									B10.rb().try_as_col_major().unwrap(),
-									l.copy(),
-									tau_inv.copy(),
-									simd_align(k + 1),
-								);
-							},
-		#[cfg(feature = "rayon")]
-							_ => {
-							let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
-								let nthreads = nthreads.get();
-								use rayon::prelude::*;
-								crate::utils::thread::for_each(par, 
-									nthreads,
-									norm.par_partition_mut(nthreads)
-										.zip(dot.par_partition_mut(nthreads))
-										.zip(B01.par_partition_mut(nthreads))
-										.zip(B11.par_col_partition_mut(nthreads)),
-									|(((norm, dot), B01), B11)| {
-										update_mat_and_dot_simd(
-											norm,
-											dot,
-											B01,
-											B11.try_as_col_major_mut().unwrap(),
-											A10.try_as_col_major().unwrap(),
-											B10.rb().try_as_col_major().unwrap(),
-											l.copy(),
-											tau_inv.copy(),
-											simd_align(k + 1),
-										);
-									},
-								);
-							},
-						}
+					with_width(par.reborrow(), width, |par| match par {
+						Par::Seq => {
+							update_mat_and_dot_simd(
+								norm.rb_mut(),
+								dot.rb_mut(),
+								B01.rb_mut(),
+								B11.rb_mut().try_as_col_major_mut().unwrap(),
+								A10.try_as_col_major().unwrap(),
+								B10.rb().try_as_col_major().unwrap(),
+								l.copy(),
+								tau_inv.copy(),
+								simd_align(k + 1),
+							);
+						},
+						#[cfg(feature = "rayon")]
+						_ => {
+							let nthreads =
+								core::num::NonZeroUsize::new(par.degree())
+									.unwrap();
+							let nthreads = nthreads.get();
+							use rayon::prelude::*;
+							crate::utils::thread::for_each(
+								par,
+								nthreads,
+								norm.par_partition_mut(nthreads)
+									.zip(dot.par_partition_mut(nthreads))
+									.zip(B01.par_partition_mut(nthreads))
+									.zip(B11.par_col_partition_mut(nthreads)),
+								|(((norm, dot), B01), B11)| {
+									update_mat_and_dot_simd(
+										norm,
+										dot,
+										B01,
+										B11.try_as_col_major_mut().unwrap(),
+										A10.try_as_col_major().unwrap(),
+										B10.rb().try_as_col_major().unwrap(),
+										l.copy(),
+										tau_inv.copy(),
+										simd_align(k + 1),
+									);
+								},
+							);
+						},
 					});
 				} else {
 					dot.copy_from(B01.rb());
@@ -328,6 +378,11 @@ fn qr_in_place_unblocked<'out, I: Index, T: ComplexField>(
 						},
 					);
 				}
+				// the truncated factorization has factored its last step: the steps
+				// below would only update the block this one just wrote
+				if k + 1 == steps {
+					break 'unscale;
+				}
 			}
 		}
 		zip!(A.rb_mut()).for_each_triangular_upper(
@@ -338,9 +393,24 @@ fn qr_in_place_unblocked<'out, I: Index, T: ComplexField>(
 	for j in 0..n {
 		col_perm_inv[col_perm[j].zx()] = I::truncate(j);
 	}
+	// the diagonal of the unscaled factor, with the tolerances of the first step
+	let mut rank = steps;
+	if reveal && steps > 0 {
+		let threshold = linalg::lu::rank_threshold::<T>(
+			params.abs_tol,
+			params.rel_tol,
+			&A[(0, 0)].abs(),
+		);
+		if let Some(k) = (0..steps).find(|&k| {
+			linalg::lu::rank_rejects::<T>(&A[(k, k)].abs(), &threshold)
+		}) {
+			rank = k;
+		}
+	}
 	(
 		ColPivQrInfo {
 			transposition_count: n_trans,
+			rank,
 		},
 		unsafe { PermRef::new_unchecked(col_perm, col_perm_inv, n) },
 	)
@@ -362,11 +432,18 @@ pub fn qr_in_place_scratch<I: Index, T: ComplexField>(
 	linalg::temp_mat_scratch::<T>(ncols, 2)
 }
 /// information about the resulting $QR$ factorization.
+///
+/// The type is `#[non_exhaustive]`, so a later version can add a field without breaking
+/// callers that only read the ones they need.
 #[derive(Copy, Clone, Debug)]
+#[non_exhaustive]
 pub struct ColPivQrInfo {
 	/// number of transpositions that were performed, can be used to compute
 	/// the determinant of $P$.
 	pub transposition_count: usize,
+	/// number of accepted steps: `min(m, n)` unless a
+	/// [rank truncation](ColPivQrParams#rank-truncation) option is set
+	pub rank: usize,
 }
 #[track_caller]
 pub fn qr_in_place<'out, I: Index, T: ComplexField>(
@@ -425,9 +502,13 @@ pub fn qr_in_place<'out, I: Index, T: ComplexField>(
 		stack,
 		params,
 	);
+	// a truncated factorization computed only the first `steps` reflectors, so the
+	// conversion below stops there: the compact form of a reflector that was not
+	// computed would read the caller's buffer as if it held one
+	let steps = params.config.max_rank.map_or(size, |r| Ord::min(r, size));
 	let mut j = 0;
-	while j < size {
-		let block_size = Ord::min(block_size, size - j);
+	while j < steps {
+		let block_size = Ord::min(block_size, steps - j);
 		let mut H = H
 			.rb_mut()
 			.subcols_mut(j, block_size)
