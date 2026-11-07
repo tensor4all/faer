@@ -48,6 +48,15 @@ faer-traits = { package = "t4a-faer-traits", path = "../faer-traits", version = 
 # at run time on macOS >= 26 + FEAT_SME (+ FEAT_SME_F64F64 / FEAT_SME_F32F32).
 # Pinned to the crates.io release of the fork (`t4a-gemm` 0.20.1) so a plain
 # `cargo build` needs no git access.
+#
+# `t4a-gemm-common` must resolve to >= 0.20.4. In 0.20.1 the RHS packing flags were
+# `alloc::vec![false; mc / MR]` (gemm-common/src/gemm.rs:490, and :654 on the threaded
+# path), so on aarch64 -- where `DEFAULT_RHS_PACKING_THRESHOLD` is 2 rather than 128 --
+# every `gemm` call with `m > 2*MR` allocated twice. A single values-only SVD makes 37
+# such calls, which is the 73/74 heap allocations `tests/svd_values_no_alloc.rs` exists
+# to catch. 0.20.4 took those buffers off the heap; the facade crate still says 0.20.1,
+# so the floor lives in `Cargo.lock`. If that entry is ever downgraded, the allocation
+# test fails again on aarch64 (see #299).
 gemm = { package = "t4a-gemm", version = "0.20.1", default-features = false }
 nano-gemm = { version = "0.2.2", default-features = false }
 
