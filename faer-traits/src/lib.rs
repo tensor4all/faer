@@ -2824,6 +2824,12 @@ impl<T: RealField<Unit: ComplexField>> ComplexField for Complex<T> {
 		let re = T::simd_abs_max(ctx, value.re);
 		let im = T::simd_abs_max(ctx, value.im);
 		let v = T::simd_select(ctx, T::simd_greater_than(ctx, re, im), re, im);
+		// `re > im` is false when either side is NaN, and the select
+		// then returns `im`: a NaN real part would otherwise read as the
+		// finite imaginary magnitude. A NaN imaginary part already lands
+		// on `im`, so only the real side needs the mask.
+		let re_nan = T::simd_not_mask(ctx, T::simd_equal(ctx, re, re));
+		let v = T::simd_select(ctx, re_nan, re, v);
 		Complex { re: v, im: v }
 	}
 
@@ -3558,7 +3564,17 @@ impl ComplexField for ComplexImpl<f32> {
 			let value: Complex<f32> = bytemuck::cast(value);
 			let re = value.re.abs();
 			let im = value.im.abs();
-			let v = if re > im { re } else { im };
+			// `re > im` is false when either side is NaN, so the unordered
+			// comparison alone would report the finite part as the magnitude.
+			let v = if re.is_nan() {
+				re
+			} else if im.is_nan() {
+				im
+			} else if re > im {
+				re
+			} else {
+				im
+			};
 			bytemuck::cast(Complex { re: v, im: v })
 		} else {
 			panic!();
@@ -4225,7 +4241,17 @@ impl ComplexField for ComplexImpl<f64> {
 			let value: Complex<f64> = bytemuck::cast(value);
 			let re = value.re.abs();
 			let im = value.im.abs();
-			let v = if re > im { re } else { im };
+			// `re > im` is false when either side is NaN, so the unordered
+			// comparison alone would report the finite part as the magnitude.
+			let v = if re.is_nan() {
+				re
+			} else if im.is_nan() {
+				im
+			} else if re > im {
+				re
+			} else {
+				im
+			};
 			bytemuck::cast(Complex { re: v, im: v })
 		} else {
 			panic!();
@@ -5832,6 +5858,38 @@ mod tests {
 		// 1 / 2^-1074 exceeds the largest finite value
 		let (re, _) = recip_impl(f64::from_bits(1), 0.0);
 		assert_eq!(re, f64::INFINITY);
+	}
+
+	/// a NaN in either part of a complex value must survive `abs_max`
+	/// (`tensor4all/faer#320`): the unordered `re > im` comparison
+	/// alone reports the finite part when the other one is NaN.
+	#[test]
+	fn complex_abs_max_propagates_nan() {
+		struct AbsMax {
+			re: f64,
+			im: f64,
+		}
+		impl pulp::WithSimd for AbsMax {
+			type Output = f64;
+			#[inline(always)]
+			fn with_simd<S: pulp::Simd>(self, simd: S) -> f64 {
+				let ctx = <Complex<f64> as ComplexField>::simd_ctx(simd);
+				let ctx = SimdCtx::<Complex<f64>, S>::new(&ctx);
+				let value = ctx.splat(Complex {
+					re: self.re,
+					im: self.im,
+				});
+				ctx.reduce_max_real(ctx.abs_max(value))
+			}
+		}
+		let arch = pulp::Arch::new();
+		let abs_max = |re, im| arch.dispatch(AbsMax { re, im });
+		assert_eq!(abs_max(1.0, 2.0), 2.0);
+		assert_eq!(abs_max(-3.0, 2.0), 3.0);
+		assert_eq!(abs_max(-3.0, -4.0), 4.0);
+		assert!(abs_max(f64::NAN, 1.0).is_nan());
+		assert!(abs_max(1.0, f64::NAN).is_nan());
+		assert!(abs_max(f64::NAN, f64::NAN).is_nan());
 	}
 
 	/// `abs` of each `(re, im)` through `Complex<T>` and the `repr(transparent)`

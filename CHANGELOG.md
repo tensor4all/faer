@@ -17,6 +17,14 @@ Changes since `t4a-faer` 0.32.0 (tag `faer-v0.32.0`). Numbers are tensor4all/fae
   were affected, and `varm` also subtracted the mean of the mirrored row. The input rows were reversed to get a positive stride, but `out` and the
   `col_mean` argument were not. They are now reversed together with the input (#317).
 
+- The complex `simd_abs_max` keeps a NaN in either part (#320). The unordered `re > im` select
+  returned the finite imaginary magnitude when the real part was NaN, while a NaN imaginary part did
+  return NaN. The generic `Complex<T>` SIMD path now also masks the real side, and the
+  `ComplexImpl<f32>` / `ComplexImpl<f64>` scalar fallbacks test both parts before the comparison. No
+  in-tree type reaches either path (native `c32` / `c64` go through the real coercion in `norm_max`),
+  so no existing result changes. No performance claim: two mask ops per SIMD chunk on a path nothing
+  in the tree reaches.
+
 # t4a-faer 0.32.0 (tensor4all fork; with t4a-faer-traits 0.24.3)
 
 Changes since `t4a-faer` 0.31.0 (tag `faer-v0.31.0`). Numbers are tensor4all/faer issues or PRs; each change has its row in `PATCHSET.md`.
