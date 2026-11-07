@@ -1654,6 +1654,9 @@ impl<
 	}
 
 	/// returns the maximum norm of `self`
+	///
+	/// the result is NaN if any entry (or either part of a complex entry) is
+	/// NaN, and zero if `self` is empty
 	#[inline]
 	pub fn norm_max(&self) -> Real<T>
 	where

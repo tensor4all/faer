@@ -585,10 +585,12 @@ fn col_mean_ignore<T: ComplexField>(out: ColMut<'_, T>, mat: MatRef<'_, T>) {
 	} else {
 		mat.reverse_cols()
 	};
-	let mat = if mat.row_stride() >= 0 {
-		mat
+	// rows are the output axis: reverse `out` with them, or entry `i` lands at
+	// `nrows - 1 - i` (#317)
+	let (mat, out) = if mat.row_stride() >= 0 {
+		(mat, out)
 	} else {
-		mat.reverse_rows()
+		(mat.reverse_rows(), out.reverse_rows_mut())
 	};
 	if const { T::SIMD_CAPABILITIES.is_simd() } {
 		if mat.ncols() > 1 && mat.col_stride() == 1 {
@@ -610,10 +612,16 @@ fn col_varm_ignore<T: ComplexField>(
 	} else {
 		mat.reverse_cols()
 	};
-	let mat = if mat.row_stride() >= 0 {
-		mat
+	// rows are the output axis: reverse `out` and `col_mean` with them, or
+	// entry `i` lands at `nrows - 1 - i` (#317)
+	let (mat, out, col_mean) = if mat.row_stride() >= 0 {
+		(mat, out, col_mean)
 	} else {
-		mat.reverse_rows()
+		(
+			mat.reverse_rows(),
+			out.reverse_rows_mut(),
+			col_mean.reverse_rows(),
+		)
 	};
 	if const { T::SIMD_CAPABILITIES.is_simd() } {
 		if mat.ncols() > 1 && mat.col_stride() == 1 {
@@ -635,10 +643,12 @@ fn col_mean_propagate<T: ComplexField>(out: ColMut<'_, T>, mat: MatRef<'_, T>) {
 	} else {
 		mat.reverse_cols()
 	};
-	let mat = if mat.row_stride() >= 0 {
-		mat
+	// rows are the output axis: reverse `out` with them, or entry `i` lands at
+	// `nrows - 1 - i` (#317)
+	let (mat, out) = if mat.row_stride() >= 0 {
+		(mat, out)
 	} else {
-		mat.reverse_rows()
+		(mat.reverse_rows(), out.reverse_rows_mut())
 	};
 	if const { T::SIMD_CAPABILITIES.is_simd() } {
 		if mat.ncols() > 1 && mat.col_stride() == 1 {
@@ -663,10 +673,16 @@ fn col_varm_propagate<T: ComplexField>(
 	} else {
 		mat.reverse_cols()
 	};
-	let mat = if mat.row_stride() >= 0 {
-		mat
+	// rows are the output axis: reverse `out` and `col_mean` with them, or
+	// entry `i` lands at `nrows - 1 - i` (#317)
+	let (mat, out, col_mean) = if mat.row_stride() >= 0 {
+		(mat, out, col_mean)
 	} else {
-		mat.reverse_rows()
+		(
+			mat.reverse_rows(),
+			out.reverse_rows_mut(),
+			col_mean.reverse_rows(),
+		)
 	};
 	if const { T::SIMD_CAPABILITIES.is_simd() } {
 		if mat.ncols() > 1 && mat.col_stride() == 1 {
@@ -1016,5 +1032,111 @@ mod tests {
 						+ (A[(1, 1)] - col_mean[1]).abs2(),
 				]
 		);
+	}
+
+	/// NaN-aware comparison with a relative tolerance: the view and the owned
+	/// copy may take different kernels (row-major SIMD vs. fallback).
+	fn close<T: ComplexField>(a: &T, b: &T) -> bool {
+		if is_nan(a) || is_nan(b) {
+			return is_nan(a) && is_nan(b);
+		}
+		let scale = abs(a).fmax(abs(b)).fmax(one::<T::Real>());
+		abs(&(a - b)) <= scale * from_f64::<T::Real>(1e-5)
+	}
+
+	/// distinct per-row values (so a reversed output is visible) with one NaN
+	fn sample<T: ComplexField>(m: usize, n: usize) -> Mat<T> {
+		Mat::from_fn(m, n, |i, j| {
+			if (i, j) == (1, 2) {
+				nan()
+			} else {
+				from_f64::<T>(((i + 1) * (j + 2) + 3 * i) as f64)
+			}
+		})
+	}
+
+	/// `col_*` on `reverse_rows` and `row_*` on `reverse_cols` agree with the
+	/// same matrix copied to an owned, positively strided one (#317).
+	fn check_reversed_output_axis<T: ComplexField>() {
+		let (m, n) = (5, 9);
+		for row_major in [false, true] {
+			let base = sample::<T>(m, n);
+			let row_major_base = base.transpose().to_owned();
+			let a = if row_major {
+				row_major_base.transpose()
+			} else {
+				base.as_ref()
+			};
+			for nan in [NanHandling::Propagate, NanHandling::Ignore] {
+				// col_* with a negative row stride
+				let view = a.reverse_rows();
+				assert!(view.row_stride() < 0);
+				let owned = view.to_owned();
+				let mut mean_owned = Col::<T>::zeros(m);
+				col_mean(mean_owned.as_mut(), owned.as_ref(), nan);
+				let mut mean_view = Col::<T>::zeros(m);
+				col_mean(mean_view.as_mut(), view, nan);
+				let mut var_owned = Col::<T::Real>::zeros(m);
+				col_varm(
+					var_owned.as_mut(),
+					owned.as_ref(),
+					mean_owned.as_ref(),
+					nan,
+				);
+				let mut var_view = Col::<T::Real>::zeros(m);
+				col_varm(var_view.as_mut(), view, mean_owned.as_ref(), nan);
+				for i in 0..m {
+					assert!(close(&mean_view[i], &mean_owned[i]));
+					assert!(close(&var_view[i], &var_owned[i]));
+				}
+
+				// row_* with a negative column stride
+				let view = a.transpose().reverse_cols();
+				assert!(view.col_stride() < 0);
+				let owned = view.to_owned();
+				let mut mean_owned = Row::<T>::zeros(m);
+				row_mean(mean_owned.as_mut(), owned.as_ref(), nan);
+				let mut mean_view = Row::<T>::zeros(m);
+				row_mean(mean_view.as_mut(), view, nan);
+				let mut var_owned = Row::<T::Real>::zeros(m);
+				row_varm(
+					var_owned.as_mut(),
+					owned.as_ref(),
+					mean_owned.as_ref(),
+					nan,
+				);
+				let mut var_view = Row::<T::Real>::zeros(m);
+				row_varm(var_view.as_mut(), view, mean_owned.as_ref(), nan);
+				for j in 0..m {
+					assert!(close(&mean_view[j], &mean_owned[j]));
+					assert!(close(&var_view[j], &var_owned[j]));
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn test_meanvar_reversed_output_axis() {
+		check_reversed_output_axis::<f64>();
+		check_reversed_output_axis::<f32>();
+		check_reversed_output_axis::<c64>();
+		check_reversed_output_axis::<c32>();
+	}
+
+	#[test]
+	fn test_row_meanvar_reverse_cols_issue_317() {
+		// the reproducer of #317: column j holds [0, 2(j+1)]
+		let a = Mat::<f64>::from_fn(2, 4, |i, j| {
+			(j + 1) as f64 * if i == 0 { 0.0 } else { 2.0 }
+		});
+		let r = a.reverse_cols();
+		for nan in [NanHandling::Propagate, NanHandling::Ignore] {
+			let mut mean = Row::<f64>::zeros(4);
+			row_mean(mean.as_mut(), r, nan);
+			assert!(mean == row![4.0, 3.0, 2.0, 1.0]);
+			let mut var = Row::<f64>::zeros(4);
+			row_varm(var.as_mut(), r, mean.as_ref(), nan);
+			assert!(var == row![32.0, 18.0, 8.0, 2.0]);
+		}
 	}
 }
