@@ -1745,6 +1745,52 @@ mod tests {
 	}
 
 	#[test]
+	fn lu_swap_stage_forks_a_square_matrix_too() {
+		// The shape people actually call. On a square matrix every recursion level narrows the
+		// matrix to the panel's own columns, so the swap stage has columns on one side only and
+		// that side takes the whole team -- the two-sided form the old test asserted is not
+		// reached here (that is #296). It must still fork.
+		//
+		// `ParThreshold::Fixed(0)` is deliberate: the derived floor comes from measured dispatch
+		// rates and therefore decides differently on different hosts, and this assertion is about
+		// the split the stage makes, not about the gate. Without it the test is a statement about
+		// the machine that ran it.
+		let n = 513;
+		let a = rand_mat(n, n, 11);
+		let mut params: crate::Spec<
+			crate::linalg::lu::partial_pivoting::factor::PartialPivLuParams,
+			f64,
+		> = Default::default();
+		params.par_threshold = crate::utils::cost::ParThreshold::Fixed(0);
+		let lu = |par: Par| {
+			let mut f = a.clone();
+			let mut perm = vec![0usize; n];
+			let mut perm_inv = vec![0usize; n];
+			let mut mem = dyn_stack::MemBuffer::new(
+				crate::linalg::lu::partial_pivoting::factor::lu_in_place_scratch::<usize, f64>(
+					n,
+					n,
+					par.shape(),
+					params,
+				),
+			);
+			crate::linalg::lu::partial_pivoting::factor::lu_in_place(
+				f.as_mut(),
+				&mut perm,
+				&mut perm_inv,
+				par,
+				dyn_stack::MemStack::new(&mut mem),
+				params,
+			);
+			f
+		};
+		let want = lu(Par::Seq);
+		let (got, st) = counted(6, lu);
+		assert!(st.split.iter().skip(2).any(|&w| w > 0), "{:?}", st.split);
+		assert!(max_diff(want.as_ref(), got.as_ref()) < 1e-8);
+	}
+
+	#[test]
 	fn join_sized_on_a_team_hands_out_exactly_the_team() {
 		use rayon::iter::IntoParallelIterator;
 		for left in 0..=7usize {
