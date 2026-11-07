@@ -4,6 +4,10 @@ pub use linalg::cholesky::llt::factor::LltError;
 use linalg::matmul::triangular::BlockStructure;
 #[derive(Copy, Clone, Debug)]
 pub struct PivLltParams {
+	/// number of columns the panel loop factors at a time; must be positive
+	///
+	/// Zero would leave `k` where it is and the factorization would not terminate, so it
+	/// is rejected by [`cholesky_in_place`] and its scratch query.
 	pub block_size: usize,
 	#[doc(hidden)]
 	pub non_exhaustive: NonExhaustive,
@@ -33,16 +37,33 @@ pub struct PivLltInfo {
 	/// number of transpositions that make up the permutation
 	pub transposition_count: usize,
 }
+/// computes the layout of required workspace for [`cholesky_in_place`].
+///
+/// # Panics
+/// Panics unless `params.block_size` is positive, which is the range
+/// [`cholesky_in_place`] factors in.
 #[inline]
+#[track_caller]
 pub fn cholesky_in_place_scratch<I: Index, T: ComplexField>(
 	dim: usize,
 	par: ParShape,
 	params: Spec<PivLltParams, T>,
 ) -> StackReq {
 	_ = par;
-	_ = params;
+	assert!(params.config.block_size > 0);
 	temp_mat_scratch::<T::Real>(dim, 2)
 }
+/// computes the pivoted Cholesky factorization `A = P L L^H P^T` in place.
+///
+/// `perm` receives the permutation and `perm_inv` its inverse. `params.block_size` is the
+/// number of columns factored per panel and must be positive.
+///
+/// # Panics
+/// Panics unless `a` is square, `n` fits `I`, and `params.block_size` is positive.
+///
+/// # Errors
+/// Returns [`LltError::NonPositivePivot`] with the index of the diagonal entry that was
+/// negative or NaN; the entries factored so far stay in `a`.
 #[track_caller]
 pub fn cholesky_in_place<'out, I: Index, T: ComplexField>(
 	a: MatMut<'_, T>,
@@ -55,6 +76,9 @@ pub fn cholesky_in_place<'out, I: Index, T: ComplexField>(
 	assert!(a.nrows() == a.ncols());
 	let n = a.nrows();
 	assert!(n <= I::Signed::MAX.zx());
+	// A zero block size skips the panel's pivot work and leaves `k` where it is, so the
+	// loop below would not terminate (#283); reject it before `a` is touched.
+	assert!(params.config.block_size > 0);
 	let mut rank = n;
 	let mut transposition_count = 0;
 	'exit: {
