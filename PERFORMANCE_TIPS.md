@@ -30,12 +30,14 @@ so this is where it shows; a vendor's `?gebrd` at 512 matches our 500.
 
 ## The team is the caller's, and it is held across the work
 
-`Par::Team` is the exclusive authority over the reserved members of a `threadteam` team. The members
-spin while the reservation is held and each keeps the range it had in the previous region, so a
-sequence of short regions pays no wake per region and a core's L2 keeps its slice of the trailing
-block across them: the blocked bidiagonalisation's two products per step went 10.3 and 10.6 ms to 2.7
-and 3.7 ms at 512, 8T, with nothing but the reservation (`docs/worklogs/2026-10-23-blocked-bidiag.md`;
-the reservation was a spindle group there, the mechanism threadteam kept when it replaced it).
+`Par::Team` is the exclusive authority over the reserved members of a `threadteam` team. A reserved
+member spins for a bounded budget and then parks; on x86-64 the budget is 300,000 polls (about 3-7 ms
+depending on the core's `PAUSE`), so a sequence of regions closer together than that pays no wake and
+a longer gap parks the members once. Each keeps the range it had in the previous region, so a core's
+L2 keeps its slice of the trailing block across them: the blocked bidiagonalisation's two products
+per step went 10.3 and 10.6 ms to 2.7 and 3.7 ms at 512, 8T, with nothing but the reservation
+(`docs/worklogs/2026-10-23-blocked-bidiag.md`; the reservation was a spindle group there, the
+mechanism threadteam kept when it replaced it).
 
 The library never builds a team; the width, the lifetime and the thread count are the caller's
 (`faer::team` is the route, not the policy). A caller that runs parallel work repeatedly owns the
@@ -61,19 +63,24 @@ calls it is the difference, and no measurement here shows `with_team` buying any
 
 Corollary: a region runs on the members of the token it was handed, never on a runtime outside it.
 The entry points of `utils::thread` (`for_each`, `for_each_with_par`, `join_raw`, `join_sized`,
-`split`, `with_width`) divide the token and deal the work to its members; a raw rayon iterator
-(`par_chunks_mut`, `par_iter`, `rayon::join`) instead takes its threads from rayon's global pool,
-which the caller's budget does not contain. The work leaves the team, the machine runs `width` more
-threads than the caller granted, and the region's own members sit parked at the section barrier while
-it happens.
+`split`, `with_width`) divide the token and deal the work to its members. A rayon iterator
+(`par_chunks_mut`, `par_iter`) is only a splitter there: `for_each` consumes its producer and deals
+the blocks to the team, so no rayon job is started and the machine does not run more threads than the
+caller granted. Rayon itself is a private pool in this fork (`threadteam` builds its own
+`rayon::ThreadPool` and never starts the process-global one), so driving the iterator with rayon
+(`.for_each`, `rayon::join`) instead of handing it to `utils::thread` is what leaves the token's
+members for the calling thread's registry.
 
 ## A region costs about 1.5 us on a team, and a threaded gemv of 512 is 6 us
 
 Measured with `probes/gemv-threads` (faer-benchmark, diagnostic): one 8-job region on a held team
 costs 1.75 us, and `threadteam`'s `aarch64-apple` row puts a section at 1.4 us at width 6 and 3.0 us
-at width 2. Below `256 * 256` elements the matvec is sequential by its own threshold. A step that
-issues two regions pays about 3-4 us of synchronisation; 384 steps are 1.5 ms. Design the loop so
-that the regions are the big products, not the short ones.
+at width 2. The matvec path is taken only for a one-row or one-column destination (`m == 1` or
+`n == 1`; the one-column case is direct, the one-row case transposes), and its width is
+`cost::par_width` over `m*n` elements at `rate::matvec` with one section, not a fixed element count:
+below the width that pays it runs sequentially. A step that issues
+two regions pays about 3-4 us of synchronisation; 384 steps are 1.5 ms. Design the loop so that the
+regions are the big products, not the short ones.
 
 ## Short products are bandwidth-bound in L2, not call-bound
 
@@ -108,8 +115,8 @@ stage further, time it at block widths that differ by 4x: if it does not follow 
 ## An overwrite-only entry inherits the replace entry's dispatch
 
 `matmul_with_conj_uninit` writes a fresh destination and so skipped the replace entry's one-row
-`matvec` branch, landing on the full GEMM kernel: 2.2x slower and different last bits on x86 AVX2,
-while aarch64's fallback to `matmul_with_conj` was unaffected. When an entry promises only that it
+(`m == 1`) `matvec` branch, landing on the full GEMM kernel: 2.2x slower and different last bits on
+x86 AVX2, while aarch64's fallback to `matmul_with_conj` was unaffected. When an entry promises only that it
 does not read the destination, keep the dispatch shared and pay the O(m*n) initialization instead of
 giving the kernel a second selection path (tensor4all/faer#200,
 `docs/worklogs/2026-11-03-matmul-uninit-thin.md`).
