@@ -63,7 +63,13 @@
 
 - `cargo test -p t4a-faer --lib`: `test result: ok. 679 passed; 0 failed; 162 ignored`.
 - Focused: `qr_rank_truncation` (5), `lsmr_scale` (5), `piv_llt_block_size` (5), `public_balance` (5,
-  four inherited), `matrix_free::bicgstab::tests` (9, four now asserting `Breakdown`).
+  four inherited), `matrix_free::bicgstab::tests` (9, four now asserting `Breakdown`),
+  `lsmr_initial_residual` (4 -- it caught the first version of the LSMR change, which reported
+  `abs_residual` in the scaled units), `gevd::tests::shifted_1x1_*`, and the seven `evd::balance`
+  doctests.
+- `cargo build -p t4a-faer --no-default-features --features std` and
+  `cargo test -p t4a-faer --no-default-features --features "std,linalg" --test lsmr_initial_residual
+  --test iteration_control` (the `ci.yml` lane) pass.
 - Mutation checks: disabling the LSMR scale (coefficient `1`) fails `lsmr_scale`; removing the
   block-size assertion fails three `piv_llt_block_size` tests; reverting the `#217` unit-test line
   to `1.0 + 1e-16` leaves it passing on the fixed code, which is exactly why it is not a regression,
