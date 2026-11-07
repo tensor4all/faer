@@ -442,6 +442,7 @@ fn partial_schur_real_imp<T: RealField>(
 				H_slice.rb(),
 				X.as_mut(),
 				par.reborrow(),
+				stack,
 				auto!(T),
 			);
 			let mut vecs = vecs.rb_mut().get_mut(..n, ..n);
@@ -646,6 +647,7 @@ fn partial_schur_real_imp<T: RealField>(
 		H,
 		X.as_mut(),
 		par.reborrow(),
+		stack,
 		auto!(T),
 	);
 	let mut vecs = tmp.rb_mut().get_mut(.., ..n);
@@ -885,6 +887,7 @@ fn partial_schur_cplx_imp<T: ComplexField>(
 				Conj::No,
 				X.as_mut(),
 				par.reborrow(),
+				stack,
 				auto!(T),
 			);
 			let mut vecs = vecs.rb_mut().get_mut(..n, ..n);
@@ -1065,6 +1068,7 @@ fn partial_schur_cplx_imp<T: ComplexField>(
 		Conj::No,
 		X.as_mut(),
 		par.reborrow(),
+		stack,
 		auto!(T),
 	);
 	let mut vecs = tmp.rb_mut().get_mut(.., ..n);
@@ -1157,7 +1161,7 @@ pub fn partial_eigen_scratch<T: ComplexField>(
 		vecs,
 		tmp,
 		householder,
-		StackReq::any_of(&[hess, apply_house, schur, arnoldi]),
+		StackReq::any_of(&[hess, apply_house, schur, arnoldi, linalg::evd::evd_from_schur_scratch::<T>(max_dim)]),
 	])
 }
 

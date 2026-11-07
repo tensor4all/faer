@@ -3,6 +3,16 @@
 The ledger of the experiments this fork runs. It records the diff against
 upstream `faer`.
 
+## Pending Schur workspace correction
+
+- EXPERIMENT: replace the hidden range-scaling matrix allocation in Schur
+  back substitution with caller-provided scratch (tensor4all/faer#270).
+  Propagate the simultaneous workspace through saved-Schur, full EVD and
+  partial EVD consumers without changing the scaling arithmetic or public
+  normalization input. The candidate remains unadopted pending the acceptance
+  grid; no timing improvement is claimed. See
+  [the work log](docs/worklogs/2026-11-05-schur-scaling-scratch.md).
+
 ## Pending public API extension
 
 - EXPERIMENT: owned `Mat::row_capacity/col_capacity` and
