@@ -205,3 +205,90 @@ fn nonfinite_does_not_mutate_and_extreme_input_terminates() {
 	assert_eq!(a, before);
 	assert_eq!(s, [1.0, 1.0]);
 }
+
+/// tensor4all/faer#304: `xGEBAL`'s four jobs are selectable, and each one runs only the
+/// steps it names. `balance_in_place` stays `Both`.
+fn run_job(
+	a: &Mat<f64>,
+	job: BalanceJob,
+) -> (Mat<f64>, Vec<usize>, Vec<f64>, core::ops::Range<usize>) {
+	let n = a.nrows();
+	let mut b = a.clone();
+	let (mut perm, mut scale) = (vec![0usize; n], vec![0.0f64; n]);
+	let mut mem = MemBuffer::new(balance_scratch());
+	let active = balance_in_place_with(
+		b.as_mut(),
+		&mut perm,
+		&mut scale,
+		job,
+		Par::Seq,
+		MemStack::new(&mut mem),
+	)
+	.unwrap();
+	(b, perm, scale, active)
+}
+
+#[test]
+fn jobs_select_the_permutation_and_the_scaling() {
+	// an upper triangular matrix: the permutation can isolate both ends, and the
+	// entries are graded enough that the scaling step accepts a factor
+	let a = faer::mat![[1.0, 1024.0, 0.0], [0.0, 2.0, 512.0], [0.0, 0.0, 4.0],];
+	let n = a.nrows();
+
+	// `N`: nothing is touched, and the metadata is the identity
+	let (b_none, perm_none, scale_none, active_none) =
+		run_job(&a, BalanceJob::None);
+	assert_eq!(b_none, a);
+	assert_eq!(perm_none, (0..n).collect::<Vec<_>>());
+	assert_eq!(scale_none, vec![1.0; n]);
+	assert_eq!(active_none, 0..n);
+
+	// `P`: the permutation alone, so every scale is one and the entries are the input's
+	let (b_perm, perm_perm, scale_perm, active_perm) =
+		run_job(&a, BalanceJob::Permute);
+	assert_eq!(scale_perm, vec![1.0; n]);
+	assert!(active_perm.start > 0 || active_perm.end < n);
+	for i in 0..n {
+		for j in 0..n {
+			assert_eq!(b_perm[(i, j)], a[(perm_perm[i], perm_perm[j])]);
+		}
+	}
+
+	// `S`: the scaling alone, so the permutation is the identity and the active range is
+	// the whole matrix
+	let (b_scale, perm_scale, scale_scale, active_scale) =
+		run_job(&a, BalanceJob::Scale);
+	assert_eq!(perm_scale, (0..n).collect::<Vec<_>>());
+	assert_eq!(active_scale, 0..n);
+	assert!(scale_scale.iter().any(|s| *s != 1.0));
+	for i in 0..n {
+		for j in 0..n {
+			assert_eq!(
+				b_scale[(i, j)],
+				a[(i, j)] * scale_scale[j] / scale_scale[i]
+			);
+		}
+	}
+
+	// `B` is the wrapper's behaviour, bit for bit
+	let (b_both, perm_both, scale_both, active_both) =
+		run_job(&a, BalanceJob::Both);
+	let mut b_wrapper = a.clone();
+	let (mut perm_wrapper, mut scale_wrapper) =
+		(vec![0usize; n], vec![0.0f64; n]);
+	let mut mem = MemBuffer::new(balance_scratch());
+	let active_wrapper = balance_in_place(
+		b_wrapper.as_mut(),
+		&mut perm_wrapper,
+		&mut scale_wrapper,
+		Par::Seq,
+		MemStack::new(&mut mem),
+	)
+	.unwrap();
+	assert_eq!(b_both, b_wrapper);
+	assert_eq!(active_both, active_wrapper);
+	assert_eq!(perm_both, perm_wrapper);
+	assert_eq!(scale_both, scale_wrapper);
+	// and it is not the same call as `S` on a matrix the permutation isolates
+	assert_ne!(b_both, b_scale);
+}

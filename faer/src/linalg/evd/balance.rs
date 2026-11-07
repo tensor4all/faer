@@ -28,6 +28,41 @@ pub enum BalanceError {
 	NonFiniteInput,
 }
 
+/// Which parts of the balancing to run, like the `job` argument of LAPACK's `xGEBAL`.
+///
+/// # Examples
+/// ```
+/// use dyn_stack::{MemBuffer, MemStack};
+/// use faer::Par;
+/// use faer::linalg::evd::*;
+/// let a = faer::mat![[1.0f64, 1024.0], [1.0 / 1024.0, 2.0]];
+/// // scaling alone leaves the permutation at the identity
+/// let (mut perm, mut scale) = ([0; 2], [0.0; 2]);
+/// let mut mem = MemBuffer::new(balance_scratch());
+/// balance_in_place_with(
+/// 	a.cloned().as_mut(),
+/// 	&mut perm,
+/// 	&mut scale,
+/// 	BalanceJob::Scale,
+/// 	Par::Seq,
+/// 	MemStack::new(&mut mem),
+/// )
+/// .unwrap();
+/// assert_eq!(perm, [0, 1]);
+/// assert_ne!(scale, [1.0, 1.0]);
+/// ```
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BalanceJob {
+	/// neither permute nor scale (`xGEBAL` job `N`)
+	None,
+	/// permute only (`xGEBAL` job `P`)
+	Permute,
+	/// scale only (`xGEBAL` job `S`)
+	Scale,
+	/// permute and scale (`xGEBAL` job `B`), what [`balance_in_place`] does
+	Both,
+}
+
 /// Workspace for [`balance_in_place`]; all metadata is supplied by the caller.
 ///
 /// # Examples
@@ -84,9 +119,74 @@ pub fn balance_scratch() -> StackReq {
 /// assert_eq!(a[(0, 1)] * scale[0] / scale[1], 1024.0);
 /// ```
 pub fn balance_in_place<T: ComplexField>(
+	a: MatMut<'_, T>,
+	perm: &mut [usize],
+	scale: &mut [T::Real],
+	par: Par,
+	stack: &mut MemStack,
+) -> Result<core::ops::Range<usize>, BalanceError> {
+	balance_in_place_with(a, perm, scale, BalanceJob::Both, par, stack)
+}
+
+/// Permutes and/or scales a square matrix in place, like `xGEBAL` with the job `job`.
+/// Returns the zero-based, half-open active range `ilo..ihi`. Outside this range the
+/// permutation (when `job` includes it) isolates eigenvalues in triangular blocks.
+///
+/// [`BalanceJob::None`] returns `0..n` and touches no output; [`BalanceJob::Scale`] scales
+/// without permuting and also returns `0..n`; [`BalanceJob::Permute`] and
+/// [`BalanceJob::Both`] return the isolated range.
+///
+/// On return `b[i,j] = a[perm[i],perm[j]] * scale[j] / scale[i]`:
+/// `perm[i]` is the original index now at row/column `i`, and `scale` holds
+/// positive powers of two (one outside the active range). Scaling is accepted
+/// only if it reduces the sum of the active row/column 2-norms (including the
+/// diagonal) by at least 5%, subject to safe-range guards. This is the LAPACK
+/// 3.5+ criterion, rather than the older 1-norm rule.
+///
+/// Use [`balance_eigenvectors_in_place`] for right eigenvectors. For a matrix
+/// function such as `exp`, undo by `f(a)[perm[i],perm[j]] =
+/// scale[i] * f(b)[i,j] / scale[j]`. Powers of two introduce no rounding when
+/// the scaled values stay normal; underflow can prevent bit-for-bit recovery.
+///
+/// # Panics
+/// Panics unless `a` is square and both metadata slices have length `n`.
+///
+/// # Errors
+/// Returns [`BalanceError::NonFiniteInput`] before modifying any output if an
+/// entry is NaN or infinite, whatever `job` is.
+///
+/// # Examples
+/// ```
+/// use dyn_stack::{MemBuffer, MemStack};
+/// use faer::Par;
+/// use faer::linalg::evd::*;
+/// let mut a = faer::mat![[1.0f64, 1024.0], [1.0 / 1024.0, 2.0]];
+/// let original = a.clone();
+/// let (mut perm, mut scale) = ([0; 2], [0.0; 2]);
+/// let mut mem = MemBuffer::new(balance_scratch());
+/// // permute only: the entries move, the scales stay one
+/// let active = balance_in_place_with(
+/// 	a.as_mut(),
+/// 	&mut perm,
+/// 	&mut scale,
+/// 	BalanceJob::Permute,
+/// 	Par::Seq,
+/// 	MemStack::new(&mut mem),
+/// )
+/// .unwrap();
+/// assert_eq!(active, 0..2);
+/// assert_eq!(scale, [1.0, 1.0]);
+/// for i in 0..2 {
+/// 	for j in 0..2 {
+/// 		assert_eq!(a[(i, j)], original[(perm[i], perm[j])]);
+/// 	}
+/// }
+/// ```
+pub fn balance_in_place_with<T: ComplexField>(
 	mut a: MatMut<'_, T>,
 	perm: &mut [usize],
 	scale: &mut [T::Real],
+	job: BalanceJob,
 	_par: Par,
 	_stack: &mut MemStack,
 ) -> Result<core::ops::Range<usize>, BalanceError> {
@@ -101,27 +201,37 @@ pub fn balance_in_place<T: ComplexField>(
 	}
 	let mut lo = 0;
 	let mut hi = n;
-	loop {
-		let row = (lo..hi)
-			.rev()
-			.find(|&i| (lo..hi).all(|j| i == j || a[(i, j)] == zero()));
-		if let Some(i) = row {
-			hi -= 1;
-			swap_rows_idx(a.rb_mut(), i, hi);
-			swap_cols_idx(a.rb_mut(), i, hi);
-			perm.swap(i, hi);
-			continue;
+	// `N` and `S` do not isolate: the active range is the whole matrix (`xGEBAL` sets
+	// `ilo = 1`, `ihi = n` unless the job permutes).
+	let permute = matches!(job, BalanceJob::Permute | BalanceJob::Both);
+	let rescale = matches!(job, BalanceJob::Scale | BalanceJob::Both);
+	if permute {
+		loop {
+			let row = (lo..hi)
+				.rev()
+				.find(|&i| (lo..hi).all(|j| i == j || a[(i, j)] == zero()));
+			if let Some(i) = row {
+				hi -= 1;
+				swap_rows_idx(a.rb_mut(), i, hi);
+				swap_cols_idx(a.rb_mut(), i, hi);
+				perm.swap(i, hi);
+				continue;
+			}
+			let col = (lo..hi)
+				.find(|&j| (lo..hi).all(|i| i == j || a[(i, j)] == zero()));
+			if let Some(j) = col {
+				swap_rows_idx(a.rb_mut(), j, lo);
+				swap_cols_idx(a.rb_mut(), j, lo);
+				perm.swap(j, lo);
+				lo += 1;
+				continue;
+			}
+			break;
 		}
-		let col =
-			(lo..hi).find(|&j| (lo..hi).all(|i| i == j || a[(i, j)] == zero()));
-		if let Some(j) = col {
-			swap_rows_idx(a.rb_mut(), j, lo);
-			swap_cols_idx(a.rb_mut(), j, lo);
-			perm.swap(j, lo);
-			lo += 1;
-			continue;
-		}
-		break;
+	}
+	if !rescale {
+		// `P` and `N`: no scaling step
+		return Ok(lo..hi);
 	}
 	// Own implementation of Parlett-Reinsch balancing (Numer. Math. 13,
 	// 293-304, 1969), using the 2-norm convergence rule of LAPACK >= 3.5

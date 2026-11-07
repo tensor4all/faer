@@ -23,8 +23,8 @@ pub(crate) mod tridiag_evd;
 use crate::assert;
 use crate::internal_prelude::*;
 pub use balance::{
-	BalanceError, balance_eigenvectors_in_place, balance_eigenvectors_scratch,
-	balance_in_place, balance_scratch,
+	BalanceError, BalanceJob, balance_eigenvectors_in_place, balance_eigenvectors_scratch,
+	balance_in_place, balance_in_place_with, balance_scratch,
 };
 use hessenberg::HessenbergParams;
 use linalg::matmul::triangular::BlockStructure;
