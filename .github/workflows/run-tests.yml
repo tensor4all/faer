@@ -82,6 +82,12 @@ jobs:
   testing:
     name: testing-${{ matrix.toolchain }}-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # This is the one job that is supposed to move: its name promises "stable", and the point of
+    # running it is to hear about a new stable breaking us before a user does. Without the override
+    # `rust-toolchain.toml` would hold it at the pinned version, and after the next Rust release the
+    # job would keep testing the old compiler while still calling itself testing-stable.
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     strategy:
       fail-fast: false
       matrix:
