@@ -75,6 +75,28 @@ pub(crate) fn row_major_copy_pays(nrows: usize, ncols: usize) -> bool {
 /// of a copy is rounded to: 16 elements is a cache line or more for every
 /// scalar the adaptation takes (`f32` is 64 bytes).
 const COPY_TILE: usize = 16;
+/// The working set, in bytes over both buffers, from which staging a layout
+/// copy in [`COPY_TILE`] tiles pays.
+///
+/// It is the pair of buffers of a `512 x 512` f64 copy, `2 * 512 * 512 * 8`
+/// bytes: the first cell of the table in `tensor4all/faer#323` where the tiled
+/// path wins (`Llt::new` on a row-major input, -13.9%), while the cell just
+/// below it (`511 x 511`, 4177936 bytes) still loses by 3.1-4.7%. That table is
+/// the crossover, so the boundary follows the bytes copied and `size_of::<T>()`
+/// rather than a side: an f32 copy of the same shape is half the working set
+/// and crosses at `725 x 725` instead.
+const TILE_COPY_CACHE_BYTES: usize = 2 * 512 * 512 * 8;
+/// Whether staging a `nrows x ncols` layout copy in [`COPY_TILE`] tiles pays,
+/// for a source and a destination of `size_of::<T>()` bytes per element: the
+/// tiles write every value twice, so they only win once the elementwise walk
+/// stops fitting in cache -- [`TILE_COPY_CACHE_BYTES`].
+#[inline]
+fn tile_copy_pays<T>(nrows: usize, ncols: usize) -> bool {
+	nrows
+		.saturating_mul(ncols)
+		.saturating_mul(2 * core::mem::size_of::<T>())
+		>= TILE_COPY_CACHE_BYTES
+}
 /// How a copy over `lines` lines of the destination's major dimension is shared
 /// between at most `degree` threads: `(lines per task, tasks)`, each share a
 /// whole number of tiles except the last.
@@ -268,9 +290,9 @@ fn copy_across_layouts_block<T: Clone>(
 	}
 }
 /// Copies the lower triangle of `src`, diagonal included, into `dst` in tiles,
-/// when `dst` is column-major, `src` is not, and the matrix is above
-/// [`row_major_copy_pays`]'s floor; returns `false` and touches nothing
-/// otherwise. The elements written are exactly those
+/// when `dst` is column-major, `src` is not, and the working set is at or above
+/// [`TILE_COPY_CACHE_BYTES`]; returns `false` and touches nothing otherwise.
+/// The elements written are exactly those
 /// `MatMut::copy_from_triangular_lower` writes (column `j < min(m, n)`, rows
 /// `j..m`), so the upper triangle of `dst` is left as it was.
 ///
@@ -287,7 +309,7 @@ pub(crate) fn copy_lower_across_layouts<T: Clone>(
 	let (m, n) = dst.shape();
 	if dst.row_stride() != 1
 		|| src.row_stride().unsigned_abs() == 1
-		|| !row_major_copy_pays(m, n)
+		|| !tile_copy_pays::<T>(m, n)
 	{
 		return false;
 	}
@@ -963,35 +985,86 @@ mod tests {
 
 	/// The tiled path of `copy_from_triangular_lower` writes exactly the
 	/// elements the elementwise one does, with the same values, and leaves the
-	/// rest of the destination alone: square, tall, wide, a narrow band whose
-	/// area is still above the floor, sides that are not a multiple of the tile,
-	/// and a source whose rows are walked backwards.
+	/// rest of the destination alone. The shapes above the threshold run the
+	/// tiles; the ones below it run the elementwise walk, which the same check
+	/// covers: square, tall, wide, a narrow band, sides that are not a multiple
+	/// of the tile, and a source whose rows are walked backwards.
 	#[test]
 	fn tiled_triangular_copy_writes_what_the_elementwise_one_does() {
-		fn check<T: Entry>(m: usize, n: usize, flipped: bool) {
+		fn check<T: Entry>(m: usize, n: usize, flipped: bool, tiled: bool) {
 			let (_, rm) = fixture::<T>(m, n, flipped);
 			let (base, rs, cs) = rm_strides(m, n, flipped);
 			let src = unsafe {
 				MatRef::from_raw_parts(rm.as_ptr().add(base), m, n, rs, cs)
 			};
 			let sentinel = T::at(m + 11, n + 13);
-			let mut tiled = Mat::<T>::from_fn(m, n, |_, _| sentinel.clone());
-			std::assert!(crate::linalg::row_major_copy_pays(m, n));
-			tiled.copy_from_triangular_lower(src);
+			let mut out = Mat::<T>::from_fn(m, n, |_, _| sentinel.clone());
+			std::assert_eq!(crate::linalg::tile_copy_pays::<T>(m, n), tiled);
+			out.copy_from_triangular_lower(src);
 			for j in 0..n {
 				for i in 0..m {
 					let want = if i >= j { src[(i, j)].clone() } else { sentinel.clone() };
-					if !tiled[(i, j)].same(&want) {
+					if !out[(i, j)].same(&want) {
 						panic!("{m}x{n} flipped={flipped}: entry ({i}, {j}) differs");
 					}
 				}
 			}
 		}
-		for (m, n) in [(64, 64), (65, 65), (300, 300), (257, 100), (100, 257), (17, 300), (300, 17)] {
+		for (m, n, tiled) in [
+			(512, 512, true),
+			(520, 511, true),
+			(600, 600, true),
+			(64, 64, false),
+			(65, 65, false),
+			(300, 300, false),
+			(257, 100, false),
+			(100, 257, false),
+			(17, 300, false),
+			(300, 17, false),
+		] {
 			for flipped in [false, true] {
-				check::<f64>(m, n, flipped);
-				check::<crate::c64>(m, n, flipped);
+				check::<f64>(m, n, flipped, tiled);
+				check::<crate::c64>(m, n, flipped, tiled);
 			}
+		}
+	}
+
+	/// The threshold is the measured crossover of `tensor4all/faer#323`: the
+	/// `512 x 512` f64 pair is the first cell where the tiles win and `511 x 511`
+	/// the last one where they lose, with the boundary at the working set and not
+	/// at the side.
+	#[test]
+	fn tile_copy_threshold_is_the_measured_crossover() {
+		assert_eq!(TILE_COPY_CACHE_BYTES, 2 * 512 * 512 * 8);
+		std::assert!(!tile_copy_pays::<f64>(511, 511));
+		std::assert!(tile_copy_pays::<f64>(512, 512));
+		std::assert!(!tile_copy_pays::<f64>(1, 262143));
+		std::assert!(tile_copy_pays::<f64>(1, 262144));
+		std::assert!(tile_copy_pays::<f64>(1, 262145));
+		std::assert!(!tile_copy_pays::<f32>(724, 724));
+		std::assert!(tile_copy_pays::<f32>(725, 725));
+		std::assert!(!tile_copy_pays::<f32>(512, 512));
+	}
+
+	/// The choice is made on the working set, on the same transposed layout: one
+	/// shape below the threshold takes the elementwise walk, one above it takes
+	/// the tiles, and `copy_lower_across_layouts` reports which it took.
+	#[test]
+	fn tile_copy_is_chosen_on_the_working_set_not_on_the_layout() {
+		fn check<T: Entry>((m, n, want): (usize, usize, bool)) {
+			let (_, rm) = fixture::<T>(m, n, false);
+			let src = MatRef::from_row_major_slice(&rm, m, n);
+			let mut dst = Mat::<T>::zeros(m, n);
+			assert_eq!(tile_copy_pays::<T>(m, n), want, "{m}x{n}");
+			assert_eq!(
+				copy_lower_across_layouts(dst.as_mut(), src),
+				want,
+				"{m}x{n}"
+			);
+		}
+		for shape in [(256, 256, false), (512, 512, true)] {
+			check::<f64>(shape);
+			check::<crate::c64>(shape);
 		}
 	}
 
