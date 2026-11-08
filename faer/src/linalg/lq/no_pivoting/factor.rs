@@ -121,31 +121,41 @@ mod tests {
 	use dyn_stack::MemBuffer;
 	/// [`copy_l`] hands `MatMut::copy_from_triangular_lower` a row-major packed
 	/// matrix and a column-major destination, which is the tiled gate of
-	/// `copy_lower_across_layouts`: the copy of a `512 x 512` f64 `L` is at the
-	/// threshold, so this route changes instruction path when the gate moves.
-	/// The packed input here is row-major and the output column-major, and the
-	/// tiled-copy counter is what proves the gate ran -- equal values alone
-	/// cannot, because the elementwise walk writes the same matrix.
+	/// `copy_lower_across_layouts`, with the working set of the `m x k` factor.
+	/// The route is pinned on both sides of the threshold, square, tall and
+	/// wide: the per-thread tiled-copy counter moves by exactly one where the
+	/// gate should tile and stays put where it should fall back, which equal
+	/// values alone cannot tell apart.
 	#[test]
 	fn copy_l_reaches_the_tiled_copy_gate() {
-		use crate::linalg::TILED_COPIES;
-		use core::sync::atomic::Ordering::Relaxed;
-		let n = 512;
-		// `packed` as a row-major view of a column-major allocation.
-		let mut packed_col = Mat::<f64>::from_fn(n, n, |i, j| (i + 2 * j) as f64);
-		let packed = packed_col.as_ref().transpose();
-		assert!(crate::linalg::tile_copy_pays::<f64>(n, n));
-		let mut out = Mat::<f64>::zeros(n, n);
-		let before = TILED_COPIES.load(Relaxed);
-		copy_l(out.as_mut(), packed, false);
-		assert!(
-			TILED_COPIES.load(Relaxed) > before,
-			"copy_l did not reach the tiled copy gate"
-		);
-		for j in 0..n {
-			for i in 0..n {
-				let want = if i >= j { packed[(i, j)] } else { 0.0 };
-				assert_eq!(out[(i, j)], want, "entry ({i}, {j})");
+		use crate::linalg::{tile_copy_pays, tiled_copies};
+		for (m, n, tiled) in [
+			(512, 512, true),
+			(256, 256, false),
+			// tall: `k = 256`, a `2048 x 256` factor is 8 MiB over both buffers
+			(2048, 256, true),
+			(2048, 64, false),
+			// wide: the factor is only `m x k = 256 x 256`
+			(256, 2048, false),
+		] {
+			let k = Ord::min(m, n);
+			// `packed` as a row-major view of a column-major `n x m` allocation
+			let packed_col = Mat::<f64>::from_fn(n, m, |j, i| (i + 2 * j) as f64);
+			let packed = packed_col.as_ref().transpose();
+			assert!(tile_copy_pays::<f64>(m, k) == tiled);
+			let mut out = Mat::<f64>::from_fn(m, k, |_, _| -1.0);
+			let before = tiled_copies();
+			copy_l(out.as_mut(), packed, false);
+			assert!(
+				tiled_copies() - before == tiled as usize,
+				"{m}x{n}: copy_l took the {} path",
+				if tiled { "elementwise" } else { "tiled" }
+			);
+			for j in 0..k {
+				for i in 0..m {
+					let want = if i >= j { packed[(i, j)] } else { 0.0 };
+					assert!(out[(i, j)] == want, "{m}x{n}: entry ({i}, {j})");
+				}
 			}
 		}
 	}

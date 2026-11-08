@@ -97,16 +97,24 @@ const COPY_TILE: usize = 16;
 /// That the cost comes from `n % 16` rather than from the bytes is #323's
 /// reading, not something this gate measured.
 const TILE_COPY_CACHE_BYTES: usize = 2 * 512 * 512 * 8;
-/// Test-only count of copies [`copy_lower_across_layouts`] took in tiles.
+#[cfg(test)]
+std::thread_local! {
+	static TILED_COPIES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+/// Test-only count of the copies [`copy_lower_across_layouts`] took in tiles on
+/// the calling thread.
 ///
 /// The function reports its choice to `MatMut::copy_from_triangular_lower`, but a
 /// caller above that (`copy_from_triangular_upper`, and the QR/LQ
 /// `copy_r`/`copy_l` routes through it) cannot see the return value, and a copy
 /// that silently fell back produces the same values. Those routes read this
-/// counter, so "the gate was reached" is asserted rather than inferred.
+/// counter, so the path taken is asserted rather than inferred. It is per thread
+/// because the test harness runs tests concurrently: a process-wide count would
+/// let another test's tiled copy satisfy "tiled" and break "not tiled".
 #[cfg(test)]
-pub(crate) static TILED_COPIES: std::sync::atomic::AtomicUsize =
-	std::sync::atomic::AtomicUsize::new(0);
+pub(crate) fn tiled_copies() -> usize {
+	TILED_COPIES.with(|c| c.get())
+}
 /// Whether staging a `nrows x ncols` layout copy in [`COPY_TILE`] tiles pays,
 /// for a source and a destination of `size_of::<T>()` bytes per element: the
 /// tiles write every value twice, so they only win once the elementwise walk
@@ -352,7 +360,7 @@ pub(crate) fn copy_lower_across_layouts<T: Clone>(
 		jb = j1;
 	}
 	#[cfg(test)]
-	TILED_COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+	TILED_COPIES.with(|c| c.set(c.get() + 1));
 	true
 }
 struct DynMat<'a, T: ComplexField, Rows: Shape, Cols: Shape> {
