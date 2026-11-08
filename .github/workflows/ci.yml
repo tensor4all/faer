@@ -39,8 +39,8 @@ jobs:
       # The header is only re-derived when `FAER_FFI` is set, and cbindgen needs nightly
       # (`-Zunpretty=expanded`): without this, a stale or broken `faer.h` passes every Rust test,
       # because none of them resolves a C declaration.
-      - uses: dtolnay/rust-toolchain@nightly
-      - run: FAER_FFI=1 cargo build -p faer-ffi
+      - run: rustup toolchain install nightly --profile minimal
+      - run: FAER_FFI=1 cargo +nightly build -p faer-ffi
       - run: |
           cat > "$RUNNER_TEMP/faer_ffi_smoke.c" <<'C'
           #include "faer.h"
