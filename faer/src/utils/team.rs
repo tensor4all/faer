@@ -37,9 +37,10 @@ use threadteam::TeamExec;
 ///
 /// `width` is clamped to at least one; a width of one is [`crate::Par::Seq`] and reserves nothing.
 /// The team has `width` participants: the calling thread and `width - 1` reserved workers. The pool
-/// is the host's own ([`threadteam::Pool::builder`], `width` threads); a caller that already owns a
-/// pool or a team should borrow from it directly instead, because two pools do not share their
-/// members.
+/// is the host's own ([`threadteam::Pool::builder`], `width` threads): `into_team` clamps its width
+/// to the pool's, so a pool of `width - 1` threads would hand out one participant fewer, and the
+/// `width`-th worker parks unused (threadteam-rs#12). A caller that already owns a pool or a team
+/// should borrow from it directly instead, because two pools do not share their members.
 ///
 /// `with_team` is for a one-off call: every call builds a new pool and acquires its members again.
 /// The threads themselves are not new: a pool with threadteam's default thread settings returns
@@ -834,6 +835,20 @@ mod tests {
 			.unwrap();
 		let team = pool.into_team(4).ok().expect("an idle pool");
 		assert!(team.size().get() == 3);
+	}
+
+	/// `with_team` clamps its width to at least one, and a width of one is `Par::Seq`: the one-off
+	/// helper reserves nothing and runs the closure on the calling thread.
+	#[test]
+	fn with_team_below_two_is_seq() {
+		let me = std::thread::current().id();
+		for width in [0usize, 1] {
+			let (seq, on_caller) = with_team(width, |par| {
+				(matches!(par, Par::Seq), std::thread::current().id() == me)
+			});
+			assert!(seq, "width {width} is not Par::Seq");
+			assert!(on_caller, "width {width} left the calling thread");
+		}
 	}
 
 	fn rand_mat(m: usize, n: usize, seed: u64) -> Mat<f64> {
