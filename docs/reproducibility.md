@@ -34,13 +34,19 @@ The estimate is in flops, so it is dtype-dependent. `faer/src/utils/cost.rs:711-
 `Par` of degree below 2, so a one-thread team runs the region on the calling thread. The matmul team
 path shows both halves at once: the native-kernel gate is
 `faer/src/linalg/matmul/internal/mod.rs:252-278` (`crate::utils::team::kernel::kernel_width`), and the
-generic path at `:286-297` computes the same width with `crate::utils::cost::par_width` and, when it is
-narrower than the degree, reruns the call on a sub-team of that width.
+generic path at `:286-297` applies the same widest-paying-width rule with `crate::utils::cost::par_width`
+and, when that width is narrower than the degree, reruns the call on a sub-team of that width.
 
 Two consequences a reader can use:
 
-- A requested degree of 2 and a requested degree of 8 reach the **same width** on a problem that only
-  pays for 2 participants, so those two runs use the same partition and produce the same bits.
+- Within one path, a requested degree of 2 and a requested degree of 8 reach the **same width** on a
+  problem that only pays for 2 participants, so those two runs use the same partition and produce the
+  same bits. The width is a property of the size *and the path*: the kernel fork pays two sections
+  (`faer/src/utils/team.rs:515` prices `2`), the generic gate one
+  (`faer/src/linalg/matmul/internal/mod.rs:289-293` passes `1`), so at a size between the two floors
+  the native arm can stay sequential while the generic arm already runs at width 2 or more.
+
+
 - The cost is priced in flops, so complex arithmetic crosses the threshold at a different problem size
   than real. `PATCHSET.md:135` prices the native gemm thread budget in flops for exactly this reason:
   complex keeps its two-times gain at `64^3`.
@@ -68,9 +74,16 @@ the thread counts, but no stored digests, so a replay has to rerun those sizes o
 | Complex64 `mat_mul`, `contract_pair` at `16³`, `32³`, `48³` | identical | identical |
 | Complex64 `mat_mul`, `contract_pair` at `64³` and larger | **differ** | identical |
 
-The complex row is the mechanism above: the one-thread call takes the serial path, while two or more
-threads reach a parallel width whenever the estimate pays at some width up to the budget, which here it
-does from two; complex crosses that threshold below `64³` where real does not.
+The complex row correlates with the mechanism above; it does not prove which gate ran. A one-thread
+call takes the serial path, and two or more threads reach the widest width that pays. Complex costs
+about 4.5x the flops per MAC of real (`0.165` against `0.037` ns), so it crosses a given floor at a
+smaller size. Bit equality alone does not show the gate stayed shut: at the prices this build uses a
+width-2 kernel fork costs `PAYS x 2 x 1423 ns = 8.5 us` and the generic gate `PAYS x 1 x 1423 ns =
+4.3 us`, while an `f64` `64³` product already estimates `262144 x 0.037 ns = 9.7 us` of serial work,
+above the first floor. So `f64` may run parallel at `64³` and still agree bitwise; the `Complex64`
+rows differ because the two partitions accumulate in a different order.
+
+
 
 ## What this asks of a contribution
 
