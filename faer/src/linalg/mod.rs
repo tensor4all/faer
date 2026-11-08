@@ -85,6 +85,12 @@ const COPY_TILE: usize = 16;
 /// the crossover, so the boundary follows the bytes copied and `size_of::<T>()`
 /// rather than a side: an f32 copy of the same shape is half the working set
 /// and crosses at `725 x 725` instead.
+///
+/// Two edges of that boundary are approximate rather than measured: a ragged
+/// `513 x 513` is above it and therefore still takes the tiles, although the
+/// same table records 3.1-4.7% against them, and `256 x 256` is below it
+/// although the table records a 2.4% win; `tensor4all/faer#323` stays open for
+/// the ragged remainder.
 const TILE_COPY_CACHE_BYTES: usize = 2 * 512 * 512 * 8;
 /// Whether staging a `nrows x ncols` layout copy in [`COPY_TILE`] tiles pays,
 /// for a source and a destination of `size_of::<T>()` bytes per element: the
