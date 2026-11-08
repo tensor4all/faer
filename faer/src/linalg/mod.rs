@@ -1020,6 +1020,12 @@ mod tests {
 			(512, 512, true),
 			(520, 511, true),
 			(600, 600, true),
+			// The same threshold crossed in the two non-square orientations:
+			// a band bound written from the wrong side (`Ord::min(m, n)`
+			// replaced by `n`) walks columns past the end here and not in
+			// the square fixtures.
+			(17, 16384, true),
+			(16384, 17, true),
 			(64, 64, false),
 			(65, 65, false),
 			(300, 300, false),
