@@ -12,6 +12,12 @@ one stated size.
 Anything that compares results recorded earlier — a cache that spans runs, a benchmark table, a
 regression digest — fixes the thread count first and records which count its numbers belong to.
 
+No test in this repository compares a second process, or repeats a run after a restart. What the tree
+does check pins the width: `faer/tests/lu_rank_truncation.rs:183-218` records a digest at `Par::Seq`
+and on a team of four and compares them against stored goldens (on `aarch64` only). The promise
+therefore describes what the code is expected to deliver; the across-process half is not enforced by a
+check.
+
 ## What is not promised
 
 Bitwise identical results when the thread count changes. Earlier work on this fork treated that as a
@@ -26,9 +32,10 @@ Parallel work is sized by a **cost model**, not by the requested degree.
 which the region's estimated serial time pays for the dispatch, and 1 (sequential) when none does.
 The estimate is in flops, so it is dtype-dependent. `faer/src/utils/cost.rs:711-713` returns 1 for a
 `Par` of degree below 2, so a one-thread team runs the region on the calling thread. The matmul team
-path shows both halves at once: `faer/src/linalg/matmul/internal/mod.rs:286-297` computes that width
-with `crate::utils::cost::par_width` and, when it is narrower than the degree, reruns the call on a
-sub-team of that width.
+path shows both halves at once: the native-kernel gate is
+`faer/src/linalg/matmul/internal/mod.rs:252-278` (`crate::utils::team::kernel::kernel_width`), and the
+generic path at `:286-297` computes the same width with `crate::utils::cost::par_width` and, when it is
+narrower than the degree, reruns the call on a sub-team of that width.
 
 Two consequences a reader can use:
 
@@ -38,8 +45,13 @@ Two consequences a reader can use:
   than real. `PATCHSET.md:135` prices the native gemm thread budget in flops for exactly this reason:
   complex keeps its two-times gain at `64^3`.
 
-So "the result differs across thread counts" means "the serial path and the parallel path differ", not
-"the summation order follows the thread count".
+For the products measured below, "the result differs across thread counts" therefore means "the serial
+path and the parallel path differ", not "the summation order follows the thread count". That reading is
+specific to the cost-model gate and does not carry over to a routine that partitions by the count
+itself: `faer/src/linalg/evd/tridiag.rs:386-409` splits the trailing columns as `idx / nthreads` and
+adds the per-column partial vectors at `:457-459`, so its own boundaries are `[0, 2, 8]` at two threads
+against `[0, 1, 2, 4, 8]` at four (with `n2 = 8`), and two parallel widths can group the same sum
+differently.
 
 ## Measured, not promised
 
@@ -47,15 +59,18 @@ Observed on an AMD EPYC 7713P (Zen 3, AVX2+FMA), as recorded in
 [tensor4all/faer#327](https://github.com/tensor4all/faer/issues/327). This is a record of what the
 mechanism does, not a contract:
 
+The numbers below are the ones recorded in that issue; it carries the host description, the sizes and
+the thread counts, but no stored digests, so a replay has to rerun those sizes on the same host class.
+
 | case | 1 vs 2 threads | 2 vs 8 threads |
 | --- | --- | --- |
 | f64 `mat_mul` | identical | identical |
 | Complex64 `mat_mul`, `contract_pair` at `16³`, `32³`, `48³` | identical | identical |
 | Complex64 `mat_mul`, `contract_pair` at `64³` and larger | **differ** | identical |
 
-The complex row is the mechanism above: the one-thread case takes the serial path, two or more take
-the cost-model-capped parallel path, and complex crosses the threshold below `64³` where real does
-not.
+The complex row is the mechanism above: the one-thread call takes the serial path, while two or more
+threads reach a parallel width whenever the estimate pays at some width up to the budget, which here it
+does from two; complex crosses that threshold below `64³` where real does not.
 
 ## What this asks of a contribution
 
