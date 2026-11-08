@@ -50,6 +50,10 @@ number is a snapshot of one run, the file and the run are named.
   [`rust-toolchain.toml`](rust-toolchain.toml) (1.96.0) so a local run lints with the same toolchain
   as CI. `t4a-faer` itself has 2,340 clippy warnings on that toolchain and its clippy step is
   therefore advisory — the count is recorded in the workflow file rather than hidden.
+- **Bitwise reproducibility is a fixed-thread-count promise.** On the same machine and build, results
+  are bit-identical across fresh threads, fresh processes and repeated runs **at a fixed thread
+  count**. Changing the count may change the bits: parallel widths come from a flops cost model, not
+  from the requested degree ([`docs/reproducibility.md`](docs/reproducibility.md)).
 - **Performance is measured on named hardware at pinned revisions, and published with its conditions.**
   [tensor4all.org/faer-benchmark](https://tensor4all.org/faer-benchmark/) carries the acceptance
   protocol and the host profiles. Pages recorded on the development host are marked *provisional* and

@@ -16,6 +16,9 @@ Adding a linear-algebra routine: [docs/new-routine-checklist.md](docs/new-routin
 test layers a new decomposition or solver needs, how a LAPACK validation family is registered, and the
 commands that prove it.
 
+Reproducibility: [docs/reproducibility.md](docs/reproducibility.md) — bitwise identical results are
+promised at a fixed thread count only, and it says what the cost model does when the count is free.
+
 Before performance work: [PERFORMANCE_TIPS.md](PERFORMANCE_TIPS.md) — the lessons that carry
 over between changes (strided rows, leading-dimension aliasing, the caller-held worker group, dqds).
 

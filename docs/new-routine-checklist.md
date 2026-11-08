@@ -18,7 +18,7 @@ Answer these in the PR description first; they decide which tests exist.
 | Scalar types | `f32`, `f64` for real-only algorithms; also `c32`, `c64` where the operation is defined. Justify any narrowing. |
 | Storage and layout | Which triangle is read, what strides are accepted, row-major or column-major only, aliasing rules. |
 | Scratch | `*_scratch` query must be exact; a caller-sized `MemStack` must not be overrun and must not be padded "just in case". |
-| Parallel route | `Par::Seq` and `Par::Team` must both run; the result must agree (bitwise where the schedule is fixed, within tolerance otherwise). |
+| Parallel route | `Par::Seq` and `Par::Team` must both run, and the results must agree within the family's tolerance. Bitwise equality is a fixed-thread-count promise only, never across thread counts ([reproducibility.md](reproducibility.md)). |
 | Failure | What `Err` / `NonConvergence` leaves in the outputs, and whether inputs are allowed to be left unspecified. |
 | Allocation | Nothing on the heap per call in a steady-state call (see [tensor4all/faer#111](https://github.com/tensor4all/faer/issues/111)); per-thread reusable working memory is allowed and is documented as such. |
 | Provenance | Is any arithmetic, test oracle or fixture adapted from LAPACK, OpenBLAS, Eigen, or another project? Record project, revision, file, routine and the material changes at the port site. |
@@ -51,7 +51,7 @@ campaign, and the PR cites the run.
     when the routine rescales or reciprocates;
   - every layout the public entry accepts, views with non-unit strides, and a reused output buffer
     that previously held a different result;
-  - `Par::Seq` versus `Par::Team` (at least two threads) on the same input.
+  - `Par::Seq` versus `Par::Team` (at least two threads) on the same input, compared within tolerance.
 - Assert **properties**, not shapes: reconstruction, residual, orthogonality/unitarity, ordering,
   invariants, and a known exact solution. A finite-only assertion is not a numerical test.
 - Tolerances must be precision-, dimension- and scale-aware. The shared helpers in
@@ -161,7 +161,7 @@ the focused test.
 - [ ] One focused regression test, failing on the parent and passing on the change.
 - [ ] Every accepted scalar type and layout is exercised.
 - [ ] Scratch query is exact and a zero-allocation test covers the call if it allocates.
-- [ ] `Par::Seq` and `Par::Team` agree.
+- [ ] `Par::Seq` and `Par::Team` agree within tolerance (bitwise only at a fixed thread count, [reproducibility.md](reproducibility.md)).
 - [ ] LAPACK family registered, record line emitted, inventory and source list updated.
 - [ ] No tolerance was loosened to make a test pass; any new threshold has a recorded decision.
 - [ ] Provenance and licence notices preserved at the port site.
