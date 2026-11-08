@@ -2979,4 +2979,36 @@ mod tests {
 			libfaer_v0_23_team_destroy(team);
 		}
 	}
+	/// The token an operation runs under carries the handle width, in both directions: a
+	/// `with_team_par` that asked for a fixed width still passes the result checks above, because
+	/// those observe that *some* parallel region ran, not how many participants it had.
+	#[test]
+	fn the_token_carries_the_handle_width() {
+		let _turn = TEAM_TURN.lock().unwrap_or_else(|e| e.into_inner());
+		let width = cpus().clamp(3, 4);
+		let team = unsafe { libfaer_v0_23_team_create(width) };
+		assert_eq!(
+			with_team_par(team, |par| par.degree()),
+			width,
+			"a {width}-participant handle ran on another width"
+		);
+		unsafe { libfaer_v0_23_team_set_threads(team, 3) };
+		assert_eq!(
+			with_team_par(team, |par| par.degree()),
+			3,
+			"set_threads(3) did not reach the token"
+		);
+		unsafe { libfaer_v0_23_team_set_threads(team, 1) };
+		assert_eq!(
+			with_team_par(team, |par| par.degree()),
+			1,
+			"one participant must be sequential"
+		);
+		assert_eq!(
+			with_team_par(core::ptr::null(), |par| par.degree()),
+			1,
+			"a null handle must be sequential"
+		);
+		unsafe { libfaer_v0_23_team_destroy(team) };
+	}
 }
