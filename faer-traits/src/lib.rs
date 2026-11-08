@@ -5913,6 +5913,9 @@ mod tests {
 
 	/// the modulus of a nonzero subnormal is exact and nonzero where `hypot`'s
 	/// is: the squares flushed it to zero (`tensor4all/faer#274`)
+	// Subnormal inputs: the assertion compares the last bit, which Miri's floating point
+	// does not reproduce. Not a UB report, so there is nothing to gain from running it there.
+	#[cfg_attr(miri, ignore)]
 	#[test]
 	fn abs_of_subnormal_complex() {
 		let s = f32::from_bits;
@@ -5950,6 +5953,9 @@ mod tests {
 
 	/// the modulus near `max_positive` is finite where `hypot`'s is: the
 	/// squares overflowed to `inf` (`tensor4all/faer#274`)
+	// Near `max_positive`: the assertion compares the last bit, which Miri's floating point
+	// does not reproduce. Not a UB report, so there is nothing to gain from running it there.
+	#[cfg_attr(miri, ignore)]
 	#[test]
 	fn abs_near_max_positive() {
 		assert_abs_is_hypot!(
@@ -6019,6 +6025,9 @@ mod tests {
 
 	/// `sqrt` takes its modulus from `abs_impl`: `sqrt(s^2 (3 + 4i)) = s (2 + i)`
 	/// for `s^2` deep in the subnormals (`tensor4all/faer#274`)
+	// Subnormal inputs: the assertion compares the last bit, which Miri's floating point
+	// does not reproduce. Not a UB report, so there is nothing to gain from running it there.
+	#[cfg_attr(miri, ignore)]
 	#[test]
 	fn sqrt_of_subnormal_complex() {
 		let s = 2.0f32.powi(-74);

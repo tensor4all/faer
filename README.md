@@ -145,7 +145,9 @@ Upstream's contribution guide applies to this fork as well: start with the issue
 first issue", and ask on the [upstream zulip server](https://faer.zulipchat.com) or in the issue
 itself. Fork specific reports belong in this repository's issues, and a defect that also reproduces on
 the published upstream crates belongs in
-[`upstream-reports/`](upstream-reports/README.md).
+[`upstream-reports/`](upstream-reports/README.md). Undefined behaviour is checked weekly by Miri on the
+`t4a-faer-traits` crate only; [`docs/miri.md`](docs/miri.md) says how to run it and why the main
+crate cannot be run under Miri yet.
 
 # benchmarks
 

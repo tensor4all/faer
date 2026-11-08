@@ -1,0 +1,99 @@
+name: Miri
+
+# UB in the traits crate (provenance, aliasing, uninit reads) is only observable under Miri, but it
+# needs its own nightly toolchain, so it stays out of the per-PR lanes and runs weekly. A failure is
+# left as an issue: an issue keeps the turn and the history, a notification does not.
+# The main crate is out of scope, see `docs/miri.md`.
+on:
+  schedule:
+    - cron: "0 18 * * 0" # Sunday 18:00 UTC = Monday 03:00 JST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write # to file the failure issue
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri:
+    name: cargo miri (-p t4a-faer-traits --lib)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # `rust-toolchain.toml` outranks the toolchain the step below installs, so without this every
+    # `cargo miri` here would run on the pinned 1.96.0, which has no miri component.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    # Job level on purpose: a workflow level group cannot reference the matrix context. The ref in
+    # the group keeps another branch's manual run from queueing out a main run.
+    concurrency:
+      group: miri-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+
+      - name: cargo miri setup
+        timeout-minutes: 30
+        run: cargo miri setup
+
+      - name: cargo miri test
+        id: run
+        # Shorter than the job timeout (120) so a hung run still reaches the notification step.
+        timeout-minutes: 60
+        continue-on-error: true
+        run: cargo miri test -p t4a-faer-traits --lib
+
+      # A `continue-on-error` step reports conclusion=success, so `failure()` never fires here.
+      # Reach the step with **always()** and judge `steps.run.outcome` ourselves: a failed setup or a
+      # test step killed by its timeout leaves it empty, which counts as a failure too.
+      - name: File an issue when Miri fails
+        if: always() && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "${RUN_OUTCOME}" = "success" ]; then
+            echo "Miri passed; nothing to file."
+            exit 0
+          fi
+          # Find the existing issue by **label**. One lane, one label: no title to edit and no
+          # search-result count to depend on.
+          # Creating the label is idempotent (an existing one answers 422, which is fine to drop).
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/labels" \
+            -f name=miri-failure -f color=B60205 \
+            -f description="Miri failed on main (filed by the Miri workflow)" >/dev/null 2>&1 || true
+          existing=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --label miri-failure \
+            --json number --limit 1 --jq '.[0].number // empty')
+          body=$(mktemp)
+          {
+            echo 'Miri (`cargo miri test -p t4a-faer-traits --lib`) が main で失敗しました。'
+            echo
+            echo "- commit: \`${SHA}\`"
+            echo "- 実行: \`${RUN_URL}\`"
+            echo '- 再現: `cargo +nightly miri test -p t4a-faer-traits --lib`'
+            echo
+            echo '通常の `cargo test` では検出できない UB（provenance、aliasing、uninit）はこのレーンだけが見ます。'
+          } > "$body"
+          if [ -n "${existing}" ]; then
+            gh issue comment "$existing" -R "$GITHUB_REPOSITORY" --body-file "$body"
+            echo "commented on #${existing}"
+          else
+            # Do not swallow a failure: if this cannot file the issue, the step goes red.
+            gh issue create -R "$GITHUB_REPOSITORY" \
+              --title "miri: t4a-faer-traits --lib fails on main" \
+              --label miri-failure \
+              --body-file "$body"
+          fi
+          rm -f "$body"
+
+      - name: Fail the job if Miri failed
+        if: steps.run.outcome == 'failure'
+        run: exit 1
