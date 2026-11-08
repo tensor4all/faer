@@ -76,14 +76,17 @@ the thread counts, but no stored digests, so a replay has to rerun those sizes o
 
 The complex row correlates with the mechanism above; it does not prove which gate ran. A one-thread
 call takes the serial path, and two or more threads reach the widest width that pays. Complex costs
-about 4.5x the flops per MAC of real (`0.165` against `0.037` ns), so it crosses a given floor at a
-smaller size. Bit equality alone does not show the gate stayed shut: at the prices this build uses a
+about 4.5x the estimated serial time per MAC of real (`0.165` against `0.037` ns/MAC), so it crosses
+a given floor at a smaller size. Bit equality alone does not show the gate stayed shut: at the
+prices this build uses, a
 width-2 kernel fork costs `PAYS x 2 x 1423 ns = 8.5 us` and the generic gate `PAYS x 1 x 1423 ns =
 4.3 us`, while an `f64` `64³` product already estimates `262144 x 0.037 ns = 9.7 us` of serial work,
-above the first floor. So `f64` may run parallel at `64³` and still agree bitwise; the `Complex64`
-rows differ because the two partitions accumulate in a different order.
+above the first floor. So `f64` may run parallel at `64³` and still agree bitwise.
 
-
+Why the `Complex64` rows differ is a hypothesis rather than a recorded fact: the two paths
+accumulate in a different order, and the issue records the outcome, not a trace of which
+partition ran. Treating it as the likely cause is enough to predict where to look; it is not
+evidence from #327.
 
 ## What this asks of a contribution
 
