@@ -16,6 +16,9 @@ Adding a linear-algebra routine: [docs/new-routine-checklist.md](docs/new-routin
 test layers a new decomposition or solver needs, how a LAPACK validation family is registered, and the
 commands that prove it.
 
+Reproducibility: [docs/reproducibility.md](docs/reproducibility.md) — bitwise identical results are
+promised at a fixed thread count only, and it says what the cost model does when the count is free.
+
 Before performance work: [PERFORMANCE_TIPS.md](PERFORMANCE_TIPS.md) — the lessons that carry
 over between changes (strided rows, leading-dimension aliasing, the caller-held worker group, dqds).
 
@@ -40,7 +43,8 @@ file-layout and test-placement overrides to the shared rules.
   * package name `t4a-faer` / `t4a-faer-traits`;
   * `[lib] name = "faer"` / `"faer_traits"`, and dependency keys unchanged, so
     downstream `use faer::...` and `use faer_traits::...` are untouched;
-  * `faer-ffi` stays out of the workspace (unused, cbindgen build);
+  * `faer-ffi` is in the workspace and builds the C API (cbindgen build); its parallel boundary is
+    a caller-owned team handle, never a `Par` by value (tensor4all/faer#98);
   * each crate directory keeps a `LICENSE` copy so the published archive ships
     the MIT text (`license-file` plus `license` makes Cargo warn).
 * Do not carry unrelated formatting churn or dependency bumps. Every extra diff

@@ -239,6 +239,7 @@ pub enum ParShape { Seq, Team(NonZeroUsize, DispatchCosts) }
   there is no `Par::Team` and no team module, while `rayon` alone keeps the `gemm` dependency's
   Rayon arm and the public `par_*` iterators. A build with neither - what a no_std build is - has
   `Par::Seq` only.
-- `faer-ffi` is excluded from this workspace and still returns `Par` by value from the C API; a C
-  caller cannot own a scoped team, so that crate needs its own execution-ownership redesign and
-  is not built here.
+- `faer-ffi` takes a caller-owned team handle (`FaerV0_24_Team`) from `libfaer_v0_23_team_create`
+  instead of a `Par` by value: a C caller cannot own a scoped team token, so the crate enters
+  `faer::team::with_team` for the duration of one call and leaves it before returning (a `NULL`
+  handle is `Par::Seq`). It is back in the workspace and builds (tensor4all/faer#98).

@@ -24,6 +24,9 @@ jobs:
       # just compiled (the test modules inside the library need `threadteam`, #203).
       - run: cargo test -p t4a-faer --no-default-features --features "std,linalg" --test public_bidiag_sequential --test sparse_lu_no_rayon --test iteration_control
       - run: cargo test -p t4a-faer-traits
+      # `faer-ffi` is in the workspace again (#98); its two tests drive the C entry points, the team
+      # handle, and the "the team is left again" affinity check.
+      - run: cargo test -p faer-ffi -j4
       - run: cargo test -p t4a-faer --no-default-features --features "std,linalg" --test lsmr_initial_residual --test generalized_schur_reorder --test generalized_schur_reorder_no_alloc --test public_qz_aed --test public_qz_scratch
       - run: python3 scripts/check-migration-examples.py
       - run: cargo build --examples -j8
@@ -33,3 +36,19 @@ jobs:
           done
       - run: cargo test --doc --workspace -j8 -- --test-threads=4
       - run: cargo package -p t4a-faer-traits -p t4a-faer --no-verify --list
+      # The header is only re-derived when `FAER_FFI` is set, and cbindgen needs nightly
+      # (`-Zunpretty=expanded`): without this, a stale or broken `faer.h` passes every Rust test,
+      # because none of them resolves a C declaration.
+      - run: rustup toolchain install nightly --profile minimal
+      - run: FAER_FFI=1 cargo +nightly build -p faer-ffi
+      - run: |
+          cat > "$RUNNER_TEMP/faer_ffi_smoke.c" <<'C'
+          #include "faer.h"
+          int main(void) {
+            struct FaerV0_24_Team *team = libfaer_v0_23_team_create(2);
+            libfaer_v0_23_team_set_threads(team, 1);
+            libfaer_v0_23_team_destroy(team);
+            return 0;
+          }
+          C
+          cc -std=c11 -Wall -Wextra -Werror -Ifaer-ffi -c "$RUNNER_TEMP/faer_ffi_smoke.c" -o "$RUNNER_TEMP/faer_ffi_smoke.o"
