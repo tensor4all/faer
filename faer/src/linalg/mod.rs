@@ -88,9 +88,14 @@ const COPY_TILE: usize = 16;
 ///
 /// Two edges of that boundary are approximate rather than measured: a ragged
 /// `513 x 513` is above it and therefore still takes the tiles, although the
-/// same table records 3.1-4.7% against them, and `256 x 256` is below it
-/// although the table records a 2.4% win; `tensor4all/faer#323` stays open for
-/// the ragged remainder.
+/// table records 3.6% against them over its six cells, five of them slower
+/// (`tensor4all/faer#290`), and `256 x 256` is below it although the same
+/// table records a 2.4% win; `tensor4all/faer#323` stays open for the ragged
+/// remainder. No byte boundary moves that cell alone: `513 x 513` is 4210704
+/// bytes against `512 x 512`'s 4194304, so a threshold above the former puts
+/// the latter below it too, and all twelve `512 x 512` cells win by 13.9%.
+/// That the cost comes from `n % 16` rather than from the bytes is #323's
+/// reading, not something this gate measured.
 const TILE_COPY_CACHE_BYTES: usize = 2 * 512 * 512 * 8;
 /// Whether staging a `nrows x ncols` layout copy in [`COPY_TILE`] tiles pays,
 /// for a source and a destination of `size_of::<T>()` bytes per element: the
@@ -1050,6 +1055,10 @@ mod tests {
 		assert_eq!(TILE_COPY_CACHE_BYTES, 2 * 512 * 512 * 8);
 		std::assert!(!tile_copy_pays::<f64>(511, 511));
 		std::assert!(tile_copy_pays::<f64>(512, 512));
+		// the known cost kept on purpose: a ragged 513x513 is above the byte
+		// threshold, and #290's table records 3.6% against the tiles there
+		// over six cells, five of them slower -- #323 is open for it
+		std::assert!(tile_copy_pays::<f64>(513, 513));
 		std::assert!(!tile_copy_pays::<f64>(1, 262143));
 		std::assert!(tile_copy_pays::<f64>(1, 262144));
 		std::assert!(tile_copy_pays::<f64>(1, 262145));
@@ -1074,7 +1083,15 @@ mod tests {
 				"{m}x{n}"
 			);
 		}
-		for shape in [(256, 256, false), (512, 512, true)] {
+		for shape in [
+			(256, 256, false),
+			(512, 512, true),
+			// both rectangles: the tiled fixtures of the value test cross the
+			// threshold in either orientation, and the helper must report the
+			// same choice there
+			(511, 520, true),
+			(1024, 256, true),
+		] {
 			check::<f64>(shape);
 			check::<crate::c64>(shape);
 		}
