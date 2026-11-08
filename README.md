@@ -147,7 +147,7 @@ itself. Fork specific reports belong in this repository's issues, and a defect t
 the published upstream crates belongs in
 [`upstream-reports/`](upstream-reports/README.md). Undefined behaviour is checked weekly by Miri on the
 `t4a-faer-traits` crate only; [`docs/miri.md`](docs/miri.md) says how to run it and why the main
-crate cannot be run under Miri yet.
+crate is not in that lane yet (test selection, not a capability limit).
 
 # benchmarks
 
