@@ -97,6 +97,16 @@ const COPY_TILE: usize = 16;
 /// That the cost comes from `n % 16` rather than from the bytes is #323's
 /// reading, not something this gate measured.
 const TILE_COPY_CACHE_BYTES: usize = 2 * 512 * 512 * 8;
+/// Test-only count of copies [`copy_lower_across_layouts`] took in tiles.
+///
+/// The function reports its choice to `MatMut::copy_from_triangular_lower`, but a
+/// caller above that (`copy_from_triangular_upper`, and the QR/LQ
+/// `copy_r`/`copy_l` routes through it) cannot see the return value, and a copy
+/// that silently fell back produces the same values. Those routes read this
+/// counter, so "the gate was reached" is asserted rather than inferred.
+#[cfg(test)]
+pub(crate) static TILED_COPIES: std::sync::atomic::AtomicUsize =
+	std::sync::atomic::AtomicUsize::new(0);
 /// Whether staging a `nrows x ncols` layout copy in [`COPY_TILE`] tiles pays,
 /// for a source and a destination of `size_of::<T>()` bytes per element: the
 /// tiles write every value twice, so they only win once the elementwise walk
@@ -341,6 +351,8 @@ pub(crate) fn copy_lower_across_layouts<T: Clone>(
 		}
 		jb = j1;
 	}
+	#[cfg(test)]
+	TILED_COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 	true
 }
 struct DynMat<'a, T: ComplexField, Rows: Shape, Cols: Shape> {

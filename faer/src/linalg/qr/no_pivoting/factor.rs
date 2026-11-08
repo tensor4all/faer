@@ -528,6 +528,36 @@ mod tests {
 	use crate::{Mat, Row, assert, c64};
 	use dyn_stack::MemBuffer;
 
+	/// [`copy_r`] reaches the tiled gate of `copy_lower_across_layouts` the long
+	/// way round: it copies the *upper* triangle, and
+	/// `MatMut::copy_from_triangular_upper` transposes both views, so a
+	/// column-major packed matrix and a row-major destination arrive at the
+	/// lower copy as the source and destination it tiles. The `512 x 512` f64
+	/// `R` is at the threshold, so this route changes instruction path with the
+	/// gate; the counter proves it ran, which equal values cannot.
+	#[test]
+	fn copy_r_reaches_the_tiled_copy_gate() {
+		use crate::linalg::TILED_COPIES;
+		use core::sync::atomic::Ordering::Relaxed;
+		let n = 512;
+		let packed = Mat::<f64>::from_fn(n, n, |i, j| (i + 2 * j) as f64);
+		assert!(crate::linalg::tile_copy_pays::<f64>(n, n));
+		// a row-major destination: the transpose of a column-major allocation
+		let mut out_col = Mat::<f64>::zeros(n, n);
+		let before = TILED_COPIES.load(Relaxed);
+		copy_r(out_col.transpose_mut(), packed.as_ref(), false);
+		assert!(
+			TILED_COPIES.load(Relaxed) > before,
+			"copy_r did not reach the tiled copy gate"
+		);
+		for j in 0..n {
+			for i in 0..n {
+				let want = if i <= j { packed[(i, j)] } else { 0.0 };
+				assert_eq!(out_col[(j, i)], want, "entry ({i}, {j})");
+			}
+		}
+	}
+
 	#[test]
 	fn test_qr() {
 		let rng = &mut StdRng::seed_from_u64(0);

@@ -119,6 +119,37 @@ mod tests {
 	use crate::{Mat, c64};
 	use core::sync::atomic::Ordering::Relaxed;
 	use dyn_stack::MemBuffer;
+	/// [`copy_l`] hands `MatMut::copy_from_triangular_lower` a row-major packed
+	/// matrix and a column-major destination, which is the tiled gate of
+	/// `copy_lower_across_layouts`: the copy of a `512 x 512` f64 `L` is at the
+	/// threshold, so this route changes instruction path when the gate moves.
+	/// The packed input here is row-major and the output column-major, and the
+	/// tiled-copy counter is what proves the gate ran -- equal values alone
+	/// cannot, because the elementwise walk writes the same matrix.
+	#[test]
+	fn copy_l_reaches_the_tiled_copy_gate() {
+		use crate::linalg::TILED_COPIES;
+		use core::sync::atomic::Ordering::Relaxed;
+		let n = 512;
+		// `packed` as a row-major view of a column-major allocation.
+		let mut packed_col = Mat::<f64>::from_fn(n, n, |i, j| (i + 2 * j) as f64);
+		let packed = packed_col.as_ref().transpose();
+		assert!(crate::linalg::tile_copy_pays::<f64>(n, n));
+		let mut out = Mat::<f64>::zeros(n, n);
+		let before = TILED_COPIES.load(Relaxed);
+		copy_l(out.as_mut(), packed, false);
+		assert!(
+			TILED_COPIES.load(Relaxed) > before,
+			"copy_l did not reach the tiled copy gate"
+		);
+		for j in 0..n {
+			for i in 0..n {
+				let want = if i >= j { packed[(i, j)] } else { 0.0 };
+				assert_eq!(out[(i, j)], want, "entry ({i}, {j})");
+			}
+		}
+	}
+
 	/// the look-ahead overlaps the next panel's factorization with the trailing
 	/// apply. For LQ the panel is the block of *rows* of `A`, which the transposed
 	/// view presents with a stride of `A.col_stride()`, so the transposed path and
