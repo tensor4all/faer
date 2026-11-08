@@ -40,7 +40,8 @@ file-layout and test-placement overrides to the shared rules.
   * package name `t4a-faer` / `t4a-faer-traits`;
   * `[lib] name = "faer"` / `"faer_traits"`, and dependency keys unchanged, so
     downstream `use faer::...` and `use faer_traits::...` are untouched;
-  * `faer-ffi` stays out of the workspace (unused, cbindgen build);
+  * `faer-ffi` is in the workspace and builds the C API (cbindgen build); its parallel boundary is
+    a caller-owned team handle, never a `Par` by value (tensor4all/faer#98);
   * each crate directory keeps a `LICENSE` copy so the published archive ships
     the MIT text (`license-file` plus `license` makes Cargo warn).
 * Do not carry unrelated formatting churn or dependency bumps. Every extra diff
