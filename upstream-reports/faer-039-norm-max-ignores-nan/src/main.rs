@@ -1,8 +1,8 @@
 // `norm_max` drops NaN entries: the SIMD kernel accumulates with `simd.max`,
 // the pairwise split combines halves with `fmax`, and the scalar fallback uses
 // `fmax` as well. Neither the vector max nor IEEE `maxNum` is NaN-propagating,
-// so a matrix that contains a NaN reports a finite number (0 when every entry
-// is NaN), while `norm_l1` and `norm_l2` of the same input report NaN.
+// so a matrix that contains a NaN typically reports a finite number (0 for a one-entry all-NaN column
+// and is not always the largest finite magnitude), while `norm_l1` and `norm_l2` of the same input report NaN.
 use faer::{c64, mat, Col, Mat};
 
 fn main() {
