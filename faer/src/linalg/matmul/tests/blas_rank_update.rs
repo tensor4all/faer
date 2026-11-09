@@ -12,8 +12,10 @@
 // dimension sweep is bounded, and the rogue value (-1.0D10) becomes NaN. faer
 // has no `ger`/`syr`/`syrk` entry points: the rank-1 update is `matmul` with
 // K = 1, and the symmetric rank-k update is `matmul_with_conj` with a
-// triangular destination, so those two calls carry the source checks. SYR2K has
-// no counterpart (it is two rank-k terms, i.e. two calls).
+// triangular destination, so those two calls carry the source checks. For the
+// complex types `?syrk` (A A^T) and `?herk` (A A^H) are separate routines and
+// separate arms here, since conjugation is what distinguishes them. SYR2K and
+// HER2K have no counterpart (they are two rank-k terms, i.e. two calls).
 
 #[test]
 fn rank_one_update_matches_the_source_contract() {
@@ -73,16 +75,25 @@ fn rank_one_update_matches_the_source_contract() {
 
 #[test]
 fn symmetric_rank_k_update_writes_only_the_stored_triangle() {
-	// DSYRK/HERK: the referenced triangle of C is alpha * A * op(A)^T +
-	// beta * C, and the other triangle must not be read or written (the source
-	// test's LDERES 'SY' check)
+	// DSYRK/ZSYRK and DHERK/ZHERK: the referenced triangle of C is
+	// alpha * op(A) * op(A)^H + beta * C, and the other triangle must not be
+	// read or written (the source test's LDERES 'SY' check)
 	for structure in [
 		BlockStructure::TriangularLower,
 		BlockStructure::TriangularUpper,
 	] {
-		for trans in 0..3 {
-			for (n, k) in [(0, 0), (1, 1), (2, 3), (3, 2), (4, 4), (5, 3)] {
-				let (ma, na) = if trans == 0 { (n, k) } else { (k, n) };
+		// trans picks the source's routine and TRANS: 0 = `?syrk` 'N' (A A^T),
+		// 1 = `?syrk` 'T' (A^T A), 2 = `?herk` 'T' (A^H A), 3 = `?herk` 'N'
+		// (A A^H). The complex types need the unconjugated pair as well: for
+		// them conjugation is the difference between `?syrk` and `?herk`.
+		for trans in 0..4 {
+			// (3, 1) is the non-diagonal rank-1 shape: DSYR/ZHER with n = 3,
+			// which (1, 1) cannot reach because a 1 x 1 update has no
+			// off-diagonal entry to get wrong
+			for (n, k) in [(0, 0), (1, 1), (3, 1), (2, 3), (3, 2), (4, 4), (5, 3)]
+			{
+				let (ma, na) =
+					if trans == 0 || trans == 3 { (n, k) } else { (k, n) };
 				let a =
 					Mat::<Scalar>::from_fn(ma, na, |i, j| integer(i, j + 1));
 				let a_before = a.clone();
@@ -94,7 +105,7 @@ fn symmetric_rank_k_update_writes_only_the_stored_triangle() {
 							Conj::No,
 							a.as_ref().transpose(),
 							BlockStructure::Rectangular,
-							Conj::Yes,
+							Conj::No,
 						),
 						1 => (
 							a.as_ref().transpose(),
@@ -104,13 +115,21 @@ fn symmetric_rank_k_update_writes_only_the_stored_triangle() {
 							BlockStructure::Rectangular,
 							Conj::No,
 						),
-						_ => (
+						2 => (
 							a.as_ref().transpose(),
 							BlockStructure::Rectangular,
 							Conj::Yes,
 							a.as_ref(),
 							BlockStructure::Rectangular,
 							Conj::No,
+						),
+						_ => (
+							a.as_ref(),
+							BlockStructure::Rectangular,
+							Conj::No,
+							a.as_ref().transpose(),
+							BlockStructure::Rectangular,
+							Conj::Yes,
 						),
 					};
 				for beta in [Accum::Replace, Accum::Add] {

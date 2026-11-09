@@ -177,22 +177,27 @@ fn trsm_does_not_touch_memory_outside_its_operand() {
 	use BlockStructure::*;
 	for structure in [TriangularLower, UnitTriangularUpper] {
 		for (left, order) in [(true, 4usize), (false, 3usize)] {
-			let a = operand(order, structure);
-			let a_before = a.clone();
 			let (rows, cols) = if left { (order, 2) } else { (2, order) };
-			// a known system: `x` is the solution its right-hand side produces
+			// both operands live at (1, 1) inside their own rogue-filled parent,
+			// so a read or write outside the logical matrix shows up as well
+			let mut a_parent = Mat::<Scalar>::full(order + 2, order + 2, rogue());
+			a_parent
+				.as_mut()
+				.submatrix_mut(1, 1, order, order)
+				.copy_from(&operand(order, structure));
+			let a_before = a_parent.clone();
+			// a known system: `x` is the solution its right-hand side produces,
+			// built from the coefficient matrix as it was stored before the call
 			let x =
 				Mat::<Scalar>::from_fn(rows, cols, |i, j| integer(i + j, j + 2));
 			let rhs = rhs_from_solution(
-				a.as_ref(),
+				a_before.as_ref().submatrix(1, 1, order, order),
 				structure,
 				0,
 				left,
 				x.as_ref(),
 				one(),
 			);
-			// the in-place output lives at (1, 1) inside a rogue-filled parent,
-			// so a write outside the logical matrix shows up as well
 			let mut parent = Mat::<Scalar>::full(rows + 2, cols + 2, rogue());
 			parent
 				.as_mut()
@@ -200,12 +205,13 @@ fn trsm_does_not_touch_memory_outside_its_operand() {
 				.copy_from(&rhs);
 			let before = parent.clone();
 			{
+				let a = a_parent.as_ref().submatrix(1, 1, order, order);
 				let b = parent.as_mut().submatrix_mut(1, 1, rows, cols);
 				if left {
-					solve(a.as_ref(), structure, Conj::No, b, Par::Seq);
+					solve(a, structure, Conj::No, b, Par::Seq);
 				} else {
 					solve(
-						a.as_ref().transpose(),
+						a.transpose(),
 						structure.transpose(),
 						Conj::No,
 						b.transpose_mut(),
@@ -234,9 +240,11 @@ fn trsm_does_not_touch_memory_outside_its_operand() {
 				),
 				"{ctx}: the solve wrote outside its right-hand side"
 			);
+			// the whole parent, not only its padding: the stored operand has to
+			// come back unchanged (NaN compares to NaN)
 			crate::assert!(
-				exact(a.as_ref(), a_before.as_ref()),
-				"{ctx}: the triangular operand was modified"
+				exact(a_before.as_ref(), a_parent.as_ref()),
+				"{ctx}: the triangular operand or its parent was modified"
 			);
 		}
 	}

@@ -132,7 +132,20 @@ pub fn norm_l1<T: ComplexField>(mut mat: MatRef<'_, T>) -> T::Real {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::{Col, Mat, assert};
+	use crate::{Col, Mat, assert, c32, c64};
+
+	/// `DZASUM`/`SCASUM` with `incx > 1`: a complex vector read every other
+	/// entry of a 2-row matrix, whose row stride is therefore above 1 and which
+	/// takes the strided fallback instead of the SIMD path
+	fn check_strided_complex<T: ComplexField>(mat: Mat<T>) {
+		let col = mat.as_ref().transpose().col(0);
+		assert!(col.row_stride() > 1);
+		let mut target = mat.as_ref()[(0, 0)].abs1();
+		for j in 1..mat.ncols() {
+			target += mat.as_ref()[(0, j)].abs1();
+		}
+		assert!(norm_l1(col.as_mat()) == target);
+	}
 
 	#[test]
 	fn test_norm_l1() {
@@ -157,5 +170,11 @@ mod tests {
 		let mat = Col::from_fn(10000000, |_| 0.3);
 		let target = 0.3 * 10000000.0f64;
 		assert!(relative_err(norm_l1(mat.as_ref().as_mat()), target) < 1e-14);
+		check_strided_complex(Mat::<c64>::from_fn(2, 7, |i, j| {
+			c64::new((i * 7 + j * 3) as f64 - 2.0, (i * 9 + j * 5) as f64 - 3.0)
+		}));
+		check_strided_complex(Mat::<c32>::from_fn(2, 7, |i, j| {
+			c32::new((i * 7 + j * 3) as f32 - 2.0, (i * 9 + j * 5) as f32 - 3.0)
+		}));
 	}
 }

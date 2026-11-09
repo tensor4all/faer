@@ -58,7 +58,7 @@ already exercises the source's check; a reason says which.
 | OpenBLAS file/check | faer counterpart | Port? | Reason |
 | --- | --- | --- | --- |
 | `CHECK1` `ISAMAX`/`IDAMAX` (index of the largest modulus) | none (`reductions::norm_max` returns the value, not the index) | no | faer has no index-reduction API; nothing to call |
-| `CHECK1` `SASUM`/`DASUM`, `SCASUM`/`DZASUM` | `reductions::norm_l1` (`abs1`, so the complex entries are `\|re\|+\|im\|`) | covered | `norm_l1::tests::test_norm_l1`; the source adds only 5-entry, `incx` 1/2 fixtures |
+| `CHECK1` `SASUM`/`DASUM`, `SCASUM`/`DZASUM` | `reductions::norm_l1` (`abs1`, so the complex entries are `\|re\|+\|im\|`) | covered | `norm_l1::tests::test_norm_l1` runs its contiguous `f64` fixtures and, through `check_strided_complex`, a `c64` and a `c32` vector whose row stride is above 1 (the source's `incx = 2` half, which takes the strided fallback rather than the SIMD path). The source's 5-entry lengths and its negative strides are not ported |
 | `CHECK2` `SDOT`/`DDOT`/`CDOTU`/`ZDOTU`, `CDOTC`/`ZDOTC` | `matmul::dot::inner_prod` | no | the counterpart exists, but it has no unit test of its own (it is exercised only through the decompositions that call it), so the source's 5-entry dot over `incx`/`incy` in {1, 2, -2, -1} is a candidate for the next batch, not covered |
 | `CHECK2`/`CHECK3` `SAXPY`/`SCOPY`/`SSWAP`/`SSCAL`/`SROT`/`SROTG`, `CSSCAL`/`ZDSCAL`/`CROTG`/`CSROT` | none | no | no level-1 vector API in faer (the source sweeps `incx`/`incy` over {1, 2, -2, -1}) |
 | `CHECK1` `SNRM2`/`DNRM2`/`SCNRM2`/`DZNRM2` | `reductions::norm_l2`, `MatRef::norm_l2`, `ColRef::norm_l2` | covered | the source check is `n = 0..4` with `incx` 1/2 and small values; `norm_l2::tests::test_norm_l2_strided_range` already reads a stride-2 row view, and the exponent-range half of the property is [#36](https://github.com/tensor4all/faer/issues/36) / [faer-008](../upstream-reports/faer-008-norm-l2-strided-range/README.md) |
@@ -74,6 +74,16 @@ already exercises the source's check; a reason says which.
 | `DCHK4` `GER` | `matmul::matmul` with `K = 1` (the private `rank_update` module) | ported (`blas_rank_update.rs`) | the exact rank-1 update, including both destination layouts |
 | `DCHK5` `SYR`/`SPR` | `matmul_with_conj` with a triangular destination and `K = 1` | ported (`blas_rank_update.rs`) | `SPR`'s packed storage has no counterpart |
 | `DCHK6` `SYR2`/`SPR2` | none | no | two rank-1 terms, i.e. two calls; there is no single kernel to test |
+| `ZCHK4` `ZGERC`/`ZGERU` (complex only, `zblat2.f:165-166`) | `matmul::matmul` with `K = 1` (`ZGERU`, unconjugated) and `matmul::triangular::matmul_with_conj` with `Conj::Yes` on the row operand (`ZGERC`) | `ZGERU` covered, `ZGERC` no | the complex rank-1 test runs the unconjugated `K = 1` path, which is the `ZGERU` half of the pair. The conjugated form has the same counterpart with `Conj::Yes` but no test, so it is a next-batch candidate, not covered |
+| `ZCHK5` `ZHER`/`ZHPR` (complex only, `zblat2.f:167-168`) | `matmul_with_conj` with a triangular destination and `Conj::Yes` on the row operand | no | the `SYR`/`SPR` shape with the row operand conjugated; `ZHPR`'s packed storage has no counterpart. Deliberately unported in this batch |
+| `ZCHK6` `ZHER2`/`ZHPR2` (complex only, `zblat2.f:169`) | none | no | two rank-1 terms, i.e. two calls, and `ZHPR2` is packed |
+| `ZCHK2` `ZHEMV`/`ZHBMV`/`ZHPMV` (complex only) | none | no | the Hermitian matvec siblings of the `SYMV` row above; the banded and packed storage has no counterpart |
+
+The complex `blat2` file numbers its groups differently from the real one: `ZCHK2`
+is the Hermitian matvec, `ZCHK3` carries all six triangular names (as `DCHK3`
+does), and the complex-only rank updates are `ZCHK4` (`GERC`/`GERU`), `ZCHK5`
+(`HER`/`HPR`) and `ZCHK6` (`HER2`/`HPR2`), from the `SNAMES` list at
+`zblat2.f:165-169` and the dispatch at `zblat2.f:343-345`.
 
 ### Level 3 — `test/{s,d,c,z}blat3.f` (`DCHK1`-`DCHK5`), `ctest/c_*blat3c.c`
 
@@ -83,8 +93,10 @@ already exercises the source's check; a reason says which.
 | `DCHK2` `SYMM` | none | no | no symmetric structured multiply |
 | `DCHK3` `TRMM` | `matmul::triangular::matmul_with_conj` | ported (`blas_trmm.rs`) | both sides, `N`/`T`/`C`, lower/upper, and the generic/strict/unit diagonal; the source's ROGUE diagonal and ROGUE unreferenced triangle are the checked property, and the destination is a padded submatrix of a ROGUE parent |
 | `DCHK3` `TRSM` | `triangular_solve::solve_{,unit_}{lower,upper}_triangular_in_place_with_conj` | ported (`blas_trsm.rs`) | both sides and `N`/`T`/`C`; `alpha` has no parameter in faer, so the fixture scales the right-hand side by `alpha` before the solve, which is the same computation; the in-place right-hand side is a padded submatrix of a ROGUE parent |
-| `DCHK4` `SYRK` | `matmul_with_conj` with `TriangularLower`/`TriangularUpper` destination | ported (`blas_rank_update.rs`) | the referenced half is computed and the other half must stay untouched (`LDERES 'SY'`) |
+| `DCHK4` `SYRK` | `matmul_with_conj` with `TriangularLower`/`TriangularUpper` destination | ported (`blas_rank_update.rs`) | the referenced half is computed and the other half must stay untouched (`LDERES 'SY'`); the four TRANS/conjugation arms are `A A^T`, `A^T A`, `A^H A` and `A A^H`, and the `n = 3, k = 1` shape carries `SYR`'s non-diagonal rank-1 update |
 | `DCHK5` `SYR2K` | none | no | `A*B^T + B*A^T` is two calls of the same kernel |
+| `ZCHK4` `ZHERK` (complex only, `zblat3.f:146`) | `matmul_with_conj` with a triangular destination and `Conj::Yes` on the second operand | covered (`blas_rank_update.rs`) | the `A A^H` arm; `ZSYRK` (`A A^T`) is the unconjugated sibling and the same test covers it in every dtype, so conjugation and its absence are separate cases rather than one case standing in for both |
+| `ZCHK5` `ZHER2K` (complex only, `zblat3.f:147`) | none | no | `A*B^H + B*A^H` is two calls of the same kernel |
 | `_3m` variants (`cblat3_3m.f`, `zblat3_3m.f`) | none | no | faer has no 3m algorithm |
 | `DMAKE`/`DMMCH`/`LDE`/`LDERES` helpers | `tests/blas_support.rs` (`entry`, `product`, `blended`, `exact`, `untouched_outside`) | adapted | reimplemented, not translated: the reference product is explicit, and the comparison is exact |
 
@@ -107,9 +119,9 @@ in the default (non-nightly) run:
 | `matmul::blas::*::trmm_matches_an_independent_product` | the product of a triangular operand equals an independently accumulated product over the bounded shape set, for every lower/upper, generic/strict/unit, `N`/`T`/`C`, left/right and `alpha` combination |
 | `matmul::blas::*::trmm_reads_and_writes_nothing_outside_its_operands` | the operand's unreferenced triangle and implicit diagonal (NaN) are never read; the operand and the destination each sit in a padded submatrix of their own ROGUE-filled parent, the destination is checked entry by entry against an independent product computed from the operand's pre-call snapshot, and both whole parents (padding and stored operand alike) must come back unchanged |
 | `matmul::blas::*::rank_one_update_matches_the_source_contract` | `A = alpha*x*y^T + beta*A` for `Replace`/`Add`, in a column-major and a row-major destination |
-| `matmul::blas::*::symmetric_rank_k_update_writes_only_the_stored_triangle` | the referenced half of `C` is `alpha*A*op(A)^H + beta*C`, the other half (NaN) is neither read nor written, and `A` is unchanged |
+| `matmul::blas::*::symmetric_rank_k_update_writes_only_the_stored_triangle` | the referenced half of `C` is `alpha*op(A)*op(A)^H + beta*C` for all four arms (`A A^T`, `A^T A`, `A^H A`, `A A^H`), the other half (NaN) is neither read nor written, and `A` is unchanged; `(n, k) = (3, 1)` covers `SYR`'s non-diagonal rank-1 update |
 | `triangular_solve::blas::*::trsm_recovers_the_exact_solution_with_an_implicit_diagonal` | the exact reference solution is recovered for both sides, `N`/`T`/`C`, lower/upper, generic/unit, with NaN in the unreferenced triangle and in a unit diagonal |
-| `triangular_solve::blas::*::trsm_does_not_touch_memory_outside_its_operand` | for `TriangularLower` and `UnitTriangularUpper` on both sides, a known system's exact solution is recovered in place, and the solve neither reads nor writes outside the right-hand side inside its parent buffer (padded on both sides), with the operand unchanged |
+| `triangular_solve::blas::*::trsm_does_not_touch_memory_outside_its_operand` | for `TriangularLower` and `UnitTriangularUpper` on both sides, a known system's exact solution is recovered in place; the coefficient matrix and the in-place right-hand side each sit in a padded submatrix of their own ROGUE-filled parent, and each whole parent (stored operand and padding) must come back unchanged |
 
 Which of these are new, and which overlap existing coverage:
 
