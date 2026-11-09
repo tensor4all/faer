@@ -627,9 +627,8 @@ pub fn lu_in_place_scratch<I: Index, T: ComplexField>(
 	StackReq::new::<I>(Ord::min(nrows, ncols))
 }
 /// `perf-warn`: whether neither stride walks a line, i.e. the input is neither
-/// column-major (`row_stride` 1) nor row-major (`col_stride` 1). Both preferred
-/// layouts factor at the same speed, so only a matrix that is neither warns;
-/// the predicate this replaced warned on every row-major input.
+/// column-major (`row_stride` 1) nor row-major (`col_stride` 1). The predicate
+/// this replaced warned on every row-major input.
 #[cfg(any(feature = "perf-warn", test))]
 #[inline]
 pub(crate) fn has_generic_strides(
@@ -768,6 +767,8 @@ mod tests {
 		assert!(!has_generic_strides(1, 64)); // transposed view: one stride still walks a line
 		assert!(has_generic_strides(3, 2)); // neither stride walks a line
 		assert!(!has_generic_strides(-64, 1)); // reversed row-major
+		assert!(!has_generic_strides(64, -1)); // row-major, reversed columns: |col_stride| is 1
+		assert!(!has_generic_strides(-1, 64)); // column-major, reversed rows: |row_stride| is 1
 		assert!(has_generic_strides(-2, -130));
 	}
 	#[cfg(feature = "rayon")]
