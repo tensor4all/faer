@@ -1,0 +1,5 @@
+# Default owners for everything in this repository.
+# Terasaki-san maintains this fork: he has had admin on it, and on
+# tenferro-rs, tensor4all-rs and strided-rs, since before this file existed.
+# This file only makes that visible, so GitHub routes review requests to him.
+* @terasakisatoshi
