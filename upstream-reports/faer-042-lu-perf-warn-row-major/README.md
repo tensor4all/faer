@@ -1,6 +1,6 @@
 # faer-042: partial pivoting LU warns "generic strides" on contiguous row-major input
 
-**What happens:** with the `perf-warn` feature on, the first column-pivoted LU of a contiguous 64 x 64 row-major matrix logs `LU with partial pivoting prefers column-major or row-major matrix. Found matrix with generic strides.` at target `faer_perf`. The factorisation itself is correct; the message is the defect, and it names row-major as one of the two layouts it says it prefers.
+**What happens:** with the `perf-warn` feature on, the first column-pivoted LU of a contiguous 64 x 64 row-major matrix logs `LU with partial pivoting prefers column-major or row-major matrix. Found matrix with generic strides.` at target `faer_perf`. This report counts warnings only: it does not check the factors numerically. The message is the defect, and it names row-major as one of the two layouts it says it prefers.
 **Which input:** any matrix whose `col_stride` is `1`, i.e. any contiguous row-major one, of any shape. The program uses a `64 x 64` `f64` matrix and passes the transpose view of a column-major `Mat`, so `row_stride = 64`, `col_stride = 1`.
 **Which version:** `faer` 0.24.4, and upstream `main` at `0ecd846` (2026-10-22), where the predicate is unchanged.
 **Added to this list:** 2026-11-09.
