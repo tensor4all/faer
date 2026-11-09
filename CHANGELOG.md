@@ -10,6 +10,16 @@ Changes since `t4a-faer` 0.32.0 (tag `faer-v0.32.0`). Numbers are tensor4all/fae
   An empty matrix still returns 0. Code that relied on NaN being skipped, for example `norm_max() < tol` as a test that holds for a matrix with
   NaN entries, now sees NaN, and every comparison with NaN is false (#316).
 
+## Performance
+
+- `factorize_symbolic_lu_with_column_ordering` and `factorize_symbolic_qr_with_column_ordering` no longer request the COLAMD
+  workspace when the caller supplies the column ordering. COLAMD only runs in the `None` branch, but the `MemBuffer` was sized with
+  `StackReq::or(colamd::order_scratch(..), ..)` either way, so the ordering was paid for twice. On the issue's reproducer (n = 2000,
+  nnz = 7990, identity ordering, `--release`) the largest single allocation of a simplicial analysis drops from 332712 B, which was
+  exactly the `colamd::order_scratch` request, to 239928 B, which is the analysis workspace (92784 B less); the supernodal arm still
+  allocates 468080 B, which is the supernodal symbolic workspace and not the COLAMD one. The `None` path requests what it
+  requested before, and no caller `MemStack` variant is added: that is an API decision, not part of this fix (#322).
+
 ## Correctness
 
 - `stats::col_mean` and `stats::col_varm` wrote their results in reverse order when the input had a negative row stride (for example
