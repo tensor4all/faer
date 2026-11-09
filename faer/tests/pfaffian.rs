@@ -398,8 +398,8 @@ fn team_agreement_and_actual_row_dispatch() {
 				// counts is not promised (docs/reproducibility.md, tensor4all/faer#327). The
 				// bound scales with the Pfaffian itself, so a wrong sign or a lost column
 				// fails: these fixtures return |want| = 3.07e-21 (f32, f64) and 0.161087
-				// (c32, c64), where a floor of 1 would be looser by 3.7e9 (f64), 2.0e18 (f32)
-				// and 6.21 (c32, c64).
+				// (c32, c64), so a floor of 1 would make the bound 3.2569e20 (f32, f64) and
+				// 6.2078 (c32, c64) times looser.
 				let bound = eps::<T::Real>()
 					* from_f64::<T::Real>(200.0 * a.nrows().max(1) as f64)
 					* want.clone().abs();
