@@ -10,9 +10,10 @@
 // MIT licence.
 // Material changes: DCHK3's parameter sweep (N = 0,1,2,3,7,31,63; alpha
 // 0.0,0.7,1.0; LDA = N+1 padding) is cut to a bounded shape set with exact
-// alpha, and the rogue value (-1.0D10) becomes NaN. Strict-triangle block
-// structures, which BLAS has no DIAG value for, are included because faer
-// exposes them.
+// alpha, and the rogue value (-1.0D10) becomes NaN. The destination is a
+// submatrix of a rogue-filled parent, so the source's LDA padding also covers
+// writes. Strict-triangle block structures, which BLAS has no DIAG value for,
+// are included because faer exposes them.
 
 /// the triangular operand: exact integers inside the stored triangle, NaN
 /// everywhere the block structure does not access (including a unit or strict
@@ -147,18 +148,20 @@ fn trmm_reads_and_writes_nothing_outside_its_operands() {
 	] {
 		let (m, n) = (5, 4);
 		let order = if left { m } else { n };
-		// the operand lives at (1, 1) inside a rogue-filled parent, so a read
-		// or write outside the logical matrix shows up as well
-		let mut parent = Mat::<Scalar>::full(order + 2, order + 2, rogue());
-		parent
+		// both operands live at (1, 1) inside their own rogue-filled parent, so
+		// a read or write outside the logical matrix shows up as well
+		let mut a_parent = Mat::<Scalar>::full(order + 2, order + 2, rogue());
+		a_parent
 			.as_mut()
 			.submatrix_mut(1, 1, order, order)
 			.copy_from(&operand(order, structure));
-		let before = parent.clone();
+		let a_before = a_parent.clone();
 		let b = Mat::<Scalar>::from_fn(m, n, |i, j| integer(i, j));
-		let mut dst = Mat::<Scalar>::zeros(m, n);
+		let mut dst_parent = Mat::<Scalar>::full(m + 2, n + 2, rogue());
+		let dst_before = dst_parent.clone();
 		{
-			let a = parent.as_ref().submatrix(1, 1, order, order);
+			let a = a_parent.as_ref().submatrix(1, 1, order, order);
+			let mut dst = dst_parent.as_mut().submatrix_mut(1, 1, m, n);
 			if left {
 				matmul_with_conj(
 					&mut dst,
@@ -189,17 +192,65 @@ fn trmm_reads_and_writes_nothing_outside_its_operands() {
 				);
 			}
 		}
+		let ctx = format!(
+			"trmm structure={structure:?} left={left} m={m} n={n}"
+		);
+		// the guarded destination holds the product, not a discarded buffer
+		let want = if left {
+			blended(
+				Accum::Replace,
+				Mat::<Scalar>::zeros(m, n).as_ref(),
+				Rectangular,
+				a_parent.as_ref().submatrix(1, 1, order, order),
+				structure,
+				Conj::No,
+				b.as_ref(),
+				Rectangular,
+				Conj::No,
+				one(),
+			)
+		} else {
+			blended(
+				Accum::Replace,
+				Mat::<Scalar>::zeros(m, n).as_ref(),
+				Rectangular,
+				b.as_ref(),
+				Rectangular,
+				Conj::No,
+				a_parent.as_ref().submatrix(1, 1, order, order),
+				structure,
+				Conj::No,
+				one(),
+			)
+		};
+		let got = dst_parent.as_ref().submatrix(1, 1, m, n);
+		crate::assert!(
+			exact(got, want.as_ref()),
+			"{ctx}\ngot={:?}\nwant={:?}",
+			got,
+			want.as_ref()
+		);
 		crate::assert!(
 			untouched_outside(
-				before.as_ref(),
-				parent.as_ref(),
+				a_before.as_ref(),
+				a_parent.as_ref(),
 				1,
 				1,
 				order,
 				order
 			),
-			"trmm touched memory outside its operand: structure={structure:?} \
-			 left={left}"
+			"{ctx}: the triangular operand's parent was modified"
+		);
+		crate::assert!(
+			untouched_outside(
+				dst_before.as_ref(),
+				dst_parent.as_ref(),
+				1,
+				1,
+				m,
+				n
+			),
+			"{ctx}: the destination's parent was modified outside the product"
 		);
 	}
 }

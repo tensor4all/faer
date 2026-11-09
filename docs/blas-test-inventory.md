@@ -37,8 +37,13 @@ exact-integer fixture and exact binary `alpha`, so the reference product is
 compared exactly instead of through `DMMCH`'s eps ratio; and the rogue value
 (`ROGUE = -1.0D10`) becomes NaN, which is the stronger sentinel. The source's
 "operand unchanged" and "leading-dimension padding" checks are kept as
-`exact`/`untouched_outside`. faer's strict-triangle block structures have no
-BLAS `DIAG` value; they are covered because faer exposes them.
+`exact`/`untouched_outside`. In the four ported cases below (`DTRMM`, `DTRSM`,
+`DGER`/`DSYR`, `DSYRK`) both the read operand and the written operand sit in a
+rogue-filled parent with one row and one column of padding on each side, so the
+padding check covers the destination as well; the source itself only pads the
+leading dimension of the arrays it passes in. faer's strict-triangle block
+structures have no BLAS `DIAG` value; they are covered because faer exposes
+them.
 
 ## Inventory
 
@@ -73,8 +78,8 @@ already exercises the source's check; a reason says which.
 | --- | --- | --- | --- |
 | `DCHK1` `GEMM` | `matmul::matmul`, `matmul::triangular::matmul_with_conj` (both `Rectangular`) | no | `matmul::tests::test_matmul` covers the product but is `#[ignore]`d as too slow; the bounded non-ignored GEMM case is a candidate for the next batch, and this batch's TRMM/rank-k suites already run the dense path as their reference |
 | `DCHK2` `SYMM` | none | no | no symmetric structured multiply |
-| `DCHK3` `TRMM` | `matmul::triangular::matmul_with_conj` | ported (`blas_trmm.rs`) | both sides, `N`/`T`/`C`, lower/upper, and the generic/strict/unit diagonal; the source's ROGUE diagonal and ROGUE unreferenced triangle are the checked property |
-| `DCHK3` `TRSM` | `triangular_solve::solve_{,unit_}{lower,upper}_triangular_in_place_with_conj` | ported (`blas_trsm.rs`) | both sides and `N`/`T`/`C`; `alpha` has no parameter in faer, so the fixture scales the right-hand side by `alpha` before the solve, which is the same computation |
+| `DCHK3` `TRMM` | `matmul::triangular::matmul_with_conj` | ported (`blas_trmm.rs`) | both sides, `N`/`T`/`C`, lower/upper, and the generic/strict/unit diagonal; the source's ROGUE diagonal and ROGUE unreferenced triangle are the checked property, and the destination is a padded submatrix of a ROGUE parent |
+| `DCHK3` `TRSM` | `triangular_solve::solve_{,unit_}{lower,upper}_triangular_in_place_with_conj` | ported (`blas_trsm.rs`) | both sides and `N`/`T`/`C`; `alpha` has no parameter in faer, so the fixture scales the right-hand side by `alpha` before the solve, which is the same computation; the in-place right-hand side is a padded submatrix of a ROGUE parent |
 | `DCHK4` `SYRK` | `matmul_with_conj` with `TriangularLower`/`TriangularUpper` destination | ported (`blas_rank_update.rs`) | the referenced half is computed and the other half must stay untouched (`LDERES 'SY'`) |
 | `DCHK5` `SYR2K` | none | no | `A*B^T + B*A^T` is two calls of the same kernel |
 | `_3m` variants (`cblat3_3m.f`, `zblat3_3m.f`) | none | no | faer has no 3m algorithm |
@@ -96,12 +101,12 @@ in the default (non-nightly) run:
 
 | Test | Property |
 | --- | --- |
-| `matmul::blas::*::trmm_matches_an_independent_product` | the product of a triangular operand equals an independently accumulated product for every lower/upper, generic/strict/unit, `N`/`T`/`C`, left/right and `alpha` combination |
-| `matmul::blas::*::trmm_reads_and_writes_nothing_outside_its_operands` | the operand's unreferenced triangle and implicit diagonal (NaN) are never read, the operand is unchanged, and the parent buffer outside the operand is untouched |
+| `matmul::blas::*::trmm_matches_an_independent_product` | the product of a triangular operand equals an independently accumulated product over the bounded shape set, for every lower/upper, generic/strict/unit, `N`/`T`/`C`, left/right and `alpha` combination |
+| `matmul::blas::*::trmm_reads_and_writes_nothing_outside_its_operands` | the operand's unreferenced triangle and implicit diagonal (NaN) are never read, the operand is unchanged, and both the operand and the destination — each a padded submatrix of its own ROGUE-filled parent — stay within their own bounds; the destination is also checked entry by entry against the independent product |
 | `matmul::blas::*::rank_one_update_matches_the_source_contract` | `A = alpha*x*y^T + beta*A` for `Replace`/`Add`, in a column-major and a row-major destination |
 | `matmul::blas::*::symmetric_rank_k_update_writes_only_the_stored_triangle` | the referenced half of `C` is `alpha*A*op(A)^H + beta*C`, the other half (NaN) is neither read nor written, and `A` is unchanged |
 | `triangular_solve::blas::*::trsm_recovers_the_exact_solution_with_an_implicit_diagonal` | the exact reference solution is recovered for both sides, `N`/`T`/`C`, lower/upper, generic/unit, with NaN in the unreferenced triangle and in a unit diagonal |
-| `triangular_solve::blas::*::trsm_does_not_touch_memory_outside_its_operand` | the solve neither reads nor writes outside the operand inside its parent buffer |
+| `triangular_solve::blas::*::trsm_does_not_touch_memory_outside_its_operand` | for `TriangularLower` and `UnitTriangularUpper` on both sides, a known system's exact solution is recovered in place, and the solve neither reads nor writes outside the right-hand side inside its parent buffer (padded on both sides), with the operand unchanged |
 
 Which of these are new, and which overlap existing coverage:
 

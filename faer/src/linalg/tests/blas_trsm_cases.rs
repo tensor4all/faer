@@ -12,7 +12,9 @@
 // unit or a +/-1/+/-2 diagonal, the dimension sweep is bounded, and the rogue
 // value (-1.0D10) that the source stores in an unused triangle and a unit
 // diagonal becomes NaN. The source solves and then multiplies back to check the
-// residual; here the exact reference solution is recovered bit for bit.
+// residual; here the exact reference solution is recovered bit for bit, and the
+// in-place right-hand side is a submatrix of a rogue-filled parent, so the
+// source's LDA padding also covers writes.
 
 /// `op(A)[(i, j)]` with `op` = N (0), T (1) or C (2), reading only the stored
 /// triangle and an implicit unit diagonal
@@ -72,6 +74,31 @@ fn solve(
 	}
 }
 
+/// the right-hand side that the exact solution `x` produces in `op(A) X = B`
+/// (`left`) or `X op(A) = B`
+fn rhs_from_solution(
+	a: MatRef<'_, Scalar>,
+	structure: BlockStructure,
+	trans: usize,
+	left: bool,
+	x: MatRef<'_, Scalar>,
+	alpha: Scalar,
+) -> Mat<Scalar> {
+	let order = if left { x.nrows() } else { x.ncols() };
+	Mat::<Scalar>::from_fn(x.nrows(), x.ncols(), |i, j| {
+		let mut acc = zero::<Scalar>();
+		for k in 0..order {
+			acc = acc
+				+ if left {
+					op_entry(a, structure, trans, i, k) * x[(k, j)].copy()
+				} else {
+					x[(i, k)].copy() * op_entry(a, structure, trans, k, j)
+				};
+		}
+		alpha.copy() * acc
+	})
+}
+
 /// the system `op(A) X = B` (`left`) or `X op(A) = B`, solved and compared with
 /// `alpha * x`
 fn check_solve(
@@ -86,20 +113,8 @@ fn check_solve(
 	let a = operand(order, structure);
 	let a_before = a.clone();
 	let x = Mat::<Scalar>::from_fn(rows, cols, |i, j| integer(i + j, j + 2));
-	let mut b = Mat::<Scalar>::from_fn(rows, cols, |i, j| {
-		let mut acc = zero::<Scalar>();
-		for k in 0..order {
-			acc = acc
-				+ if left {
-					op_entry(a.as_ref(), structure, trans, i, k)
-						* x[(k, j)].copy()
-				} else {
-					x[(i, k)].copy()
-						* op_entry(a.as_ref(), structure, trans, k, j)
-				};
-		}
-		alpha.copy() * acc
-	});
+	let mut b =
+		rhs_from_solution(a.as_ref(), structure, trans, left, x.as_ref(), alpha);
 	// the system matrix that `X op(A) = B` turns into is the plain transpose
 	let (a_view, a_structure, conj) = match (left, trans) {
 		(true, 0) | (false, 1) => (a.as_ref(), structure, Conj::No),
@@ -162,40 +177,66 @@ fn trsm_does_not_touch_memory_outside_its_operand() {
 	use BlockStructure::*;
 	for structure in [TriangularLower, UnitTriangularUpper] {
 		for (left, order) in [(true, 4usize), (false, 3usize)] {
-			let mut parent = Mat::<Scalar>::full(order + 2, order + 2, rogue());
+			let a = operand(order, structure);
+			let a_before = a.clone();
+			let (rows, cols) = if left { (order, 2) } else { (2, order) };
+			// a known system: `x` is the solution its right-hand side produces
+			let x =
+				Mat::<Scalar>::from_fn(rows, cols, |i, j| integer(i + j, j + 2));
+			let rhs = rhs_from_solution(
+				a.as_ref(),
+				structure,
+				0,
+				left,
+				x.as_ref(),
+				one(),
+			);
+			// the in-place output lives at (1, 1) inside a rogue-filled parent,
+			// so a write outside the logical matrix shows up as well
+			let mut parent = Mat::<Scalar>::full(rows + 2, cols + 2, rogue());
 			parent
 				.as_mut()
-				.submatrix_mut(1, 1, order, order)
-				.copy_from(&operand(order, structure));
+				.submatrix_mut(1, 1, rows, cols)
+				.copy_from(&rhs);
 			let before = parent.clone();
-			let (rows, cols) = if left { (order, 2) } else { (2, order) };
-			let mut b =
-				Mat::<Scalar>::from_fn(rows, cols, |i, j| integer(i, j + 1));
 			{
-				let a = parent.as_ref().submatrix(1, 1, order, order);
+				let b = parent.as_mut().submatrix_mut(1, 1, rows, cols);
 				if left {
-					solve(a, structure, Conj::No, b.as_mut(), Par::Seq);
+					solve(a.as_ref(), structure, Conj::No, b, Par::Seq);
 				} else {
 					solve(
-						a,
-						structure,
+						a.as_ref().transpose(),
+						structure.transpose(),
 						Conj::No,
-						b.as_mut().transpose_mut(),
+						b.transpose_mut(),
 						Par::Seq,
 					);
 				}
 			}
+			let ctx = format!(
+				"trsm structure={structure:?} left={left} order={order}"
+			);
+			let got = parent.as_ref().submatrix(1, 1, rows, cols);
+			crate::assert!(
+				exact(got, x.as_ref()),
+				"{ctx}\ngot={:?}\nwant={:?}",
+				got,
+				x.as_ref()
+			);
 			crate::assert!(
 				untouched_outside(
 					before.as_ref(),
 					parent.as_ref(),
 					1,
 					1,
-					order,
-					order
+					rows,
+					cols
 				),
-				"trsm touched memory outside its operand: \
-				 structure={structure:?} left={left}"
+				"{ctx}: the solve wrote outside its right-hand side"
+			);
+			crate::assert!(
+				exact(a.as_ref(), a_before.as_ref()),
+				"{ctx}: the triangular operand was modified"
 			);
 		}
 	}
