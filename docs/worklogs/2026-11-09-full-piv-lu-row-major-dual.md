@@ -16,8 +16,9 @@
   `main`. That path was not timed; the allocation test pins the dispatch.
 - The rule is the issue's acceptance criterion applied shape by shape: the dual has to
   run within 1.05x of a column-major input. **Timed sizes**: on Apple M5 Max, square
-  64, 80, 96, 112, 120 and 127 in f64 and c64 at one and four threads (the paired run
-  below: per-repetition median C/A 0.888-1.017 over those 24 cells); on Zen 5, the
+  64, 80, 96, 112, 120 and 127 in f64 and c64 at one and four threads (measurement 4
+  below, the submitted code `4f42453`: median C/A 0.962-1.071 over those 24 cells, 23
+  of them at or below 1.05 and `c64` 127 at four threads at 1.071); on Zen 5, the
   issue's earlier comment, n = 64 and 96 at 0.94-1.04 over f64/c64/f32 at 1T and 8T.
   The sizes in between (65-79, 81-95, ...) and every size other than 64 and 96 on
   Zen 5 were **not timed**; they are taken on the strength of their neighbours.
@@ -60,6 +61,29 @@
   column per step, against an O(m) column walk. The parallel step's merge across
   column blocks keeps the earlier block with a strict `>`, which is the smaller column;
   no tie test runs on a team.
+- **Complex entries are not scored by modulus, and the two searches score them
+  differently** (inherited, found by the fourth #342 review). The SIMD search on
+  contiguous columns takes `|re|` and `|im|` as separate lanes, so an entry scores
+  `max(|re|, |im|)`; the scalar search (strided views, types without SIMD, or pulp
+  dispatching to `Scalar`) scores `|re| + |im|`, and so does the SIMD search for a
+  generic `Complex<T>` such as `cx128` (fifth review: only the native `c32`/`c64`
+  vectors hold the parts in separate lanes). Zero 16x16 `c64` with
+  `A[(0, 1)] = 3 + 4i`, `A[(2, 1)] = 5`, `max_rank = Some(1)`, `Par::Seq` pivots on
+  `(2, 1)` contiguous and on `(0, 1)` through strides `(2, 32)` (reproduced on
+  `809eaa2`, Apple M5: `[(2, 1), (0, 1)]` against the old text's `(0, 1)` for both).
+  "Pivot ties" on `lu_in_place` now limits the index-order rule to real `T` and states
+  the two scores; `full_piv_lu_complex_tie_follows_the_search_score` pins the pair of
+  fixtures that only a score (either one) explains, and
+  `full_piv_lu_cx128_pivot_uses_the_sum_score` the sum score for `cx128` on both
+  layouts (red with the component pair: `((0, 1, 1), (2, 1, 2))` returned). **Why the difference is
+  acceptable:** both scores lie within `sqrt(2)` of the modulus,
+  `|z| / sqrt(2) <= max(|re|, |im|) <= |z| <= |re| + |im| <= sqrt(2) |z|`, so whichever
+  search runs, the pivot's modulus is at least `1/sqrt(2)` of the largest modulus in the
+  block. Full pivoting needs a pivot of near-maximal size, not the exact maximum: the
+  growth bound loosens by at most `sqrt(2)` per step, the same relaxation LAPACK's
+  `|re| + |im|` (`izamax`, `cabs1`) accepts, and the rank-truncation residual bound
+  already carries that factor. Making both paths score alike would put a pairwise lane
+  add in the innermost loop or change the shared `simd_abs1`; not done here.
 
 ## Where the dual loses (stage breakdown, M5 Max, f64, one thread)
 
@@ -102,32 +126,47 @@ Per-stage timers inside `lu_in_place_unblocked` (local patch, not committed):
   target directory) failed on that test alone, with 955 passing. The counts are in the
   #342 description. It is one of the host failures listed in
   `2026-11-04-gevd-repeated-complex-pairs.md`.
+- Hosted CI on `809eaa2` (run 42604051892, "Run Tests"): completed `success` at
+  11:32:42Z; the coverage job (`testing-stable-ubuntu-latest`,
+  `cargo llvm-cov nextest --features=unstable`) ran 891 tests, 891 passed, 162 skipped,
+  `lq_allocates_nothing_60x300` among the passes. The MSRV and no-std jobs only build.
+  `4f42453`: run 42612501786 success. `fb29edb`: run 42616305272 success, 894 run,
+  894 passed, 162 skipped, the two complex tests among them.
 - Padded and reversed row-major views (`(100, 1)`, `(-100, 1)`) go through the dual by
   the guard; the allocation test shows that for `(100, 1)` and the adaptation test
   covers reversed rows for correctness. Their speed was **not measured**; the timed
   cells are contiguous row-major only.
-- **Measurement 2 (the guard as merged, before the tie fix)**: the source of `32c615f`
-  (clean committed tree; `faer/src` tree `38ce727`). `63790b0` then changed `faer/src`
-  again (the `best_score` tie fix, one more mask per accumulator merge, and doc
-  comments); that head was **not re-timed**, so the numbers below do not cover it.
-  It was measured against `main` `b16d6b8`, both built into fbench `01a1cb8` with the same
-  one-line local `set_threads` patch (returns Ok for `NAME == "none"`), family
-  `full_piv_lu`, row `faer-fork`, the `in_place` line, `--reps 5 --prime-ms 250
-  --statistic median`. Cells: square 64, 80, 96, 112, 120, 127 (changed) and 128, 256
-  (unchanged code, the control), f64 and c64, 1T and 4T, three repetitions; per cell
-  and repetition the two binaries run back to back (head first on odd repetitions,
-  base first on even). Each process reports its own column-major A and row-major C (or
-  B), so the ratio is taken within a process and the median over the three
-  repetitions is reported. Gate as below (no `rustc`, busy `cargo`, or other
-  `target/` binary before and after); 11 cells were discarded and rerun, 96 kept, 1-min
-  load before a kept cell 7.0-26.4, 18:41-19:01 JST. `fbench verify` passed all 64
-  cells per thread count (1T, 4T) on the head binary. The full table is in the #342
-  description. Result: C/A 0.888-1.017 on all 24 changed cells, base B/A 0.978-1.343
-  (median per cell); the unchanged 128/256 controls read C/A 0.976-1.181 at head and
-  B/A 1.005-1.150 at base. Single repetitions swing far more (one control cell 0.650,
-  another 1.616; the two binaries' A arms of one repetition differ by up to 1.8x), so
-  per-repetition medians are the only statistic here, and they are a scan, not a
-  campaign `candidate_compare.py` result (that was not run).
+- **Measurement 4 (the submitted code against the code before the tie fix)**: new =
+  `4f42453`, old = `32c615f`, both built fresh into fbench `01a1cb8` with the one-line
+  local `set_threads` patch; `--reps 5 --prime-ms 250 --statistic median`, family
+  `full_piv_lu`, row `faer-fork`, the `in_place` line. The only change between them
+  that fbench executes is `best_score` (`63790b0`): fbench takes `t4a-faer` with `std`
+  and `rayon` only, and the `perf-warn` predicate (`c785a2e`) is behind its feature.
+  `fb29edb` after `4f42453` changes only a doc comment and a test. Cells: square 64, 80,
+  96, 112, 120, 127 (changed) and 128, 256 (control), f64 and c64, 1T and 4T, three
+  repetitions, the two binaries back to back per cell and repetition (new first on odd
+  repetitions). Gate: no `rustc`, no `cargo` above 5%, no `faer-benchmark-58` process
+  above 1% (the #58 CPU probe), no other `target/` binary above 5%, before and after
+  each cell; 96 kept, 43 discarded and rerun; 21:09-22:00 JST, 2026-11-09, 1-min load
+  before a kept cell 4.0-16.3. The table, with each row's times, loads and the herdr
+  agents in `working` state, is in the #342 description.
+  - Acceptance (C/A within a process): new 0.962-1.071 on the 24 changed cells, 23 at
+    or below 1.05, the exception 4T `c64` 127 at 1.071 (repetitions 1.159 / 1.071 /
+    1.015). Old 0.949-1.093.
+  - Before/after in absolute time: column-major A is slower at new in all 32 cells
+    (median 1.036; changed cells 1.002-1.130, controls 1.005-1.053), row-major C too
+    (median 1.041 on the changed cells). A is column-major on both revisions, so this
+    is the tie fix's extra mask in every column search or binary layout; the design
+    does not separate the two. **A 2-4% absolute regression, reported as measured.**
+  - `candidate_compare.py` was not run: it needs campaign run directories (`run.yaml`,
+    an upstream control row) and refuses a merge revision whose `faer/src` differs
+    from the measured one, as `fb29edb` does (a doc comment).
+- Measurement 3 (same protocol, `5ed7153`, a local commit with the executed code of
+  `4f42453`, against `main` `b16d6b8`, 20:19-21:03 JST, load 5.7-24.3): median C/A
+  0.984-1.053 on the changed cells (1T `c64` 64 at 1.053); base B/A 1.031-1.239.
+  `fbench verify` passed all 64 cells per thread count on that binary.
+- Measurement 2 (`32c615f` against `b16d6b8`, 18:41-19:01 JST): median C/A
+  0.888-1.017 on the changed cells. It measured the code before the tie fix.
 - Measurement 1 (the large-shape and boundary evidence above, 64-1024 square and the
   tall shapes): tensor4all/faer#314 comment (fbench `01a1cb8`, fork row only, fork
   `b16d6b8` plus a local, never committed `FAER_FLU_COPY=off` environment switch that
