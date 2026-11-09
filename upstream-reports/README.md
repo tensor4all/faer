@@ -56,6 +56,7 @@ The program prints the expected and the actual value, and exits with status 1 wh
 | [faer-039](faer-039-norm-max-ignores-nan/) | `norm_max` ignores NaN entries | `faer` 0.24.4 | wrong value | tensor4all/faer#319 (`c911ff3`) | not yet | 2026-11-09 |
 | [faer-040](faer-040-stats-negative-output-stride/) | The `stats` reductions write their output in reverse when the output axis has a negative stride | `faer` 0.24.4 | wrong value | tensor4all/faer#319 (`c911ff3`) | not yet | 2026-11-09 |
 | [faer-041](faer-041-zst-capacity-panic/) | `Mat::<()>::with_capacity(1, 1)` panics with a division by zero | `faer` 0.24.4 | panic | tensor4all/faer#288 (`a977480`) | not yet | 2026-11-09 |
+| [faer-042](faer-042-lu-perf-warn-row-major/) | Partial pivoting LU warns "generic strides" on contiguous row-major input | `faer` 0.24.4 | spurious `perf-warn` message | fix for tensor4all/faer#345 | not yet | 2026-11-09 |
 | [gemm-001](gemm-001-per-call-allocation/) | Every matrix product allocates on the heap | `gemm` 0.19.0 | heap allocation per call | not fixed (tensor4all/faer#56 planned) | not yet | 2026-10-30 |
 | [gemm-x86-001](gemm-x86-001-diag-negative-stride/) | A product with a diagonal gives a wrong value when the left matrix is stored backwards | `private-gemm-x86` 0.1.22 | wrong value | tensor4all/t4a-private-gemm-x86#5 (`84ca6db`) | not yet | 2026-10-29 |
 
@@ -63,7 +64,8 @@ The program prints the expected and the actual value, and exits with status 1 wh
 The 39 entries that predate this week (`faer-001` to `faer-038`, plus `gemm-001`) were all re-run on 2026-11-09 on the aarch64 host where this list is recorded, and they behave as their sections state (on aarch64 `faer-001` and `faer-026` do not trigger, as their sections say); no newer release existed to raise a pin to, and `gemm`'s and `private-gemm-x86`'s `main` are their release commits, so only `faer` needed a build from `main`.
 `gemm-x86-001` needs an x86 CPU and does not build on aarch64; it was run on x86_64 on 2026-11-09, where it builds and exits 1 as its section states.
 The three entries added this week (`faer-039`, `faer-040`, `faer-041`) were run from their own directories on both hosts and then against `faer`'s `main` at `0ecd846` as a path dependency, where they exit 1 with the same numbers; the one row where the two hosts disagree is marked in the `faer-039` table.
-That is 43 programs in total, and every one of them was executed on 2026-11-09 on a host where it builds and runs.
+That is 44 programs in total, and every one of them was executed on 2026-11-09 on a host where it builds and runs.
+The `perf-warn` entry (`faer-042`) was added on 2026-11-09 and run on its own, `cd upstream-reports/faer-042-* && cargo run --locked`, which exits 1 on its contiguous row-major input and 0 with `-- column-major`.
 The sweep of the 39 is `cd upstream-reports && for d in faer-0[01][0-9]-* faer-02[0-9]-* faer-03[0-8]-* gemm-001-*; do (cd "$d" && timeout 600 cargo run --locked); echo "$d exit=$?"; done`, which selects 39 directories.
 The sweep of the three is `cd upstream-reports && for d in faer-039-* faer-040-* faer-041-*; do (cd "$d" && timeout 600 cargo run --locked); echo "$d exit=$?"; done`, which selects 3, and the x86 entry is `cd upstream-reports/gemm-x86-001-* && cargo run --locked`.
 `faer`'s `main` is the 0.24.4 release plus eleven commits, and only the `gevd` scratch layout and conjugate-pair slots among them touch the code behind an entry: `faer-009`, re-run there, still fails.

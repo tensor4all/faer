@@ -626,6 +626,18 @@ pub fn lu_in_place_scratch<I: Index, T: ComplexField>(
 	_ = params;
 	StackReq::new::<I>(Ord::min(nrows, ncols))
 }
+/// `perf-warn`: whether neither stride walks a line, i.e. the input is neither
+/// column-major (`row_stride` 1) nor row-major (`col_stride` 1). Both preferred
+/// layouts factor at the same speed, so only a matrix that is neither warns;
+/// the predicate this replaced warned on every row-major input.
+#[cfg(any(feature = "perf-warn", test))]
+#[inline]
+pub(crate) fn has_generic_strides(
+	row_stride: isize,
+	col_stride: isize,
+) -> bool {
+	row_stride.unsigned_abs() != 1 && col_stride.unsigned_abs() != 1
+}
 pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 	A: MatMut<'_, T>,
 	perm: &'out mut [I],
@@ -637,8 +649,7 @@ pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 	let _ = &params;
 	let truncate = I::truncate;
 	#[cfg(feature = "perf-warn")]
-	if (A.col_stride().unsigned_abs() == 1
-		|| A.row_stride().unsigned_abs() != 1)
+	if has_generic_strides(A.row_stride(), A.col_stride())
 		&& crate::__perf_warn!(LU_WARN)
 	{
 		log::warn!(
@@ -747,6 +758,18 @@ mod tests {
 	use crate::{Mat, assert, c32, c64};
 	use crate::utils::cost::{pays_at, rate, serial_time};
 	use dyn_stack::MemBuffer;
+	/// `perf-warn`: contiguous column-major and row-major inputs are the two
+	/// recommended layouts, so the warning fires only for a matrix that is
+	/// neither. The predicate this replaced warned on every row-major one.
+	#[test]
+	fn perf_warn_predicate_excludes_both_preferred_layouts() {
+		assert!(!has_generic_strides(64, 1)); // contiguous row-major: `row_stride = ncols`
+		assert!(!has_generic_strides(1, 5)); // contiguous column-major: `col_stride = nrows`
+		assert!(!has_generic_strides(1, 64)); // transposed view: one stride still walks a line
+		assert!(has_generic_strides(3, 2)); // neither stride walks a line
+		assert!(!has_generic_strides(-64, 1)); // reversed row-major
+		assert!(has_generic_strides(-2, -130));
+	}
 	#[cfg(feature = "rayon")]
 	#[test]
 	fn region_rules_follow_the_serial_time() {
