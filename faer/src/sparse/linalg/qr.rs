@@ -2422,30 +2422,30 @@ pub fn factorize_symbolic_qr_with_column_ordering<I: Index>(
 		let m_scratch = StackReq::new::<I>(m);
 		let AT_scratch =
 			StackReq::and(StackReq::new::<I>(m + 1), StackReq::new::<I>(A_nnz));
-		StackReq::or(
-			colamd::order_scratch::<I>(m, n, A_nnz),
-			StackReq::all_of(&[
-				n_scratch,
-				n_scratch,
-				n_scratch,
-				n_scratch,
-				AT_scratch,
-				StackReq::any_of(&[
-					StackReq::and(n_scratch, m_scratch),
-					StackReq::all_of(&[n_scratch; 3]),
-					StackReq::all_of(&[
-						n_scratch, n_scratch, n_scratch, n_scratch, n_scratch,
-						m_scratch,
-					]),
-					supernodal::factorize_supernodal_symbolic_qr_scratch::<I>(
-						m, n,
-					),
-					simplicial::factorize_simplicial_symbolic_qr_scratch::<I>(
-						m, n,
-					),
+		let analysis = StackReq::all_of(&[
+			n_scratch,
+			n_scratch,
+			n_scratch,
+			n_scratch,
+			AT_scratch,
+			StackReq::any_of(&[
+				StackReq::and(n_scratch, m_scratch),
+				StackReq::all_of(&[n_scratch; 3]),
+				StackReq::all_of(&[
+					n_scratch, n_scratch, n_scratch, n_scratch, n_scratch,
+					m_scratch,
 				]),
+				supernodal::factorize_supernodal_symbolic_qr_scratch::<I>(m, n),
+				simplicial::factorize_simplicial_symbolic_qr_scratch::<I>(m, n),
 			]),
-		)
+		]);
+		// COLAMD only runs in the ordering-less branch, so its workspace is
+		// not needed when the caller brings the ordering.
+		if column_ordering.is_none() {
+			StackReq::or(colamd::order_scratch::<I>(m, n, A_nnz), analysis)
+		} else {
+			analysis
+		}
 	};
 	let mut mem = dyn_stack::MemBuffer::try_new(req)
 		.ok()
