@@ -21,7 +21,8 @@
 //! The test checks, for every column, the relative residuals
 //! `||beta u^H A - alpha u^H B|| / (||u|| (|beta| ||A|| + |alpha| ||B||))` and
 //! `||beta A v - alpha B v|| / (||v|| (|beta| ||A|| + |alpha| ||B||))`,
-//! computed in `c64`, against `10 * n * eps` of the scalar type. A `NaN`
+//! computed in `c64` against `10 * n * eps` of the scalar type, with `u`, `v`
+//! and `(alpha, beta)` normalized before the numerator is formed. A `NaN`
 //! residual or `beta` fails the test instead of being dropped by `f64::max`.
 use faer::diag::Diag;
 use faer::dyn_stack::{MemBuffer, MemStack};
@@ -154,6 +155,76 @@ fn to_c64(m: &Mat<c32>) -> Mat<c64> {
 	})
 }
 
+/// relative left and right residuals of one eigenpair, `j` is only for messages.
+///
+/// The eigenvector and the homogeneous pair are normalized here, before the
+/// residual is formed. The residual is invariant under both scalings, but a
+/// numerator built from the values as they come can lose it entirely, and no
+/// later division brings it back: `u = 1e-200 * e0` with `alpha = 1e-150`
+/// underflows the numerator to `0`, and `alpha = f64::MAX / 2` with `beta = 0`
+/// sends the denominator to `inf`, whose quotient is `0` as well. Both pass for
+/// a column that is wrong by `O(1)`.
+fn column_residual(
+	a: &Mat<c64>,
+	b: &Mat<c64>,
+	al: c64,
+	be: c64,
+	u: &Mat<c64>,
+	v: &Mat<c64>,
+	j: usize,
+) -> (f64, f64) {
+	let (na, nb) = (a.norm_l2(), b.norm_l2());
+	let (nu, nv) = (u.norm_l2(), v.norm_l2());
+	// the representative scale of the homogeneous pair: at least one of the
+	// normalized components is `1`, and neither can overflow
+	let sc = al.norm().max(be.norm());
+	assert!(
+		nu.is_finite() && nu > 0.0,
+		"column {j}: left eigenvector has norm {nu:e}, alpha = {al:?}, beta = {be:?}"
+	);
+	assert!(
+		nv.is_finite() && nv > 0.0,
+		"column {j}: right eigenvector has norm {nv:e}, alpha = {al:?}, beta = {be:?}"
+	);
+	assert!(
+		sc.is_finite() && sc > 0.0,
+		"column {j}: eigenvalue scale {sc:e}, alpha = {al:?}, beta = {be:?}"
+	);
+	let (al, be) = (al / sc, be / sc);
+	let (u, v) = (u / nu, v / nv);
+	let lu = u.adjoint() * a * Scale(be) - u.adjoint() * b * Scale(al);
+	let rv = a * &v * Scale(be) - b * &v * Scale(al);
+	let den = be.norm() * na + al.norm() * nb;
+	assert!(
+		den.is_finite() && den > 0.0,
+		"column {j}: residual denominator {den:e}, ||A|| = {na:e}, ||B|| = {nb:e}, alpha = {al:?}, beta = {be:?}"
+	);
+	let (nlu, nrv) = (lu.norm_l2(), rv.norm_l2());
+	assert!(
+		nlu.is_finite(),
+		"column {j}: left residual numerator {nlu:e}, alpha = {al:?}, beta = {be:?}"
+	);
+	assert!(
+		nrv.is_finite(),
+		"column {j}: right residual numerator {nrv:e}, alpha = {al:?}, beta = {be:?}"
+	);
+	// one division is enough: `u` and `v` are unit and `|alpha|, |beta| <= 1`, so
+	// the numerator is at most `den` and neither side can overflow
+	let (lj, rj) = (nlu / den, nrv / den);
+	// `f64::max` returns the other operand when one is `NaN`, so a `NaN`
+	// folded into `left`/`right` would leave it unchanged and read as a
+	// perfect residual instead of failing.
+	assert!(
+		lj.is_finite(),
+		"column {j}: left residual {lj:e} (numerator {nlu:e}, denominator {den:e})"
+	);
+	assert!(
+		rj.is_finite(),
+		"column {j}: right residual {rj:e} (numerator {nrv:e}, denominator {den:e})"
+	);
+	(lj, rj)
+}
+
 /// returns the largest left and right relative residuals over all columns, and
 /// the smallest `|beta| / (|alpha| + |beta|)`
 fn residuals<T: ComplexField>(
@@ -189,7 +260,6 @@ fn residuals<T: ComplexField>(
 	.unwrap();
 	let a = Mat::from_fn(n, n, |i, j| up(&a[(i, j)]));
 	let b = Mat::from_fn(n, n, |i, j| up(&b[(i, j)]));
-	let (na, nb) = (a.norm_l2(), b.norm_l2());
 	let (mut left, mut right, mut beta_min) = (0.0f64, 0.0f64, f64::INFINITY);
 	for j in 0..n {
 		let (al, be) = (up(&s[j]), up(&beta[j]));
@@ -203,46 +273,10 @@ fn residuals<T: ComplexField>(
 		beta_min = beta_min.min(ratio);
 		let u = Mat::from_fn(n, 1, |i, _| up(&ul[(i, j)]));
 		let v = Mat::from_fn(n, 1, |i, _| up(&ur[(i, j)]));
-		let lu = u.adjoint() * &a * Scale(be) - u.adjoint() * &b * Scale(al);
-		let rv = &a * &v * Scale(be) - &b * &v * Scale(al);
-		let den = be.norm() * na + al.norm() * nb;
-		let (nlu, nrv) = (lu.norm_l2(), rv.norm_l2());
-		let (nu, nv) = (u.norm_l2(), v.norm_l2());
-		assert!(
-			nlu.is_finite(),
-			"column {j}: left residual numerator {nlu:e}, alpha = {al:?}, beta = {be:?}"
-		);
-		assert!(
-			nrv.is_finite(),
-			"column {j}: right residual numerator {nrv:e}, alpha = {al:?}, beta = {be:?}"
-		);
-		assert!(
-			nu > 0.0,
-			"column {j}: left eigenvector has norm {nu:e}, alpha = {al:?}, beta = {be:?}"
-		);
-		assert!(
-			nv > 0.0,
-			"column {j}: right eigenvector has norm {nv:e}, alpha = {al:?}, beta = {be:?}"
-		);
-		assert!(
-			den > 0.0,
-			"column {j}: residual denominator {den:e}, ||A|| = {na:e}, ||B|| = {nb:e}, alpha = {al:?}, beta = {be:?}"
-		);
-		// Two divisions, not `nlu / (nu * den)`: the product overflows to
-		// infinity for a column with a huge norm, and the quotient is then 0,
-		// which reads as a perfect residual.
-		let (lj, rj) = ((nlu / nu) / den, (nrv / nv) / den);
+		let (lj, rj) = column_residual(&a, &b, al, be, &u, &v, j);
 		// `f64::max` returns the other operand when one is `NaN`, so a `NaN`
 		// folded into `left`/`right` would leave it unchanged and read as a
 		// perfect residual instead of failing.
-		assert!(
-			lj.is_finite(),
-			"column {j}: left residual {lj:e} (numerator {nlu:e}, ||u|| {nu:e}, denominator {den:e})"
-		);
-		assert!(
-			rj.is_finite(),
-			"column {j}: right residual {rj:e} (numerator {nrv:e}, ||v|| {nv:e}, denominator {den:e})"
-		);
 		left = left.max(lj);
 		right = right.max(rj);
 	}
@@ -269,4 +303,34 @@ fn check(a: Mat<c64>, b: Mat<c64>) {
 fn left_eigenvectors_of_issue_324_pencil() {
 	let (a, b) = (from_bits(&A_BITS), from_bits(&B_BITS));
 	check(to_c64(&a), to_c64(&b));
+}
+
+/// the oracle itself, on eigenpairs that are wrong by `O(1)` once normalized.
+///
+/// A column with `alpha = f64::MAX / 2, beta = 0` sends the denominator to
+/// `inf`, and one with `alpha = 1e-150, u = v = 1e-200 * e0` underflows the
+/// numerator to `0`; both leave `0` as the residual, which passes. The residual
+/// is invariant under both scalings, so normalizing the eigenvector and the
+/// homogeneous pair first loses nothing, and keeps the numerator from being
+/// formed out of numbers that cannot carry it.
+#[test]
+fn residual_oracle_rejects_unnormalized_eigenpairs() {
+	let (a, b) = (to_c64(&from_bits(&A_BITS)), to_c64(&from_bits(&B_BITS)));
+	let n = a.nrows();
+	let e0 = |k: f64| Mat::from_fn(n, 1, |i, _| c64::new(if i == 0 { k } else { 0.0 }, 0.0));
+	let tol = 10.0 * n as f64 * f32::EPSILON as f64;
+	let mut bad = Vec::new();
+	for (al, k) in [(f64::MAX / 2.0, 1e-300), (1e-150, 1e-200)] {
+		let (al, be) = (c64::new(al, 0.0), c64::new(0.0, 0.0));
+		let (u, v) = (e0(k), e0(k));
+		let (l, r) = column_residual(&a, &b, al, be, &u, &v, 0);
+		for (side, res) in [("left", l), ("right", r)] {
+			if res < tol {
+				bad.push(format!(
+					"{side} residual {res:e} < {tol:e} for alpha = {al:?}, beta = {be:?}, u = v = {k:e} * e0"
+				));
+			}
+		}
+	}
+	assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
