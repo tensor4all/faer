@@ -88,8 +88,10 @@ fn rank_one_update_matches_the_source_contract() {
 #[test]
 fn symmetric_rank_k_update_writes_only_the_stored_triangle() {
 	// DSYRK/ZSYRK and DHERK/ZHERK: the referenced triangle of C is
-	// alpha * op(A) * op(A)^H + beta * C, and the other triangle must not be
-	// read or written (the source test's LDERES 'SY' check)
+	// alpha * P + beta * C with P = A A^T, A^T A, A^H A or A A^H. The first
+	// two are unconjugated and therefore not Hermitian for the complex types;
+	// the last two conjugate the second factor. The other triangle must not
+	// be read or written (the source test's LDERES 'SY' check).
 	for structure in [
 		BlockStructure::TriangularLower,
 		BlockStructure::TriangularUpper,
