@@ -77,12 +77,13 @@ The defect table above answers "is the value wrong". Its sibling answers "is the
 easy to miss one level down, so the three reports that are built today are listed here as well. A performance entry's symptom is
 always a **time or a ratio**, never a wrong value, and where an entry compares two routes to the same answer its README states
 which check the program runs: the adapted factorization must equal the column-major one exactly for the row-major QR, the solutions
-must be bit-identical for the triangular solve, and the SME comparison holds the product to an `n · eps` bound.
+must be bit-identical for the triangular solve, and the SME comparison asserts an `n · eps` absolute bound on four sampled entries
+while reporting, but not requiring, that the whole product is bit-identical.
 
 | Report | What is slow | Host-specific? |
 |---|---|---|
-| [perf-faer-001](performance/perf-faer-001-qr-row-major/) | QR of a row-major matrix is up to 31 times slower than copying it to column major first | no |
-| [perf-faer-002](performance/perf-faer-002-trsm-aliased-rhs/) | The unit lower triangular solve is up to 2.6 times slower at a power-of-two stride | no |
+| [perf-faer-001](performance/perf-faer-001-qr-row-major/) | QR of a row-major matrix is up to 31 times slower than copying it to column major first | slow path: no; the reproducer builds only on macOS (Apple QoS call) |
+| [perf-faer-002](performance/perf-faer-002-trsm-aliased-rhs/) | The unit lower triangular solve is up to 2.6 times slower at a power-of-two stride | slow path: no; the reproducer builds only on macOS (Apple QoS call) |
 | [perf-gemm-001](performance/perf-gemm-001-apple-sme-unused/) | `gemm` does not use the matrix unit of an Apple M4 or M5 | yes, needs SME |
 
 [`performance/README.md`](performance/README.md) is the authoritative page: it carries the confirmed upstream versions, the fix in
