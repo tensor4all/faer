@@ -8,6 +8,8 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 faer = { package = "t4a-faer", version = "0.32.0", path = "../faer" }
+# the team handle owns a pool (tensor4all/faer#333), so the C boundary names threadteam directly
+threadteam = "0.5.1"
 pastey = "0.2.1"
 
 [build-dependencies]

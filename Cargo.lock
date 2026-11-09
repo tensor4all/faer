@@ -829,6 +829,7 @@ dependencies = [
  "cbindgen",
  "pastey",
  "t4a-faer",
+ "threadteam",
 ]
 
 [[package]]
