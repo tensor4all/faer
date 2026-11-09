@@ -37,7 +37,7 @@ The table was recorded on an x86_64 Linux host with `cargo run --locked`; the aa
 
 `src/linalg/reductions/norm_max.rs` in 0.24.4 drops NaN in three places:
 
-- the SIMD kernel accumulates with `simd.max` (`:21-26`). On aarch64 that lowers to `fmax`, which is IEEE `maxNum` and returns the non-NaN operand; on x86 it lowers to `maxpd`, which returns its **second** operand when either operand is NaN. Neither is NaN-propagating the way `+` is, and which value comes out depends on the instruction and on the operand order the kernel emits;
+- the SIMD kernel accumulates with `simd.max` (`:21-26`), and `faer-traits` 0.24.0 implements that as `select(gt(lhs, rhs), lhs, rhs)` (`src/lib.rs:654-663`) — not as a machine `max`. A NaN therefore survives only when it arrives as the **right** operand (`max(1.0, NaN)` is NaN, `max(NaN, 0.0)` is 0.0), and the kernel feeds the accumulator as the left operand, so an incoming NaN is dropped. This is the same operand-order effect that `maxpd` has on x86, which is why the two hosts differ only in the row whose NaN reaches the reduction by a different route;
 - the pairwise halves above `LINEAR_IMPL_THRESHOLD` (128) are combined with `fmax` (`:43` and `:56`), which returns the non-NaN operand;
 - the scalar fallback combines with `fmax` as well (`:126`).
 
