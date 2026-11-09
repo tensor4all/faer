@@ -115,22 +115,54 @@ std::thread_local! {
 pub(crate) fn tiled_copies() -> usize {
 	TILED_COPIES.with(|c| c.get())
 }
-/// Whether staging a `nrows x ncols` layout copy in [`COPY_TILE`] tiles pays,
-/// for a source and a destination of `size_of::<T>()` bytes per element.
+/// The destination column stride, in bytes, from which a power-of-two stride
+/// makes the tiles pay below [`TILE_COPY_CACHE_BYTES`] as well.
 ///
-/// One point of this boundary is measured: the f64 `512 x 512` pair, the first
-/// cell of `tensor4all/faer#323`'s table where the tiles win. The rest follows
-/// from that byte count and `size_of::<T>()`: `725 x 725` is the first square
-/// f32 shape at or above it, at 4205000 bytes against 4194304, and that step is
-/// arithmetic, not a measurement. The count is both buffers whole, so where
-/// `n > m` it is an upper bound on what the copy touches: the copy stops at
-/// `min(m, n)` columns.
+/// The elementwise walk writes the destination a column at a time, so a stride
+/// that is a power of two lands each column on the same cache sets as the one
+/// before it. Measured on `tensor4all/faer#352` (evo, Zen5, `Llt::new` on a
+/// row-major f64 matrix, n swept 240..272): `256` is the only one of those n
+/// whose destination column stride is a power of two (2048 bytes), and it is
+/// the only one where the elementwise walk loses to the tiles -- 1.136x at 1T
+/// and 1.157x at 8T against the walk, while 248/252/260/264 (1984-2112 bytes)
+/// keep 1.02-1.08x for the walk. 1024 bytes (`128 x 128` f64) was not measured,
+/// so the clause starts at the one stride that was.
+const TILE_COPY_POWER_OF_TWO_STRIDE_BYTES: usize = 2048;
+/// Whether staging a `nrows x ncols` layout copy in [`COPY_TILE`] tiles pays,
+/// for a source and a destination of `size_of::<T>()` bytes per element and a
+/// destination column stride of `col_stride` elements.
+///
+/// Two boundaries are measured. The working set, [`TILE_COPY_CACHE_BYTES`]: the
+/// f64 `512 x 512` pair is the first cell of `tensor4all/faer#323`'s table where
+/// the tiles win, and the rest follows from that byte count and
+/// `size_of::<T>()` -- `725 x 725` is the first square f32 shape at or above it,
+/// at 4205000 bytes against 4194304, and that step is arithmetic, not a
+/// measurement. The count is both buffers whole, so where `n > m` it is an upper
+/// bound on what the copy touches: the copy stops at `min(m, n)` columns.
+///
+/// And the destination's column stride, when it is a power of two at or above
+/// [`TILE_COPY_POWER_OF_TWO_STRIDE_BYTES`]: there the elementwise walk collides
+/// in the cache sets and the tiles pay although the working set is small. It is
+/// a byte count and not a type, so the clause follows `size_of::<T>()` the way
+/// the working-set gate does.
 #[inline]
-fn tile_copy_pays<T>(nrows: usize, ncols: usize) -> bool {
-	nrows
+fn tile_copy_pays<T>(
+	nrows: usize,
+	ncols: usize,
+	col_stride: isize,
+) -> bool {
+	if nrows
 		.saturating_mul(ncols)
 		.saturating_mul(2 * core::mem::size_of::<T>())
 		>= TILE_COPY_CACHE_BYTES
+	{
+		return true;
+	}
+	let col_stride_bytes = col_stride
+		.unsigned_abs()
+		.saturating_mul(core::mem::size_of::<T>());
+	col_stride_bytes.is_power_of_two()
+		&& col_stride_bytes >= TILE_COPY_POWER_OF_TWO_STRIDE_BYTES
 }
 /// How a copy over `lines` lines of the destination's major dimension is shared
 /// between at most `degree` threads: `(lines per task, tasks)`, each share a
@@ -325,8 +357,9 @@ fn copy_across_layouts_block<T: Clone>(
 	}
 }
 /// Copies the lower triangle of `src`, diagonal included, into `dst` in tiles,
-/// when `dst` is column-major, `src` is not, and the working set is at or above
-/// [`TILE_COPY_CACHE_BYTES`]; returns `false` and touches nothing otherwise.
+/// when `dst` is column-major, `src` is not, and [`tile_copy_pays`] holds for the
+/// working set and the destination's column stride; returns `false` and touches
+/// nothing otherwise.
 /// The elements written are exactly those
 /// `MatMut::copy_from_triangular_lower` writes (column `j < min(m, n)`, rows
 /// `j..m`), so the upper triangle of `dst` is left as it was.
@@ -344,7 +377,7 @@ pub(crate) fn copy_lower_across_layouts<T: Clone>(
 	let (m, n) = dst.shape();
 	if dst.row_stride() != 1
 		|| src.row_stride().unsigned_abs() == 1
-		|| !tile_copy_pays::<T>(m, n)
+		|| !tile_copy_pays::<T>(m, n, dst.col_stride())
 	{
 		return false;
 	}
@@ -1068,7 +1101,7 @@ mod tests {
 			};
 			let sentinel = T::at(m + 11, n + 13);
 			let mut out = Mat::<T>::from_fn(m, n, |_, _| sentinel.clone());
-			std::assert_eq!(crate::linalg::tile_copy_pays::<T>(m, n), tiled);
+			std::assert_eq!(crate::linalg::tile_copy_pays::<T>(m, n, m as isize), tiled);
 			out.copy_from_triangular_lower(src);
 			for j in 0..n {
 				for i in 0..m {
@@ -1096,6 +1129,10 @@ mod tests {
 			(100, 257, false),
 			(17, 300, false),
 			(300, 17, false),
+			// the power-of-two column stride of `tensor4all/faer#352`: 256 f64
+			// columns are 2048 bytes apart, below the byte threshold and still
+			// tiled
+			(256, 256, true),
 		] {
 			for flipped in [false, true] {
 				check::<f64>(m, n, flipped, tiled);
@@ -1111,18 +1148,45 @@ mod tests {
 	#[test]
 	fn tile_copy_threshold_is_the_measured_crossover() {
 		assert_eq!(TILE_COPY_CACHE_BYTES, 2 * 512 * 512 * 8);
-		std::assert!(!tile_copy_pays::<f64>(511, 511));
-		std::assert!(tile_copy_pays::<f64>(512, 512));
+		// the destination column stride is the first argument in every assertion
+		// below whose shape is below the byte threshold
+		std::assert!(!tile_copy_pays::<f64>(511, 511, 511));
+		std::assert!(tile_copy_pays::<f64>(512, 512, 512));
 		// the known cost kept on purpose: a ragged 513x513 is above the byte
 		// threshold, and #290's table records 3.6% against the tiles there
 		// over six cells, five of them slower -- #323 is open for it
-		std::assert!(tile_copy_pays::<f64>(513, 513));
-		std::assert!(!tile_copy_pays::<f64>(1, 262143));
-		std::assert!(tile_copy_pays::<f64>(1, 262144));
-		std::assert!(tile_copy_pays::<f64>(1, 262145));
-		std::assert!(!tile_copy_pays::<f32>(724, 724));
-		std::assert!(tile_copy_pays::<f32>(725, 725));
-		std::assert!(!tile_copy_pays::<f32>(512, 512));
+		std::assert!(tile_copy_pays::<f64>(513, 513, 513));
+		std::assert!(!tile_copy_pays::<f64>(1, 262143, 1));
+		std::assert!(tile_copy_pays::<f64>(1, 262144, 1));
+		std::assert!(tile_copy_pays::<f64>(1, 262145, 1));
+		std::assert!(!tile_copy_pays::<f32>(724, 724, 724));
+		std::assert!(tile_copy_pays::<f32>(725, 725, 725));
+		// below the byte threshold and not a power-of-two stride: 511 f32 columns
+		// are 2044 bytes apart
+		std::assert!(!tile_copy_pays::<f32>(511, 512, 511));
+	}
+
+	/// The power-of-two column stride of `tensor4all/faer#352`: the tiles pay on
+	/// a) a power of two at or above 2048 bytes, whatever the element size, and
+	/// b) nothing else below the byte threshold.
+	#[test]
+	fn tile_copy_pays_on_a_power_of_two_column_stride() {
+		assert_eq!(TILE_COPY_POWER_OF_TWO_STRIDE_BYTES, 2048);
+		// 256 x 256 f64: the measured cell -- 2048 bytes of stride, 1 MiB of
+		// working set, tiled
+		std::assert!(tile_copy_pays::<f64>(256, 256, 256));
+		// the same stride from an f32 matrix is 512 columns, and from a c64 one
+		// 128: the clause follows the bytes, not the scalar
+		std::assert!(tile_copy_pays::<f32>(256, 256, 512));
+		std::assert!(tile_copy_pays::<crate::c64>(128, 128, 128));
+		// 2040 bytes and 1024 bytes are not above the floor, 2048-3128 bytes that
+		// are not a power of two are not a power of two
+		std::assert!(!tile_copy_pays::<f64>(255, 255, 255));
+		std::assert!(!tile_copy_pays::<f64>(128, 128, 128));
+		std::assert!(!tile_copy_pays::<f64>(260, 260, 260));
+		// a destination whose columns are further apart than its rows: the stride
+		// is what is judged, not the shape
+		std::assert!(tile_copy_pays::<f64>(256, 100, 256));
 	}
 
 	/// The choice is made on the working set, on the same transposed layout: one
@@ -1134,7 +1198,7 @@ mod tests {
 			let (_, rm) = fixture::<T>(m, n, false);
 			let src = MatRef::from_row_major_slice(&rm, m, n);
 			let mut dst = Mat::<T>::zeros(m, n);
-			assert_eq!(tile_copy_pays::<T>(m, n), want, "{m}x{n}");
+			assert_eq!(tile_copy_pays::<T>(m, n, m as isize), want, "{m}x{n}");
 			assert_eq!(
 				copy_lower_across_layouts(dst.as_mut(), src),
 				want,
@@ -1142,7 +1206,10 @@ mod tests {
 			);
 		}
 		for shape in [
-			(256, 256, false),
+			// the power-of-two stride of #352, on the shape it was measured on
+			(256, 256, true),
+			// one column apart from it, and no power of two: the walk
+			(257, 257, false),
 			(512, 512, true),
 			// both rectangles: the tiled fixtures of the value test cross the
 			// threshold in either orientation, and the helper must report the

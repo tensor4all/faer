@@ -537,21 +537,28 @@ mod tests {
 	/// threshold, square, wide and tall: the per-thread tiled-copy counter moves
 	/// by exactly one where the gate should tile and stays put where it should
 	/// fall back, which equal values alone cannot tell apart.
+	///
+	/// The destination here is the column-major `n x k` allocation, so its column
+	/// stride is `n`: the `n = 2048` and `k = 256` cells tile on
+	/// `tensor4all/faer#352`'s power-of-two stride although their working set is
+	/// below the byte threshold.
 	#[test]
 	fn copy_r_reaches_the_tiled_copy_gate() {
 		use crate::linalg::{tile_copy_pays, tiled_copies};
 		for (m, n, tiled) in [
 			(512, 512, true),
-			(256, 256, false),
+			// square, 2048 bytes of stride: #352's measured cell
+			(256, 256, true),
 			// wide: `k = 256`, a `256 x 2048` factor is 8 MiB over both buffers
 			(256, 2048, true),
-			(64, 2048, false),
-			// tall: the factor is only `k x n = 256 x 256`
-			(2048, 256, false),
+			// wide: 2 MiB, tiled only because the stride is 16 KiB, a power of two
+			(64, 2048, true),
+			// tall: the factor is only `k x n = 256 x 256`, and its stride is 2 KiB
+			(2048, 256, true),
 		] {
 			let k = Ord::min(m, n);
 			let packed = Mat::<f64>::from_fn(m, n, |i, j| (i + 2 * j) as f64);
-			assert!(tile_copy_pays::<f64>(n, k) == tiled);
+			assert!(tile_copy_pays::<f64>(n, k, n as isize) == tiled);
 			// a row-major `k x n` destination: the transpose of a column-major
 			// `n x k` allocation
 			let mut out_col = Mat::<f64>::from_fn(n, k, |_, _| -1.0);
