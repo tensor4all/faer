@@ -60,11 +60,12 @@ The program prints the expected and the actual value, and exits with status 1 wh
 | [gemm-x86-001](gemm-x86-001-diag-negative-stride/) | A product with a diagonal gives a wrong value when the left matrix is stored backwards | `private-gemm-x86` 0.1.22 | wrong value | tensor4all/t4a-private-gemm-x86#5 (`84ca6db`) | not yet | 2026-10-29 |
 
 "Fixed upstream" was checked against each crate's upstream `main` and its latest release on 2026-11-09: `faer` at `0ecd846` (2026-10-22) and its 0.24.4 release, `gemm` at `86102c5`, which is its 0.19.0 release, `private-gemm-x86` at `71872b9`, which is its 0.1.22 release.
-The 39 entries that predate this week (`faer-001` to `faer-038`, plus `gemm-001`) were all re-run on this host on 2026-11-09 and behave as their sections state; no newer release existed to raise a pin to, and `gemm`'s and `private-gemm-x86`'s `main` are their release commits, so only `faer` needed a build from `main`. The three added this week are counted separately below, which is why the sweep of the 39 and the sweep of the three are two commands and not one pattern.
-`gemm-x86-001` needs an x86 CPU, and on aarch64 `faer-001` and `faer-026` do not trigger, as their sections state.
-The three entries added this week (`faer-039`, `faer-040`, `faer-041`) were run from their own directories and then against `faer`'s `main` at `0ecd846`, where they fail the same way.
-The sweep of the 39 is `cd upstream-reports && for d in faer-0[01][0-9]-* faer-0[23][0-8]-* gemm-001-*; do (cd "$d" && timeout 600 cargo run --quiet); echo "$d exit=$?"; done`.
-The sweep of the three is `cd upstream-reports && for d in faer-039-* faer-040-* faer-041-*; do (cd "$d" && timeout 600 cargo run --quiet); echo "$d exit=$?"; done`.
+The 39 entries that predate this week (`faer-001` to `faer-038`, plus `gemm-001`) were all re-run on 2026-11-09 on the aarch64 host where this list is recorded, and they behave as their sections state (on aarch64 `faer-001` and `faer-026` do not trigger, as their sections say); no newer release existed to raise a pin to, and `gemm`'s and `private-gemm-x86`'s `main` are their release commits, so only `faer` needed a build from `main`.
+`gemm-x86-001` needs an x86 CPU and does not build on aarch64; it was run on x86_64 on 2026-11-09, where it builds and exits 1 as its section states.
+The three entries added this week (`faer-039`, `faer-040`, `faer-041`) were run from their own directories on both hosts and then against `faer`'s `main` at `0ecd846` as a path dependency, where they exit 1 with the same numbers; the one row where the two hosts disagree is marked in the `faer-039` table.
+That is 43 programs in total, and every one of them was executed on 2026-11-09 on a host where it builds and runs.
+The sweep of the 39 is `cd upstream-reports && for d in faer-0[01][0-9]-* faer-02[0-9]-* faer-03[0-8]-* gemm-001-*; do (cd "$d" && timeout 600 cargo run --locked); echo "$d exit=$?"; done`, which selects 39 directories.
+The sweep of the three is `cd upstream-reports && for d in faer-039-* faer-040-* faer-041-*; do (cd "$d" && timeout 600 cargo run --locked); echo "$d exit=$?"; done`, which selects 3, and the x86 entry is `cd upstream-reports/gemm-x86-001-* && cargo run --locked`.
 `faer`'s `main` is the 0.24.4 release plus eleven commits, and only the `gevd` scratch layout and conjugate-pair slots among them touch the code behind an entry: `faer-009`, re-run there, still fails.
 
 Each README states, in its first three lines, what goes wrong, for which input and in which version.

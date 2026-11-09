@@ -13,31 +13,35 @@ cargo run
 
 The program calls `norm_max` on each case, prints the expected and the actual value, and exits with status 1 if any result is finite.
 
-| case | expected | `faer` 0.24.4 |
-|---|---|---|
-| 1x2 row-major, one NaN | NaN | **1** |
-| 2-vector, one NaN | NaN | **1** |
-| 2-vector `c64`, NaN real part | NaN | **0** |
-| 2-vector `c64`, NaN imaginary part | NaN | **1** |
-| 2x3 column-major, one NaN | NaN | **1** |
-| 2x3, row 1 strided | NaN | **1** |
-| all-NaN vector | NaN | **0** |
-| 100-vector, NaN at 57 | NaN | **99** |
-| 129-vector, NaN at 128 | NaN | **127** |
-| transpose of the 2x3 | NaN | **1** |
-| reference: `norm_l1`, `norm_l2` of the 2-vector | NaN | NaN (correct) |
+| case | route taken inside `norm_max` | expected | `faer` 0.24.4, x86_64 |
+|---|---|---|---|
+| 1x2 row-major, one NaN | SIMD kernel | NaN | **1** |
+| 2-vector, one NaN | SIMD kernel | NaN | **1** |
+| 2-vector `c64`, NaN real part | SIMD kernel | NaN | **1** (aarch64: **0**) |
+| 2-vector `c64`, NaN imaginary part | SIMD kernel | NaN | **1** |
+| 2x3 column-major, one NaN | SIMD kernel | NaN | **1** |
+| 2x3, row 1 strided | scalar fallback | NaN | **1** |
+| all-NaN vector | SIMD kernel | NaN | **0** |
+| 100-vector, NaN at 57 | SIMD kernel | NaN | **99** |
+| 129-vector, NaN at 128 | SIMD kernel and pairwise combine | NaN | **127** |
+| transpose of the 2x3 | SIMD kernel | NaN | **1** |
+| reference: `norm_l1`, `norm_l2` of the 2-vector | — | NaN | NaN (correct) |
 
-The NaN is lost in the contiguous SIMD kernel, in the pairwise split (the 129-element case), in strided rows and in the complex cases. The scalar fallback combines with the same `fmax` (`:126`) and a standalone program does reach it: `norm_max` takes the SIMD path only when `ncols() > 1 && col_stride().unsigned_abs() == 1`, so the strided row in the table above (row stride 0, column stride greater than one) is the scalar case.
+The NaN is lost in the contiguous SIMD kernel, in the pairwise split (the 129-element case), in the strided row and in the complex cases, so all three branches of `norm_max` are wrong. The strided row is the case that exercises the scalar fallback, and that branch is reachable from a standalone program: `norm_max` transposes the view when `ncols() > 1 && col_stride().unsigned_abs() == 1` (`:60-62`) and then takes the SIMD route only when `try_as_col_major()` accepts the view, i.e. when its row stride is 1 (`mat/matref.rs:1448`); every other view falls through to the scalar loop at `:118-126`.
+
+`RowRef::norm_max` reaches that loop through its own view: `RowRef::as_mat` is `transpose().as_mat().transpose()` (`row/rowref.rs:422-424`), and `ColRef::as_mat` gives the matrix it builds a column stride of zero (`col/colref.rs:465-477`). A row of the column-major `m` in this program therefore becomes a 1 x 3 view with **row stride 0** and column stride `m.col_stride() = 2`: `:60-62` does not transpose it (its column stride is not 1), and `try_as_col_major` rejects it (its row stride is not 1), so `m.row(1).norm_max()` runs the scalar loop. A row of a *row-major* matrix, whose stride is 1, is transposed at `:60-62` into a contiguous column instead and does take the SIMD route.
+
+The table was recorded on an x86_64 Linux host with `cargo run --locked`; the aarch64 macOS run this entry was first recorded on agrees on every row except the one marked above.
 
 ## Cause
 
 `src/linalg/reductions/norm_max.rs` in 0.24.4 drops NaN in three places:
 
-- the SIMD kernel accumulates with `simd.max` (`:21-26`). That is `fmax` on aarch64, which is IEEE `maxNum` and returns the non-NaN operand, and `maxpd` on x86, which returns its second operand when either operand is NaN, so whether a NaN survives depends on the instruction and the operand order. On the aarch64 host this program runs on the accumulator survives the NaN;
-- the pairwise halves above `LINEAR_IMPL_THRESHOLD` are combined with `fmax` (`:43` and `:56`), which by IEEE 754 `maxNum` returns the non-NaN operand;
+- the SIMD kernel accumulates with `simd.max` (`:21-26`). On aarch64 that lowers to `fmax`, which is IEEE `maxNum` and returns the non-NaN operand; on x86 it lowers to `maxpd`, which returns its **second** operand when either operand is NaN. Neither is NaN-propagating the way `+` is, and which value comes out depends on the instruction and on the operand order the kernel emits;
+- the pairwise halves above `LINEAR_IMPL_THRESHOLD` (128) are combined with `fmax` (`:43` and `:56`), which returns the non-NaN operand;
 - the scalar fallback combines with `fmax` as well (`:126`).
 
-The result therefore depends on how the reduction is traversed: a value is only kept when nothing propagates it.
+The result therefore depends on how the reduction is traversed: a value is only kept when nothing propagates it. The two hosts this program was run on lose the NaN in every case, and they differ in exactly one row (`2-vector c64, NaN real part`: `1` on x86_64, `0` on aarch64), which is the `maxpd` operand-order effect showing through: the NaN's fate is decided by the emitted instruction rather than by IEEE propagation.
 
 ## How the fork fixed it
 
