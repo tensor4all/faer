@@ -249,3 +249,39 @@ fn trsm_does_not_touch_memory_outside_its_operand() {
 		}
 	}
 }
+
+/// A conjugating solve of an explicit diagonal: `conj(A) X = B` with a
+/// purely imaginary pivot. A real diagonal (what [`operand`] stores) cannot
+/// tell `1/a` from `1/conj(a)`, so the one-element base case at
+/// `triangular_solve.rs` could lose its conjugation unnoticed. `2i` is exact
+/// under conjugation and its reciprocal (`-i/2`) is exact in binary, so the
+/// comparison stays exact. The real suites return immediately: `conj` is the
+/// identity there and the two expressions coincide by definition.
+#[test]
+fn trsv_conjugates_an_imaginary_diagonal_exactly() {
+	use BlockStructure::*;
+	let pivot = scalar(0.0, 2.0);
+	if pivot == zero() {
+		return;
+	}
+	for structure in [TriangularLower, TriangularUpper] {
+		for (conj, want) in [(Conj::No, scalar(0.0, -0.5)), (Conj::Yes, scalar(0.0, 0.5))] {
+			let mut a = Mat::<Scalar>::full(1, 1, zero());
+			a[(0, 0)] = pivot;
+			let a_before = a.clone();
+			let mut b = Mat::<Scalar>::full(1, 1, one());
+			solve(a.as_ref(), structure, conj, b.as_mut(), Par::Seq);
+			let ctx = format!("1x1 structure={structure:?} conj={conj:?}");
+			crate::assert!(
+				same_number(b[(0, 0)].copy(), want),
+				"{ctx}: got {:?} want {:?}",
+				b[(0, 0)],
+				want
+			);
+			crate::assert!(
+				exact(a_before.as_ref(), a.as_ref()),
+				"{ctx}: the operand was modified"
+			);
+		}
+	}
+}
