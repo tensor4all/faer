@@ -1,7 +1,7 @@
 # faer-039: `norm_max` drops NaN entries
 
-**What happens:** `MatRef`, `ColRef` and `RowRef::norm_max` ignore entries whose magnitude is NaN and return the largest finite magnitude instead, or `0` when every entry is NaN. `norm_l1` and `norm_l2` of the same input return NaN, as IEEE propagation and LAPACK's `xLANGE('M')` do.
-**Which input:** any matrix, vector or row with at least one NaN. The program uses a 1x2 matrix, a plain 2-vector, a `c64` vector with the NaN in the real and in the imaginary part, a 2x3 column-major matrix, a strided row, an all-NaN vector, a 100-vector with a NaN at index 57, a 129-vector with a NaN at index 128 (the first length whose column reaches the pairwise split above `LINEAR_IMPL_THRESHOLD = 128`) and the transpose of the 2x3.
+**What happens:** `MatRef`, `ColRef` and `RowRef::norm_max` drop entries whose magnitude is NaN and return a finite value instead: the largest finite magnitude in every case this program measures. What it returns depends on the input layout and on the instruction the reduction emits, not only on whether a NaN is present, so the table below is the claim, not a rule about all inputs. `norm_l1` and `norm_l2` of the same input return NaN, as IEEE propagation and LAPACK's `xLANGE('M')` do.
+**Which input:** matrices, vectors and rows with at least one NaN, when that NaN is not overwritten before the final combine; which NaN survives depends on the layout, as the table shows. The program uses a 1x2 matrix, a plain 2-vector, a `c64` vector with the NaN in the real and in the imaginary part, a 2x3 column-major matrix, a strided row, an all-NaN vector, a 100-vector with a NaN at index 57, a 129-vector with a NaN at index 128 (the first length whose column reaches the pairwise split above `LINEAR_IMPL_THRESHOLD = 128`) and the transpose of the 2x3.
 **Which version:** `faer` 0.24.4, the latest release on crates.io, and upstream `main` at `0ecd846` (2026-10-22).
 **Added to this list:** 2026-11-09.
 
@@ -23,21 +23,23 @@ The program calls `norm_max` on each case, prints the expected and the actual va
 | 2x3, row 1 strided | scalar fallback | NaN | **1** |
 | all-NaN vector | SIMD kernel | NaN | **0** |
 | 100-vector, NaN at 57 | SIMD kernel | NaN | **99** |
-| 129-vector, NaN at 128 | SIMD kernel and pairwise combine | NaN | **127** |
+| 129-vector, NaN at 128 | SIMD kernel, then the split's combine | NaN | **127** |
 | transpose of the 2x3 | SIMD kernel | NaN | **1** |
 | reference: `norm_l1`, `norm_l2` of the 2-vector | — | NaN | NaN (correct) |
 
-The NaN is lost in the contiguous SIMD kernel, in the pairwise split (the 129-element case), in the strided row and in the complex cases, so all three branches of `norm_max` are wrong. The strided row is the case that exercises the scalar fallback, and that branch is reachable from a standalone program: `norm_max` transposes the view when `ncols() > 1 && col_stride().unsigned_abs() == 1` (`:60-62`) and then takes the SIMD route only when `try_as_col_major()` accepts the view, i.e. when its row stride is 1 (`mat/matref.rs:1448`); every other view falls through to the scalar loop at `:118-126`.
+The NaN is lost in the contiguous SIMD kernel, in the split (the 129-element row shows the split losing it, but not that the combine is the only cause), in the strided row and in the complex cases, so all three branches of `norm_max` are wrong. The strided row is the case that exercises the scalar fallback, and that branch is reachable from a standalone program: `norm_max` transposes the view when `ncols() > 1 && col_stride().unsigned_abs() == 1` (`:60-62`) and then takes the SIMD route only when `try_as_col_major()` accepts the view, i.e. when its row stride is 1 (`mat/matref.rs:1448`); every other view falls through to the scalar loop at `:118-126`.
 
 `RowRef::norm_max` reaches that loop through its own view: `RowRef::as_mat` is `transpose().as_mat().transpose()` (`row/rowref.rs:422-424`), and `ColRef::as_mat` gives the matrix it builds a column stride of zero (`col/colref.rs:465-477`). A row of the column-major `m` in this program therefore becomes a 1 x 3 view with **row stride 0** and column stride `m.col_stride() = 2`: `:60-62` does not transpose it (its column stride is not 1), and `try_as_col_major` rejects it (its row stride is not 1), so `m.row(1).norm_max()` runs the scalar loop. A row of a *row-major* matrix, whose stride is 1, is transposed at `:60-62` into a contiguous column instead and does take the SIMD route.
 
 The table was recorded on an x86_64 Linux host with `cargo run --locked`; the aarch64 macOS run this entry was first recorded on agrees on every row except the one marked above.
 
+The 129-element row does not isolate the combine: its one-element tail is reduced to `0` on its own, and `fmax(127, 0)` is `127` for a NaN-propagating combine as well, so the row shows the split losing a NaN rather than a combine that is the only cause.
+
 ## Cause
 
 `src/linalg/reductions/norm_max.rs` in 0.24.4 drops NaN in three places:
 
-- the SIMD kernel accumulates with `simd.max` (`:21-26`), and `faer-traits` 0.24.0 implements that as `select(gt(lhs, rhs), lhs, rhs)` (`src/lib.rs:654-663`) — not as a machine `max`. A NaN therefore survives only when it arrives as the **right** operand (`max(1.0, NaN)` is NaN, `max(NaN, 0.0)` is 0.0), and the kernel feeds the accumulator as the left operand, so an incoming NaN is dropped. This is the same operand-order effect that `maxpd` has on x86, which is why the two hosts differ only in the row whose NaN reaches the reduction by a different route;
+- the SIMD kernel accumulates with `simd.max` (`:21-26`), and `faer-traits` 0.24.0 implements that as `select(gt(lhs, rhs), lhs, rhs)` (`src/lib.rs:654-663`) — not as a machine `max`. A NaN therefore survives only when it arrives as the **right** operand (`max(1.0, NaN)` is NaN, `max(NaN, 0.0)` is 0.0), and the kernel feeds the accumulator as the left operand. An arriving NaN therefore survives that update (`max(0.0, NaN)` is NaN), but the next value of the same lane then arrives as the right operand of an accumulator that is already NaN (`max(NaN, v)` is `v`), so the NaN is dropped unless it is the last value of its lane; otherwise it survives the kernel and is dropped later, in the pairwise combine or in the horizontal reduction. This is the same operand-order effect that `maxpd` has on x86, which is why the two hosts differ only in the row whose NaN reaches the reduction by a different route;
 - the pairwise halves above `LINEAR_IMPL_THRESHOLD` (128) are combined with `fmax` (`:43` and `:56`), which returns the non-NaN operand;
 - the scalar fallback combines with `fmax` as well (`:126`).
 
