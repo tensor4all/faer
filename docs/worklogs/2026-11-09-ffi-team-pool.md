@@ -45,6 +45,14 @@ rather than per handle, which is the wrong shape for a caller that makes many ca
   same thing — sequential — without changing what an unrelated thread sees.
 - `set_threads` is a setting on the owned object: it rebuilds the pool for the new width, and
   narrowing to one releases it. Resizing is a reconfiguration, so a pool build there is intended.
+  The old pool is dropped (its workers joined) *before* the new one is built. Assigning
+  `Team::pool_for(threads)` in one statement evaluates the new pool first, so a 4 → 2 shrink asked
+  for six workers at once (review r3), and on a host at its thread limit (`pids.max`) the build fails
+  in `pool_for`'s `expect`, which aborts. Whether that `expect` should become a reported error is
+  left open: the boundary has no error channel for it, the same question as the fork pid check.
+  `tests::set_threads_drops_the_old_pool_before_it_builds_the_new_one` counts the handle's own
+  workers alive at once (spawned in `build`, uncounted when the thread exits); with the old order it
+  fails with 6 against 4.
 - `faer-ffi` names `threadteam` directly for those calls rather than gaining a pool-lending helper in
   `faer::team`: that would be a new public Rust API for one consumer, and the pattern `with_team`'s
   own documentation recommends to a caller that owns a pool.
@@ -83,9 +91,12 @@ rather than per handle, which is the wrong shape for a caller that makes many ca
   ordered against another thread using the same handle.
   `tests::the_handle_is_shareable` fails to compile if the handle stops being `Send + Sync`.
 - `tests::a_nested_call_runs_sequentially` is the reentrancy guard's test. Without the guard the
-  nested call waits for a mutex the same thread holds, so the regression is a hang (measured: the test
-  binary was killed at 45 s) rather than a wrong answer; the guard is also what a `then_some` instead
-  of an `if` silently breaks, which is worth pinning.
+  nested call waits for a mutex the same thread holds, so the regression is a deadlock rather than a
+  wrong answer; the guard is also what a `then_some` instead of an `if` silently breaks, which is
+  worth pinning. The first version ran the nested call on the test thread and hung the runner (and
+  the EVD test queued behind the same `TEAM_TURN`) when the guard was removed (review r3); the outer
+  call now runs on a helper thread with a 30 s deadline, and with the guard disabled the test fails at
+  30.01 s with "never returned (Timeout)".
 - `tests::an_evd_callback_may_call_back_on_the_same_handle` is the review's reproducer through the
   real path: `libfaer_v0_23_evd_f64` with a `recommended_shift_count` callback that multiplies on the
   same handle, for a width-1 handle and a parallel one. It runs the EVD on a helper thread with a 60 s

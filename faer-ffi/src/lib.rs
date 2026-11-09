@@ -311,24 +311,35 @@ impl Team {
 	/// whose threads it does not have (its `create` would wait for them forever).
 	fn pool_for(threads: usize) -> Option<threadteam::Pool> {
 		(threads > 1).then(|| {
-			threadteam::Pool::builder()
+			let builder = threadteam::Pool::builder()
 				.threads(threads)
-				.thread_name(|i| format!("faer-ffi-{i}"))
-				.acquire_timeout(core::time::Duration::from_secs(30))
-				.build()
-				.expect("a thread pool for the team")
+				.thread_name(|i| {
+					#[cfg(test)]
+					tests::live_workers::spawned();
+					format!("faer-ffi-{i}")
+				})
+				.acquire_timeout(core::time::Duration::from_secs(30));
+			#[cfg(test)]
+			let builder = builder.on_start(|_| tests::live_workers::started());
+			builder.build().expect("a thread pool for the team")
 		})
 	}
 
 	/// Resets the width, rebuilding the owned pool when it changes: the old pool's workers are joined
 	/// and the new width starts its own. This is a reconfiguration, and it pays for its threads.
+	///
+	/// The old pool is dropped (its workers joined) *before* the new one is built, so the handle never
+	/// asks for the old and the new workers at once: assigning `pool_for(threads)` in one statement
+	/// would evaluate the new pool first and hold both, which on a host at its thread limit turns a
+	/// shrink into a failed build.
 	fn set_threads(&mut self, threads: usize) {
 		if threads == self.threads {
 			return;
 		}
 		self.threads = threads;
-		*self.pool.get_mut().unwrap_or_else(|e| e.into_inner()) =
-			Team::pool_for(threads);
+		let pool = self.pool.get_mut().unwrap_or_else(|e| e.into_inner());
+		drop(pool.take());
+		*pool = Team::pool_for(threads);
 	}
 
 	/// Runs `f` on the team this handle owns, and leaves it again before returning: the pool goes into
@@ -3008,6 +3019,42 @@ mod tests {
 	/// the other runs a factorization): one test at a time keeps them apart.
 	static TEAM_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+	/// The handle's own workers alive at once, and the most there were. A worker is counted when
+	/// `build` spawns it (the `thread_name` hook runs on the building thread, before `build` returns)
+	/// and uncounted when its thread exits (a thread-local set by the `on_start` hook is dropped there,
+	/// before the pool's drop has joined it). Only the handle's dedicated workers are counted, not
+	/// threadteam's shared ones, and every test that builds a handle holds [`TEAM_TURN`].
+	pub(super) mod live_workers {
+		use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+		static LIVE: AtomicUsize = AtomicUsize::new(0);
+		static MOST: AtomicUsize = AtomicUsize::new(0);
+		struct Exit;
+		impl Drop for Exit {
+			fn drop(&mut self) {
+				LIVE.fetch_sub(1, SeqCst);
+			}
+		}
+		thread_local!(static EXIT: core::cell::RefCell<Option<Exit>> = const { core::cell::RefCell::new(None) });
+		pub fn spawned() {
+			MOST.fetch_max(LIVE.fetch_add(1, SeqCst) + 1, SeqCst);
+		}
+		pub fn started() {
+			EXIT.with(|exit| *exit.borrow_mut() = Some(Exit));
+		}
+		/// starts a new high-water mark at the current count, and returns that count
+		pub fn reset() -> usize {
+			let live = LIVE.load(SeqCst);
+			MOST.store(live, SeqCst);
+			live
+		}
+		pub fn most() -> usize {
+			MOST.load(SeqCst)
+		}
+		pub fn live() -> usize {
+			LIVE.load(SeqCst)
+		}
+	}
+
 	/// (a) a null handle runs sequentially, (b) a handle runs the same product through a team,
 	/// (c) the calling thread is outside the team again once the call returns, and the handle can be
 	/// reused, re-widened and destroyed. The mask is checked after a control team of the same width,
@@ -3240,11 +3287,50 @@ mod tests {
 		);
 	}
 
+	/// `set_threads` lets the old pool's workers go before the new width starts its own, so a
+	/// reconfiguration never asks the host for both at once: shrinking 4 to 2 needs no more threads
+	/// than the handle already has, which is what a host at its thread limit (cgroup `pids.max`) can
+	/// still grant. Built the other way round, the new pool exists before the old one is dropped, and
+	/// a failed build is the `expect` in [`Team::pool_for`], which aborts the caller.
+	#[test]
+	fn set_threads_drops_the_old_pool_before_it_builds_the_new_one() {
+		let _turn = TEAM_TURN.lock().unwrap_or_else(|e| e.into_inner());
+		let before = live_workers::live();
+		let team = unsafe { libfaer_v0_23_team_create(4) };
+		assert_eq!(
+			live_workers::reset(),
+			before + 4,
+			"a 4-wide handle did not start 4 workers of its own"
+		);
+		unsafe { libfaer_v0_23_team_set_threads(team, 2) };
+		assert_eq!(
+			live_workers::most(),
+			before + 4,
+			"shrinking 4 to 2 had the old and the new pool alive at once"
+		);
+		assert_eq!(
+			live_workers::live(),
+			before + 2,
+			"the old pool's workers were not joined"
+		);
+		live_workers::reset();
+		unsafe { libfaer_v0_23_team_set_threads(team, 3) };
+		assert_eq!(
+			live_workers::most(),
+			before + 3,
+			"growing 2 to 3 had the old and the new pool alive at once"
+		);
+		unsafe { libfaer_v0_23_team_destroy(team) };
+		assert_eq!(live_workers::live(), before, "destroy left workers alive");
+	}
+
 	/// An operation called from inside another operation on the same thread gets no team: faer calls
 	/// back into C (`SchurParams::recommended_shift_count` and its siblings), and such a callback waits
 	/// for the pool its caller holds if it is handed one, which never ends. It runs sequentially
-	/// instead, so the result is the same and the call returns. A regression here hangs rather than
-	/// fails, which is what a deadlock looks like from a test runner.
+	/// instead, so the result is the same and the call returns. A regression here is a deadlock (or
+	/// a panic on relocking the handle's mutex), so the outer call runs on a helper thread and is
+	/// given a deadline: the test fails instead of hanging the runner and the tests queued behind
+	/// [`TEAM_TURN`].
 	#[test]
 	fn a_nested_call_runs_sequentially() {
 		let _turn = TEAM_TURN.lock().unwrap_or_else(|e| e.into_inner());
@@ -3258,19 +3344,31 @@ mod tests {
 		});
 		let expected = want(n, &a, &b);
 		let team = unsafe { libfaer_v0_23_team_create(width) };
-		let mut inner_c = faer::Mat::<f64>::zeros(n, n);
-		let mut outer_c = faer::Mat::<f64>::zeros(n, n);
-		with_team_par(team, |_| {
-			// the callback: the same handle, from the thread its caller is already using
-			matmul(&mut inner_c, &a, &b, team);
-			assert_eq!(
-				with_team_par(team, |par| par.degree()),
-				1,
-				"a nested call was handed a team its caller holds"
-			);
+		let addr = team as usize;
+		let (done, wait) = std::sync::mpsc::channel();
+		let (a2, b2) = (a.clone(), b.clone());
+		std::thread::spawn(move || {
+			let team = addr as *const Team;
+			let mut inner_c = faer::Mat::<f64>::zeros(n, n);
+			let inner_degree = with_team_par(team, |_| {
+				// the callback: the same handle, from the thread its caller is already using
+				matmul(&mut inner_c, &a2, &b2, team);
+				with_team_par(team, |par| par.degree())
+			});
+			let _ = done.send((inner_c, inner_degree));
 		});
+		let (inner_c, inner_degree) = wait
+			.recv_timeout(core::time::Duration::from_secs(30))
+			.unwrap_or_else(|e| {
+				panic!("a call nested in another call on the same handle never returned ({e:?}): it waited for the pool its caller holds")
+			});
+		let mut outer_c = faer::Mat::<f64>::zeros(n, n);
 		matmul(&mut outer_c, &a, &b, team);
 		unsafe { libfaer_v0_23_team_destroy(team) };
+		assert_eq!(
+			inner_degree, 1,
+			"a nested call was handed a team its caller holds"
+		);
 		assert!(
 			close(&expected, &inner_c),
 			"the nested call gave another product"
