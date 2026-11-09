@@ -50,6 +50,10 @@ fn trmm_matches_an_independent_product() {
 					let a_before = a.clone();
 					let b =
 						Mat::<Scalar>::from_fn(m, n, |i, j| integer(i + 1, j));
+					// the reference product comes from the operand as it was
+					// stored before the call, so a kernel that rewrites it cannot
+					// supply its own reference
+					let b_before = b.clone();
 					// op(A) for trans = N, T, C
 					let (a_view, a_structure, a_conj) = match trans {
 						0 => (a.as_ref(), structure, Conj::No),
@@ -105,14 +109,19 @@ fn trmm_matches_an_independent_product() {
 							alpha,
 							Par::Seq,
 						);
+						let (lhs_ref, rhs_ref) = if left {
+							(lhs, b_before.as_ref())
+						} else {
+							(b_before.as_ref(), rhs)
+						};
 						let want = blended(
 							Accum::Replace,
 							Mat::<Scalar>::zeros(m, n).as_ref(),
 							BlockStructure::Rectangular,
-							lhs,
+							lhs_ref,
 							lhs_structure,
 							conj_lhs,
-							rhs,
+							rhs_ref,
 							rhs_structure,
 							conj_rhs,
 							alpha,
@@ -129,6 +138,11 @@ fn trmm_matches_an_independent_product() {
 					crate::assert!(
 						exact(a.as_ref(), a_before.as_ref()),
 						"trmm modified its triangular operand: \
+						 structure={structure:?} trans={trans} left={left}"
+					);
+					crate::assert!(
+						exact(b.as_ref(), b_before.as_ref()),
+						"trmm modified its right-hand-side operand: \
 						 structure={structure:?} trans={trans} left={left}"
 					);
 				}
@@ -157,6 +171,8 @@ fn trmm_reads_and_writes_nothing_outside_its_operands() {
 			.copy_from(&operand(order, structure));
 		let a_before = a_parent.clone();
 		let b = Mat::<Scalar>::from_fn(m, n, |i, j| integer(i, j));
+		// the reference comes from the operand as it was stored before the call
+		let b_before = b.clone();
 		let mut dst_parent = Mat::<Scalar>::full(m + 2, n + 2, rogue());
 		let dst_before = dst_parent.clone();
 		{
@@ -207,7 +223,7 @@ fn trmm_reads_and_writes_nothing_outside_its_operands() {
 				a_before.as_ref().submatrix(1, 1, order, order),
 				structure,
 				Conj::No,
-				b.as_ref(),
+				b_before.as_ref(),
 				Rectangular,
 				Conj::No,
 				one(),
@@ -217,7 +233,7 @@ fn trmm_reads_and_writes_nothing_outside_its_operands() {
 				Accum::Replace,
 				Mat::<Scalar>::zeros(m, n).as_ref(),
 				Rectangular,
-				b.as_ref(),
+				b_before.as_ref(),
 				Rectangular,
 				Conj::No,
 				a_before.as_ref().submatrix(1, 1, order, order),
@@ -249,6 +265,10 @@ fn trmm_reads_and_writes_nothing_outside_its_operands() {
 				n
 			),
 			"{ctx}: the destination's parent was modified outside the product"
+		);
+		crate::assert!(
+			exact(b.as_ref(), b_before.as_ref()),
+			"{ctx}: the right-hand-side operand was modified"
 		);
 	}
 }
