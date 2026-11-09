@@ -101,10 +101,12 @@ fn symmetric_rank_k_update_writes_only_the_stored_triangle() {
 		// (A A^H). The complex types need the unconjugated pair as well: for
 		// them conjugation is the difference between `?syrk` and `?herk`.
 		for trans in 0..4 {
-			// (3, 1) is the non-diagonal rank-1 shape: DSYR/ZHER with n = 3,
+			// (3, 0) is an empty reduction into a nonempty destination: `Accum::Replace`
+			// must still zero the stored triangle; (3, 1) is the non-diagonal rank-1
+			// shape: DSYR/ZHER with n = 3,
 			// which (1, 1) cannot reach because a 1 x 1 update has no
 			// off-diagonal entry to get wrong
-			for (n, k) in [(0, 0), (1, 1), (3, 1), (2, 3), (3, 2), (4, 4), (5, 3)]
+			for (n, k) in [(0, 0), (3, 0), (1, 1), (3, 1), (2, 3), (3, 2), (4, 4), (5, 3)]
 			{
 				let (ma, na) =
 					if trans == 0 || trans == 3 { (n, k) } else { (k, n) };
