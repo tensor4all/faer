@@ -181,8 +181,11 @@
 //! sequentially; use [`linalg::matmul::matmul`] for a parallel product.
 //!
 //! Results are bitwise reproducible on the same machine and build **at a fixed thread count**,
-//! and only there: a different `Par` width is not promised to agree bit for bit, because the cost
-//! model splits work by the problem rather than by the count. See
+//! and only there: a different `Par` width is not promised to agree bit for bit. The width can
+//! change both the path a call takes (the cost model gates the sequential and the parallel paths
+//! on the problem and the width it is given) and how the work is partitioned (some routines split
+//! by the participant count itself, such as the trailing update of the tridiagonalization), so two
+//! widths can group the same sum differently. See
 //! [docs/reproducibility.md](https://github.com/tensor4all/faer/blob/main/docs/reproducibility.md)
 //! (tensor4all/faer#327).
 //!

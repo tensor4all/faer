@@ -900,6 +900,45 @@ mod tests {
 		assert_eq!(max_diff(inf.as_ref(), inf.as_ref()), 0.0);
 	}
 
+	/// Relative comparison for the families below: `max_diff(a, b)` within `1e-10` of the largest
+	/// finite magnitude of the reference `a` (at least 1). Non-finite entries stay out of the
+	/// scale: the `+inf` of the 32x32 QR fixture would make the bound infinite and let any finite
+	/// error through. `max_diff` still requires such entries to be the same infinity on both sides.
+	fn assert_within_tolerance(a: MatRef<'_, f64>, b: MatRef<'_, f64>, what: &str) {
+		let scale = (0..a.ncols()).flat_map(|j| (0..a.nrows()).map(move |i| (i, j))).fold(1.0f64, |m, (i, j)| {
+			let v = a[(i, j)].abs();
+			if v.is_finite() { m.max(v) } else { m }
+		});
+		let d = max_diff(a, b);
+		assert!(d <= 1e-10 * scale, "{what}: {d} against {scale}");
+	}
+
+	/// The 32x32 no-pivoting QR used by `small_qr_on_a_team_is_the_sequential_one`; its `q` holds
+	/// `+inf` at (3, 31).
+	fn small_qr(mut par: Par<'_>) -> (Mat<f64>, Mat<f64>) {
+		use crate::dyn_stack::{MemBuffer, MemStack};
+		use crate::linalg::qr::no_pivoting::factor as qrf;
+		let n = 32;
+		let bs = qrf::recommended_block_size::<f64>(n, n);
+		let mut a = rand_mat(n, n, 11);
+		let mut q = Mat::<f64>::zeros(bs, n);
+		let mut mem = MemBuffer::new(qrf::qr_in_place_scratch::<f64>(n, n, bs, par.shape(), Default::default()));
+		qrf::qr_in_place(a.as_mut(), q.as_mut(), par.reborrow(), MemStack::new(&mut mem), Default::default());
+		(a, q)
+	}
+
+	/// An infinity in the reference must not widen the tolerance: the QR fixture's `q` against a
+	/// copy whose (0, 0) is off by `1e6` is rejected although (3, 31) is `+inf` on both sides.
+	#[test]
+	#[should_panic(expected = "against")]
+	fn tolerance_ignores_an_infinite_reference_entry() {
+		let (_, q) = small_qr(Par::Seq);
+		assert_eq!(q[(3, 31)], f64::INFINITY, "the fixture lost its sentinel");
+		let mut off = q.clone();
+		off[(0, 0)] += 1e6;
+		assert_within_tolerance(q.as_ref(), off.as_ref(), "q with (0, 0) off by 1e6");
+	}
+
 	/// The guard the manual comparisons rely on, which no `max_diff` test reaches: a NaN must not
 	/// fold into the running maximum.
 	#[test]
@@ -914,18 +953,8 @@ mod tests {
 	/// products sequentially, instead of asking each product and each triangular step.
 	#[test]
 	fn small_qr_on_a_team_is_the_sequential_one() {
-		use crate::dyn_stack::{MemBuffer, MemStack};
-		use crate::linalg::qr::no_pivoting::factor as qrf;
 		let n = 32;
-		let a0 = rand_mat(n, n, 11);
-		let run = |mut par: Par<'_>| {
-			let bs = qrf::recommended_block_size::<f64>(n, n);
-			let mut a = a0.clone();
-			let mut q = Mat::<f64>::zeros(bs, n);
-			let mut mem = MemBuffer::new(qrf::qr_in_place_scratch::<f64>(n, n, bs, par.shape(), Default::default()));
-			qrf::qr_in_place(a.as_mut(), q.as_mut(), par.reborrow(), MemStack::new(&mut mem), Default::default());
-			(a, q)
-		};
+		let run = small_qr;
 		let (a_seq, q_seq) = run(Par::Seq);
 		let (a_team, q_team) = with_par(4, |par| {
 			stats::take();
@@ -1091,11 +1120,6 @@ mod tests {
 		let ns = StdDuration::from_nanos;
 		// cheap up to 4, prohibitive from 5 on
 		let row = [(2, ns(10)), (4, ns(10)), (5, StdDuration::from_secs(1))];
-		let tol = |a: MatRef<'_, f64>, b: MatRef<'_, f64>, what: &str| {
-			let scale = (0..a.ncols()).flat_map(|j| (0..a.nrows()).map(move |i| (i, j))).fold(1.0f64, |m, (i, j)| m.max(a[(i, j)].abs()));
-			let d = max_diff(a, b);
-			assert!(d <= 1e-10 * scale, "{what}: {d} against {scale}");
-		};
 		type Run = fn(Par<'_>) -> Vec<Mat<f64>>;
 		let families: [(&str, Run); 14] = [
 			("full pivoting lu", |par| {
@@ -1251,7 +1275,7 @@ mod tests {
 			assert!(s.split[4] + s.run[4] > 0, "{name}: no split or section of 4 ({s:?})");
 			assert!(s.split.iter().skip(5).all(|&c| c == 0), "{name}: a split wider than 4 ({s:?})");
 			for (k, (a, b)) in want.iter().zip(got.iter()).enumerate() {
-				tol(a.as_ref(), b.as_ref(), &alloc::format!("{name} output {k}"));
+				assert_within_tolerance(a.as_ref(), b.as_ref(), &alloc::format!("{name} output {k}"));
 			}
 		}
 	}
