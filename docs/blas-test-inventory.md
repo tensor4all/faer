@@ -45,15 +45,15 @@ BLAS `DIAG` value; they are covered because faer exposes them.
 "Port?" is this batch only. Rows marked *covered* have a faer unit test that
 already exercises the source's check; a reason says which.
 
-### Level 1 — `test/{s,d,c,z}blat1.f` (`CHECK1`), `ctest/c_{s,d,c,z}blas1.c`
+### Level 1 — `test/{s,d,c,z}blat1.f` (`CHECK0`-`CHECK3`), `ctest/c_{s,d,c,z}blas1.c`
 
 | OpenBLAS file/check | faer counterpart | Port? | Reason |
 | --- | --- | --- | --- |
-| `blat1` `ISAMAX`/`IDAMAX` (index of the largest modulus) | none (`reductions::norm_max` returns the value, not the index) | no | faer has no index-reduction API; nothing to call |
-| `blat1` `SASUM`/`DASUM`, `SCASUM`/`DZASUM` | `reductions::norm_l1` (`abs1`, so the complex entries are `\|re\|+\|im\|`) | covered | `norm_l1::tests::test_norm_l1`; the source adds only 5-entry, `incx` 1/2 fixtures |
-| `blat1` `SDOT`/`DDOT`/`CDOTU`/`ZDOTU`, `CDOTC`/`ZDOTC` | `matmul::dot::inner_prod` | no | exists with its own conj/no-conj tests; the source check is a 5-entry dot product |
-| `blat1` `SAXPY`/`SCOPY`/`SSWAP`/`SSCAL`/`SROT`/`SROTG`, `CSSCAL`/`ZDSCAL`/`CROTG`/`CSROT` | none | no | no level-1 vector API in faer |
-| `blat1` `SNRM2`/`DNRM2`/`SCNRM2`/`DZNRM2` | `reductions::norm_l2`, `MatRef::norm_l2`, `ColRef::norm_l2` | covered | the source check is `n = 0..4` with `incx` 1/2 and small values; `norm_l2::tests::test_norm_l2_strided_range` already reads a stride-2 row view, and the exponent-range half of the property is [#36](https://github.com/tensor4all/faer/issues/36) / [faer-008](../upstream-reports/faer-008-norm-l2-strided-range/README.md) |
+| `CHECK1` `ISAMAX`/`IDAMAX` (index of the largest modulus) | none (`reductions::norm_max` returns the value, not the index) | no | faer has no index-reduction API; nothing to call |
+| `CHECK1` `SASUM`/`DASUM`, `SCASUM`/`DZASUM` | `reductions::norm_l1` (`abs1`, so the complex entries are `\|re\|+\|im\|`) | covered | `norm_l1::tests::test_norm_l1`; the source adds only 5-entry, `incx` 1/2 fixtures |
+| `CHECK2` `SDOT`/`DDOT`/`CDOTU`/`ZDOTU`, `CDOTC`/`ZDOTC` | `matmul::dot::inner_prod` | no | the counterpart exists, but it has no unit test of its own (it is exercised only through the decompositions that call it), so the source's 5-entry dot over `incx`/`incy` in {1, 2, -2, -1} is a candidate for the next batch, not covered |
+| `CHECK2`/`CHECK3` `SAXPY`/`SCOPY`/`SSWAP`/`SSCAL`/`SROT`/`SROTG`, `CSSCAL`/`ZDSCAL`/`CROTG`/`CSROT` | none | no | no level-1 vector API in faer (the source sweeps `incx`/`incy` over {1, 2, -2, -1}) |
+| `CHECK1` `SNRM2`/`DNRM2`/`SCNRM2`/`DZNRM2` | `reductions::norm_l2`, `MatRef::norm_l2`, `ColRef::norm_l2` | covered | the source check is `n = 0..4` with `incx` 1/2 and small values; `norm_l2::tests::test_norm_l2_strided_range` already reads a stride-2 row view, and the exponent-range half of the property is [#36](https://github.com/tensor4all/faer/issues/36) / [faer-008](../upstream-reports/faer-008-norm-l2-strided-range/README.md) |
 
 ### Level 2 — `test/{s,d,c,z}blat2.f` (`DCHK1`-`DCHK6`), `ctest/c_*blat2c.c`
 
