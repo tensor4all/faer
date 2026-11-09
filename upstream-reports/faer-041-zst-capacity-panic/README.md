@@ -40,7 +40,7 @@ For a zero-sized `T`, `size == 0` while `align >= 1`, so `align > size` holds an
 
 The padding is skipped when `size == 0` (`if size > 0 && align > size`, `faer/src/mat/matown.rs`): a zero-sized element has a byte stride of 0 for every capacity, so there is nothing to pad, and the size arithmetic below already yields an empty layout with no allocation. Making a zero-sized matrix constructible exposed two `DropMat` sites that had passed an element count where a byte stride was expected (`init_with` and `truncate`); both now multiply by `size_of::<T>()`.
 
-Fork tests: `zero_sized_elements_reserve_without_panicking` and `cleanup_of_aligned_and_zero_sized_elements_uses_a_byte_stride` in `faer/tests/owned_capacity.rs`, clean under Miri.
+Fork tests: `zero_sized_elements_reserve_without_panicking` and `cleanup_of_aligned_and_zero_sized_elements_uses_a_byte_stride` in `faer/tests/owned_capacity.rs`.
 
 ## Affected versions
 

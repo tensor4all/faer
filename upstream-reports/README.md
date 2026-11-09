@@ -60,7 +60,7 @@ The program prints the expected and the actual value, and exits with status 1 wh
 | [gemm-x86-001](gemm-x86-001-diag-negative-stride/) | A product with a diagonal gives a wrong value when the left matrix is stored backwards | `private-gemm-x86` 0.1.22 | wrong value | tensor4all/t4a-private-gemm-x86#5 (`84ca6db`) | not yet | 2026-10-29 |
 
 "Fixed upstream" was checked against each crate's upstream `main` and its latest release on 2026-11-09: `faer` at `0ecd846` (2026-10-22) and its 0.24.4 release, `gemm` at `86102c5`, which is its 0.19.0 release, `private-gemm-x86` at `71872b9`, which is its 0.1.22 release.
-Every entry was re-run on 2026-11-09 and behaves as its section states; no newer release existed to raise a pin to, and `gemm`'s and `private-gemm-x86`'s `main` are their release commits, so only `faer` needed a build from `main`.
+Every entry that runs on this host was re-run on 2026-11-09 and behaves as its section states; no newer release existed to raise a pin to, and `gemm`'s and `private-gemm-x86`'s `main` are their release commits, so only `faer` needed a build from `main`.
 `gemm-x86-001` needs an x86 CPU, and on aarch64 `faer-001` and `faer-026` do not trigger, as their sections state.
 The three entries added this week (`faer-039`, `faer-040`, `faer-041`) were also run against `faer`'s `main` at `0ecd846`, where they fail the same way.
 `faer`'s `main` is the 0.24.4 release plus eleven commits, and only the `gevd` scratch layout and conjugate-pair slots among them touch the code behind an entry: `faer-009`, re-run there, still fails.
