@@ -14,6 +14,15 @@
 //! allocates one `partials` buffer when the `V^H V` reduction is split over more
 //! than one thread, and the matmul fallback on hosts without AVX2/FMA allocates
 //! (PATCHSET rows #58/#56). Both apply to a `Par::Team` call, not to this one.
+//!
+//! A third path is host-dependent and does reach this one: where the `gemm` crate
+//! dispatches to its aarch64 SME kernel, `PackBuffer::take` builds a fresh
+//! `MemBuffer` on every call, so `unitary` allocates through
+//! `apply_block_householder_on_the_left_in_place_generic` on such a host. Measured
+//! on an aarch64 macOS host at `60 x 300`, the one shape far enough into that
+//! dispatch: 13, 12, 17, 17 allocations for (f64, f32, c64, c32), the same numbers
+//! at `620b96a` and at head. On `x86_64` the test passes, so this is the kernel the
+//! build's `gemm` selects, not the LQ code.
 #![cfg(feature = "std")]
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::lq::no_pivoting::{factor, reconstruct, unitary};

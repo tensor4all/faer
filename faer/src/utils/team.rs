@@ -859,25 +859,45 @@ mod tests {
 		})
 	}
 
+	/// Folds one difference into the running maximum, refusing a non-finite one: `f64::max`
+	/// returns its other operand when one side is NaN, so an all-NaN output would satisfy any
+	/// tolerance.
+	fn max_finite(d: f64, x: f64) -> f64 {
+		assert!(x.is_finite(), "non-finite difference {x}");
+		d.max(x)
+	}
+
 	fn max_diff(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> f64 {
 		let mut d: f64 = 0.0;
 		for j in 0..a.ncols() {
 			for i in 0..a.nrows() {
-				let x = (a[(i, j)] - b[(i, j)]).abs();
-				// `f64::max` returns its other operand when one is NaN, so a NaN entry
-				// would otherwise read as agreement. A non-finite difference passes only
-				// where the two entries are the same bits: `q` below holds `+inf` at
-				// (3, 31) on both routes.
-				assert!(
-					x.is_finite() || a[(i, j)].to_bits() == b[(i, j)].to_bits(),
-					"{i},{j}: {} and {} differ by {x}",
-					a[(i, j)],
-					b[(i, j)]
-				);
+				let (av, bv) = (a[(i, j)], b[(i, j)]);
+				let x = (av - bv).abs();
+				// A non-finite difference is accepted only between two equal infinities: `q`
+				// below holds `+inf` at (3, 31) on both routes. A NaN never passes, not even
+				// two NaNs of the same bits, whose difference is itself NaN.
+				assert!(x.is_finite() || (av == bv && av.is_infinite()), "{i},{j}: {av} and {bv} differ by {x}");
+				// `x` is finite here, or both entries are the same infinity and `x` is NaN,
+				// which `f64::max` drops.
 				d = d.max(x);
 			}
 		}
 		d
+	}
+
+	/// The exception in `max_diff` is for the `+inf` of the 32x32 QR fixture, not for NaNs: two
+	/// NaNs of the same bits have a NaN difference, which `f64::max` would drop.
+	#[test]
+	#[should_panic(expected = "differ by NaN")]
+	fn max_diff_rejects_a_nan_on_both_sides() {
+		let nan = Mat::<f64>::full(1, 1, f64::NAN);
+		max_diff(nan.as_ref(), nan.as_ref());
+	}
+
+	#[test]
+	fn max_diff_accepts_two_equal_infinities() {
+		let inf = Mat::<f64>::full(1, 1, f64::INFINITY);
+		assert_eq!(max_diff(inf.as_ref(), inf.as_ref()), 0.0);
 	}
 
 	/// A factorization too small to pay for a section asks the gates of a team token as the
@@ -1431,7 +1451,7 @@ mod tests {
 			let mut d: f64 = 0.0;
 			for j in 0..n {
 				for i in 0..m {
-					d = d.max((want[(i, j)] - got[(i, j)]).norm_sqr().sqrt());
+					d = max_finite(d, (want[(i, j)] - got[(i, j)]).norm_sqr().sqrt());
 				}
 			}
 			assert!(d < 1e-9);
@@ -1706,7 +1726,7 @@ mod tests {
 				let mut d: f64 = 0.0;
 				for j in 0..n {
 					for i in j..n {
-						d = d.max((want[(i, j)] - got[(i, j)]).abs());
+						d = max_finite(d, (want[(i, j)] - got[(i, j)]).abs());
 					}
 				}
 				assert!(d < 1e-8, "cholesky n = {n}: {d}");
@@ -1907,7 +1927,7 @@ mod tests {
 			for j in 0..n {
 				for i in 0..n {
 					if (lo && i >= j) || (!lo && i <= j) {
-						d = d.max((m[(i, j)] - w[(i, j)]).abs());
+						d = max_finite(d, (m[(i, j)] - w[(i, j)]).abs());
 					}
 				}
 			}
@@ -1970,7 +1990,7 @@ mod tests {
 		let mut d: f64 = 0.0;
 		for j in 0..n {
 			for i in 0..n {
-				d = d.max((want[(i, j)] - got[(i, j)]).norm());
+				d = max_finite(d, (want[(i, j)] - got[(i, j)]).norm());
 			}
 		}
 		assert!(d < 1e-9, "{d}");
@@ -1999,7 +2019,7 @@ mod tests {
 		let mut d: f64 = 0.0;
 		for j in 0..n {
 			for i in j..n {
-				d = d.max((want[(i, j)] - got[(i, j)]).abs());
+				d = max_finite(d, (want[(i, j)] - got[(i, j)]).abs());
 			}
 		}
 		assert!(d < 1e-9, "{d}");
@@ -2056,7 +2076,7 @@ mod tests {
 							acc, alpha, conj, conj,
 						);
 					}
-					let d = want.iter().zip(&got).map(|(&w, &g)| err(w, g)).fold(0.0, f64::max);
+					let d = want.iter().zip(&got).map(|(&w, &g)| err(w, g)).fold(0.0, max_finite);
 					assert!(d < 1e-3, "read_dst {read_dst} conj {conj}: {d}");
 				}
 			}
@@ -2181,7 +2201,7 @@ mod tests {
 				let mut d = 0.0f64;
 				for j in 0..n {
 					for i in 0..m {
-						d = d.max(err(want[(i, j)], got[(i, j)]));
+						d = max_finite(d, err(want[(i, j)], got[(i, j)]));
 					}
 				}
 				assert!(d < 1e-3, "{beta:?}: {d}");
@@ -2214,7 +2234,7 @@ mod tests {
 			for j in 0..n {
 				for i in 0..n {
 					if (lower && i >= j) || (!lower && i <= j) {
-						d = d.max((x[(i, j)] - y[(i, j)]).abs());
+						d = max_finite(d, (x[(i, j)] - y[(i, j)]).abs());
 					}
 				}
 			}
@@ -2276,7 +2296,7 @@ mod tests {
 			let mut d: f64 = 0.0;
 			for j in 0..n {
 				for i in j..n {
-					d = d.max((x[(i, j)] - y[(i, j)]).abs());
+					d = max_finite(d, (x[(i, j)] - y[(i, j)]).abs());
 				}
 			}
 			d
