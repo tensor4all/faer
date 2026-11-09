@@ -839,8 +839,12 @@ mod tests {
 				rm_strides(m, n, flipped),
 			);
 			// bit for bit where the copy is taken; the square shapes below 128 go
-			// through the transpose dual instead (the same pivots, the complex
-			// products in another order)
+			// through the transpose dual instead, the complex products in another
+			// order. The dual breaks a magnitude tie by the smallest row first, the
+			// column-major search by the smallest column (`lu_in_place`, "Pivot
+			// ties"), so the pivots agree here only because this fixture does not
+			// hit such a tie; `full_piv_lu_row_major_no_copy` pins one where the
+			// two orders part.
 			compare_row_major_exact_if(
 				m,
 				n,
@@ -848,7 +852,10 @@ mod tests {
 				"full pivoting lu",
 				&cm,
 				&rm,
-				flu::row_major_takes_the_copy(m, n),
+				{
+					let (_, rs, cs) = rm_strides(m, n, flipped);
+					flu::row_major_takes_the_copy(m, n, rs, cs)
+				},
 			);
 			same_index("full pivoting lu row perm", &p_cm, &p_rm);
 			same_index("full pivoting lu row perm inv", &pi_cm, &pi_rm);

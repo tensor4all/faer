@@ -571,28 +571,43 @@ pub fn lu_in_place_scratch<I: Index, T: ComplexField>(
 		.array(2)
 		.and(StackReq::new::<(usize, usize, T::Real)>(par.degree()))
 }
-/// Whether `lu_in_place` factors a row-major `nrows x ncols` matrix through a
-/// column-major copy rather than in place through the transpose dual
-/// (`lu_in_place_unblocked(.., transpose = true)`).
+/// Whether `lu_in_place` factors a matrix with these strides through a
+/// column-major copy rather than in place.
 ///
-/// The copy is [`linalg::row_major_copy_pays`]'s (tall or square, at least
-/// `64 * 64` elements), less the square matrices below `128`. There the dual runs
-/// within 1.05x of a column-major input, so the copy -- two passes over `m * n`
-/// and an `m * n` buffer -- is a pure loss: `64 x 64` f64 one thread costs 1.24x
-/// a column-major input through the copy and 1.01x through the dual on Apple M5
-/// Max, 1.32x and 1.03x on Zen 5 (tensor4all/faer#314). From `128` up the dual's
-/// row scaling `A[(k, j)] *= inv` walks a strided row every step, one cache line
-/// per element, and the dual leaves the band: 1.09x at `512` and `1024` on four
+/// The copy is [`linalg::row_major_copy_pays`]'s (no unit row stride, tall or
+/// square, at least `64 * 64` elements), less one layout: a square matrix below
+/// `128` whose rows are contiguous (`col_stride == 1`, any row stride, so a
+/// padded or reversed row-major view counts). That one goes through the
+/// transpose dual (`lu_in_place_unblocked(.., transpose = true)`), whose fused
+/// SIMD update needs exactly that unit column stride. A generic-stride view
+/// (neither stride `1`, or a column stride of `-1`) keeps the copy: in place it
+/// would fall to the separate matrix update and pivot search.
+///
+/// The square exclusion is what was measured (tensor4all/faer#314): `64 x 64`
+/// f64 one thread costs 1.24x a column-major input through the copy and 1.01x
+/// through the dual on Apple M5 Max, 1.32x and 1.03x on Zen 5. The dual was
+/// timed at `64`, `80`, `96`, `112`, `120` and `127` on M5 and at `64` and `96`
+/// on Zen 5; the sizes in between are taken on the strength of their
+/// neighbours. From `128` up the dual's row scaling `A[(k, j)] *= inv` walks a
+/// strided row every step, one cache line per element, and the dual leaves the
+/// 1.05x band on at least one machine: 1.09x at `512` and `1024` on four
 /// threads (M5), 1.11x at `128` and 1.08-1.27x from `256` on Zen 5 (the scaling
-/// alone goes from 0.22 to 3.26 ms at `1024`, one thread). On a tall matrix the dual also makes the long swap strided and the trailing block
-/// wide (1.4-1.9x), and off the square the dual leaves the 1.05x band early
-/// (`80 x 64`: 1.06x), so only the square shapes skip the copy.
+/// alone goes from 0.22 to 3.26 ms at `1024`, one thread). On a tall matrix the
+/// dual also makes the long swap strided and the trailing block wide
+/// (1.4-2.1x), and off the square it leaves the band early (`80 x 64`: 1.06x),
+/// so only the square shapes skip the copy.
 #[inline]
-pub(crate) fn row_major_takes_the_copy(nrows: usize, ncols: usize) -> bool {
-	nrows >= ncols
+pub(crate) fn row_major_takes_the_copy(
+	nrows: usize,
+	ncols: usize,
+	row_stride: isize,
+	col_stride: isize,
+) -> bool {
+	row_stride.unsigned_abs() != 1
+		&& nrows >= ncols
 		&& ncols > 1
 		&& linalg::row_major_copy_pays(nrows, ncols)
-		&& !(nrows == ncols && ncols < 128)
+		&& !(col_stride == 1 && nrows == ncols && ncols < 128)
 }
 #[derive(Copy, Clone, Debug)]
 pub struct FullPivLuInfo {
@@ -601,6 +616,24 @@ pub struct FullPivLuInfo {
 	/// [rank truncation](FullPivLuParams#rank-truncation) option stopped the factorization
 	pub rank: usize,
 }
+/// # Pivot ties
+///
+/// When several entries share the largest magnitude, the pivot depends on the
+/// layout. The search scans the matrix it factors column by column and keeps
+/// the first strict maximum: the smallest column, then the smallest row. A
+/// row-major square matrix below `128` with contiguous rows is factored through
+/// its transpose (the condition is `row_major_takes_the_copy` in this module's
+/// source), so there the tie goes to the smallest *row*, then the smallest
+/// column, of the original matrix. Every other input -- column-major, generic
+/// strides, or a row-major matrix that is copied to column-major first -- uses
+/// the column-then-row order.
+///
+/// For example, a zero `64 x 64` f64 matrix with `A[(1, 2)] = A[(0, 4)] = 2`
+/// and `max_rank = Some(1)` pivots on `(1, 2)` (two transpositions) when
+/// column-major and on `(0, 4)` (one transposition) when row-major. Both are
+/// valid full-pivoting factorizations of the same matrix; the permutations, the
+/// transposition count and so the factors differ between the two layouts only
+/// on such ties.
 pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 	mat: MatMut<'_, T>,
 	row_perm: &'out mut [I],
@@ -622,10 +655,10 @@ pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 		);
 	}
 	// Same row-major adaptation as the partial-pivoting factorisation above, except
-	// on the small square shapes the transpose dual factors in place at the
-	// column-major speed.
+	// on the small square shapes with contiguous rows the transpose dual factors
+	// in place at the column-major speed.
 	let (M, N) = mat.shape();
-	if mat.row_stride().unsigned_abs() != 1 && row_major_takes_the_copy(M, N) {
+	if row_major_takes_the_copy(M, N, mat.row_stride(), mat.col_stride()) {
 		let mut work = linalg::column_major_copy(mat.rb(), par.reborrow());
 		let mut work = MatMut::from_column_major_slice_mut(&mut work, M, N);
 		let ret = lu_in_place(
