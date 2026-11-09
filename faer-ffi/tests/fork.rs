@@ -102,6 +102,32 @@ fn threads() -> usize {
 	std::fs::read_dir("/proc/self/task").unwrap().count()
 }
 
+/// Waits, for at most `bound`, until the process is back to `want` threads and reports how long that
+/// took; `None` if it never got there.
+///
+/// `destroy` joins the workers, but a joined task's `/proc/self/task` entry outlives the join: the
+/// kernel still has the worker's exit path to run, and `std`'s `join` returns once the worker's
+/// closure has finished, not once the task is gone. A single read straight after `destroy`
+/// therefore sometimes samples that teardown instead of a leak and reports "3 != 2"
+/// (tensor4all/faer#348: 20 of 3000 create/use/destroy cycles, the entry gone 4 us later at the
+/// median and 2 ms at the worst). Waiting for the count to come back keeps what the check is for: a
+/// pool left parked in threadteam's cache never leaves, so this times out instead of passing.
+fn threads_settle(
+	want: usize,
+	bound: std::time::Duration,
+) -> Option<std::time::Duration> {
+	let start = std::time::Instant::now();
+	loop {
+		if threads() == want {
+			return Some(start.elapsed());
+		}
+		if start.elapsed() > bound {
+			return None;
+		}
+		std::hint::spin_loop();
+	}
+}
+
 #[test]
 fn a_forked_child_creates_and_uses_a_handle_of_its_own() {
 	// `destroy` joins the handle's workers: the process is back to the threads it had. A pool of
@@ -115,10 +141,10 @@ fn a_forked_child_creates_and_uses_a_handle_of_its_own() {
 		"a {WIDTH}-wide handle started no thread"
 	);
 	unsafe { libfaer_v0_23_team_destroy(team) };
-	assert_eq!(
-		threads(),
-		before,
-		"destroy left the handle's workers running"
+	assert!(
+		threads_settle(before, std::time::Duration::from_secs(1)).is_some(),
+		"destroy left the handle's workers running: {} threads, {before} before the handle",
+		threads()
 	);
 
 	// a handle that is still alive in the parent when it forks: the child cannot use that one
