@@ -631,9 +631,9 @@ pub struct FullPivLuInfo {
 /// For example, a zero `64 x 64` f64 matrix with `A[(1, 2)] = A[(0, 4)] = 2`
 /// and `max_rank = Some(1)` pivots on `(1, 2)` (two transpositions) when
 /// column-major and on `(0, 4)` (one transposition) when row-major. Both are
-/// valid full-pivoting factorizations of the same matrix; the permutations, the
-/// transposition count and so the factors differ between the two layouts only
-/// on such ties.
+/// valid full-pivoting factorizations of the same matrix, but the
+/// permutations, the transposition count and so the factors differ between the
+/// two layouts.
 pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 	mat: MatMut<'_, T>,
 	row_perm: &'out mut [I],

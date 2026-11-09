@@ -5,21 +5,41 @@
 - `full_pivoting::factor::lu_in_place` used to take the shared row-major copy
   (`linalg::row_major_copy_pays`, at least `64 * 64` elements, tall or square) before
   its own transpose dual (`lu_in_place_unblocked(.., transpose = true)`) was even tried.
-  It now skips the copy for **square matrices below 128** and keeps it everywhere else
-  (`row_major_takes_the_copy`).
+  It now skips the copy for **square matrices below 128 whose rows are contiguous**
+  (`col_stride == 1`, any row stride, so a padded or reversed row-major view counts) and
+  keeps it everywhere else (`row_major_takes_the_copy`, which takes the strides).
+- The stride condition came from the #342 review: the first version tested only the
+  shape, so a generic-stride view such as 96x96 with strides `(2, 192)` also skipped the
+  copy and, in place, fell to the separate matrix update and pivot search instead of
+  the fused SIMD kernel (that kernel needs the unit column stride the dual sees as a
+  unit row stride). Generic strides, and a column stride of `-1`, keep the copy as on
+  `main`. That path was not timed; the allocation test pins the dispatch.
 - The rule is the issue's acceptance criterion applied shape by shape: the dual has to
-  run within 1.05x of a column-major input. Square `64..=127` passes on both machines
-  measured (Apple M5 Max, this change: f64 C/A 1.009 / 1.039 at 64 and 1.007 / 1.005
-  at 128, one / four threads; in an ungated scan, 64-120 square at 0.98-1.04 in f64 and c64; Zen 5, the
-  issue's earlier comment: n = 64 and 96 at 0.94-1.04 over f64/c64/f32 at 1T and 8T).
+  run within 1.05x of a column-major input. **Timed sizes**: on Apple M5 Max, square
+  64, 80, 96, 112, 120 and 127 in f64 and c64 at one and four threads (the paired run
+  below: per-repetition median C/A 0.888-1.017 over those 24 cells); on Zen 5, the
+  issue's earlier comment, n = 64 and 96 at 0.94-1.04 over f64/c64/f32 at 1T and 8T.
+  The sizes in between (65-79, 81-95, ...) and every size other than 64 and 96 on
+  Zen 5 were **not timed**; they are taken on the strength of their neighbours.
   Square `128` is mixed on Zen 5 (f64 1T 1.114) and from 256 up the dual leaves the band
   on at least one machine (M5 four threads 1.087 at 512, 1.089 at 1024; Zen 5
   1.08-1.27), so the boundary sits below 128. On M5 one thread the square dual stays
   at 1.03-1.04 up to 1024, so a single-thread-only rule could go further; not taken.
 - Off the square the band ends early (`80 x 64` f64 1.06x, `128 x 64` 1.11-1.14x on
-  M5, the same ungated scan), so near-square shapes keep the copy.
+  M5, an ungated scan run before measurement 1 at a 1-min load of about 7), so
+  near-square shapes keep the copy.
 - No change to the dual kernel in this slice, and no change to `row_major_copy_pays`
   or to the other families that share it.
+- **Pivot ties depend on the layout.** The pivot search keeps the first strict maximum
+  of the matrix it factors (smallest column, then smallest row). The dual factors the
+  transpose, so a row-major input breaks a tie by the smallest original *row* first.
+  Example (`faer/tests/full_piv_lu_row_major_no_copy.rs`): zero 64x64 f64 with
+  `A[(1, 2)] = A[(0, 4)] = 2`, `max_rank = Some(1)`, `Par::Seq` pivots on `(1, 2)` with
+  two transpositions column-major and on `(0, 4)` with one row-major. #314 allows a
+  different pivot order on ties if it is documented; it is, under "Pivot ties" on
+  `lu_in_place`. On the adaptation test's fixtures, which hit no such tie, the
+  pivots, permutations and transposition counts agree; that is all the test shows. The
+  first version of this change said "the same pivots" without the tie exception.
 
 ## Where the dual loses (stage breakdown, M5 Max, f64, one thread)
 
@@ -44,17 +64,47 @@ Per-stage timers inside `lu_in_place_unblocked` (local patch, not committed):
 ## Verification conclusions and constraints
 
 - Tests: `faer/tests/full_piv_lu_row_major_no_copy.rs` records the largest single
-  allocation of the calling thread during the call; on 64, 96 and 127 square it stays
-  below `m * n * 8`, and on 128x128 and 256x32 (copy kept) it reaches it, so the
-  counter is shown to see the copy. It is an integration test because the lib's test
-  binary already has a `#[global_allocator]` (`sparse::linalg::amd`). With the
-  square exclusion removed from the guard the test fails at `64x64` (an allocation of
-  32768 bytes, the whole matrix). The full-pivoting arm of
-  `test_row_major_adaptation_matches_the_column_major_one` now asks the new guard
-  whether the two orders must agree bit for bit (copy) or up to rounding (dual), and
-  covers 127x127.
-- Measurement: tensor4all/faer#314 comment (fbench `01a1cb8`, fork row only, fork
-  `b16d6b8` plus a local switch that bypasses the copy, f64, `--reps 5`, three
+  allocation of the calling thread during the call; on 64, 96 and 127 square, and on
+  a padded 96x96 row-major view (strides `(100, 1)`), it stays below `m * n * 8`; on
+  128x128 and 256x32 (copy kept) and on 96x96 views with strides `(2, 192)` and
+  `(192, 2)` it reaches it, so the counter is shown to see the copy. It is an
+  integration test because the lib's test binary already has a `#[global_allocator]`
+  (`sparse::linalg::amd`). Red checks: with the square exclusion removed the test
+  fails at `64x64` (an allocation of 32768 bytes, the whole matrix); with only the
+  `col_stride == 1` condition removed it fails at `96x96, strides (2, 192)` (largest
+  allocation 96 bytes). A second test pins the tie example above. The full-pivoting
+  arm of `test_row_major_adaptation_matches_the_column_major_one` now asks the new
+  guard whether the two orders must agree bit for bit (copy) or up to rounding (dual),
+  and covers 127x127.
+- Whole crate suite (`cargo test -p t4a-faer --no-fail-fast`, this host): 957 passed,
+  1 failed, `lq_allocates_nothing_60x300` (allocation counts `[13, 12, 17, 17]`), which
+  fails the same way on `b16d6b8` and is one of the host failures listed in
+  `2026-11-04-gevd-repeated-complex-pairs.md`.
+- **Measurement 2 (the one that covers the merged code)**: the source of `32c615f`
+  (clean committed tree; `faer/src` tree `38ce727`, unchanged by the later doc-only
+  commits) against `main` `b16d6b8`, both built into fbench `01a1cb8` with the same
+  one-line local `set_threads` patch (returns Ok for `NAME == "none"`), family
+  `full_piv_lu`, row `faer-fork`, the `in_place` line, `--reps 5 --prime-ms 250
+  --statistic median`. Cells: square 64, 80, 96, 112, 120, 127 (changed) and 128, 256
+  (unchanged code, the control), f64 and c64, 1T and 4T, three repetitions; per cell
+  and repetition the two binaries run back to back (head first on odd repetitions,
+  base first on even). Each process reports its own column-major A and row-major C (or
+  B), so the ratio is taken within a process and the median over the three
+  repetitions is reported. Gate as below (no `rustc`, busy `cargo`, or other
+  `target/` binary before and after); 11 cells were discarded and rerun, 96 kept, 1-min
+  load before a kept cell 7.0-26.4, 18:41-19:01 JST. `fbench verify` passed all 64
+  cells per thread count (1T, 4T) on the head binary. The full table is in the #342
+  description. Result: C/A 0.888-1.017 on all 24 changed cells, base B/A 0.978-1.343
+  (median per cell); the unchanged 128/256 controls read C/A 0.976-1.181 at head and
+  B/A 1.005-1.150 at base. Single repetitions swing far more (one control cell 0.650,
+  another 1.616; the two binaries' A arms of one repetition differ by up to 1.8x), so
+  per-repetition medians are the only statistic here, and they are a scan, not a
+  campaign `candidate_compare.py` result (that was not run).
+- Measurement 1 (the large-shape and boundary evidence above, 64-1024 square and the
+  tall shapes): tensor4all/faer#314 comment (fbench `01a1cb8`, fork row only, fork
+  `b16d6b8` plus a local, never committed `FAER_FLU_COPY=off` environment switch that
+  skipped the copy branch, i.e. the dual on every shape; that switch is in no published
+  revision, so arm C of that run cannot be rebuilt from a checkout. f64, `--reps 5`, three
   repetitions per cell, the arms run back to back within each repetition and the cells
   cycled per repetition rather than grouped by arm).
 - Gate: a 1-minute load below 4 is not reachable on this host (its idle baseline is
@@ -65,5 +115,6 @@ Per-stage timers inside `lu_in_place_unblocked` (local patch, not committed):
   two other agents' builds just before; the per-cell values are in the issue comment.
 - macOS cannot pin threads, so the 4T cells mix core types: the two column-major
   controls of a 4T cell differ by up to 15% (1024x64), against at most 1% at 1T. The 4T
-  ratios on large shapes are the least reliable numbers here.
+  ratios on large shapes are the least reliable numbers here. Measurement 2 shows the
+  same at small sizes.
 - Upstream faer was not measured.
