@@ -927,6 +927,35 @@ mod tests {
 		(a, q)
 	}
 
+	/// The 200x200 column pivoting QR of the families test: the factor `a` and the Householder
+	/// coefficients `h`, which hold an infinity sentinel.
+	fn col_piv_qr(par: Par<'_>) -> Vec<Mat<f64>> {
+		use crate::dyn_stack::{MemBuffer, MemStack};
+		use crate::linalg;
+		let n = 200;
+		let mut a = rand_mat(n, n, 13);
+		let bs = linalg::qr::no_pivoting::factor::recommended_block_size::<f64>(n, n);
+		let mut h = Mat::<f64>::zeros(bs, n);
+		let (mut q, mut qi) = (vec![0usize; n], vec![0usize; n]);
+		let req = linalg::qr::col_pivoting::factor::qr_in_place_scratch::<usize, f64>(n, n, bs, par.shape(), Default::default());
+		linalg::qr::col_pivoting::factor::qr_in_place(a.as_mut(), h.as_mut(), &mut q, &mut qi, par, MemStack::new(&mut MemBuffer::new(req)), Default::default());
+		vec![a, h]
+	}
+
+	/// The comparison the families test applies, on its own column pivoting QR: `h` holds an
+	/// infinity, and a copy whose (0, 0) is off by `1e6` must still be rejected.
+	#[test]
+	#[should_panic(expected = "against")]
+	fn tolerance_rejects_a_corrupted_col_pivoting_factor() {
+		let h = col_piv_qr(Par::Seq).pop().unwrap();
+		let infinite = (0..h.ncols()).flat_map(|j| (0..h.nrows()).map(move |i| (i, j))).any(|(i, j)| h[(i, j)].is_infinite());
+		assert!(infinite, "the fixture lost its sentinel");
+		assert!(h[(0, 0)].is_finite());
+		let mut off = h.clone();
+		off[(0, 0)] += 1e6;
+		assert_within_tolerance(h.as_ref(), off.as_ref(), "column pivoting h with (0, 0) off by 1e6");
+	}
+
 	/// An infinity in the reference must not widen the tolerance: the QR fixture's `q` against a
 	/// copy whose (0, 0) is off by `1e6` is rejected although (3, 31) is `+inf` on both sides.
 	#[test]
@@ -1138,16 +1167,7 @@ mod tests {
 				linalg::lu::partial_pivoting::factor::lu_in_place(a.as_mut(), &mut p, &mut pi, par, MemStack::new(&mut MemBuffer::new(req)), Default::default());
 				vec![a]
 			}),
-			("column pivoting qr", |par| {
-				let n = 200;
-				let mut a = rand_mat(n, n, 13);
-				let bs = linalg::qr::no_pivoting::factor::recommended_block_size::<f64>(n, n);
-				let mut h = Mat::<f64>::zeros(bs, n);
-				let (mut q, mut qi) = (vec![0usize; n], vec![0usize; n]);
-				let req = linalg::qr::col_pivoting::factor::qr_in_place_scratch::<usize, f64>(n, n, bs, par.shape(), Default::default());
-				linalg::qr::col_pivoting::factor::qr_in_place(a.as_mut(), h.as_mut(), &mut q, &mut qi, par, MemStack::new(&mut MemBuffer::new(req)), Default::default());
-				vec![a, h]
-			}),
+			("column pivoting qr", col_piv_qr),
 			("hessenberg", |par| {
 				let n = 160;
 				let mut a = rand_mat(n, n, 14);
