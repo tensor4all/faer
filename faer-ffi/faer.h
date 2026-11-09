@@ -6337,16 +6337,20 @@ struct FaerV0_24_Layout libfaer_v0_23_svd_scratch_fx128(size_t nrows,
  *   as long as they write different elements. They do not run at once: the pool is a single object
  *   that one call holds for its duration, so the second waits for the first to hand it back. A
  *   caller that wants its own threads to be parallel wants a handle per thread.
+ * * **A callback must not nest a parallel call.** An operation called from inside another operation
+ *   on the same thread (the `SchurParams` callbacks, for one) runs sequentially: it gets no team,
+ *   where waiting for the pool its caller holds would never end. It is correct, just not parallel.
  * * **[`libfaer_v0_23_team_set_threads`] and [`libfaer_v0_23_team_destroy`] are exclusive**: no
  *   operation may be running on the handle, on any thread, while they are called.
  * * **After `destroy` the handle is gone.** Any later operation, `set_threads` or second `destroy`
  *   on that pointer is a use after free: the C caller owns the pointer and nothing can detect it,
  *   so invalidate your copy where you free it. `destroy(NULL)` is accepted and ignored.
- * * **`fork` without `exec`.** The workers of the pool are threads, and a forked child inherits no
- *   threads, so a handle created before the `fork` cannot run in the child: create the handle in
- *   the process that uses it, after the `fork`. Whether `create` should learn the creator's pid and
- *   report a handle it inherited instead of blocking on workers that are gone is **undecided**, and
- *   nothing checks it today.
+ * * **`fork` without `exec` is not supported.** A forked child inherits threadteam's process-wide
+ *   cache of its workers (and its mutex) without the threads, so any handle there — the inherited
+ *   one and a fresh one alike — can block on a lock the parent held or reuse workers it does not
+ *   have. Create handles in the process that uses them, and `exec` before using a team in a child
+ *   whose parent already ran one. Whether `create` should record the creator's pid and refuse to
+ *   work in a process it did not create the handle in is **undecided**, and nothing checks it today.
  *
  * The handle's contents are not the caller's to write: it is opaque and must be created and
  * released by these three functions only.
@@ -6374,8 +6378,8 @@ struct FaerV0_24_Team *libfaer_v0_23_team_create(size_t threads);
  * ignored.
  *
  * The handle is destroyed exactly once, and only while no operation that was handed it is still
- * running: the pool's threads stop with it, and an operation still in the team would wait for
- * members that never come back.
+ * running. Dropping the pool returns its workers to threadteam's process-wide cache rather than
+ * ending the threads, which is threadteam's own behaviour for a pool with default thread settings.
  */
 void libfaer_v0_23_team_destroy(struct FaerV0_24_Team *team);
 
@@ -6385,9 +6389,7 @@ void libfaer_v0_23_team_destroy(struct FaerV0_24_Team *team);
  * again builds a new one. Needs exclusive access to the handle: no operation that was handed it may
  * be running, and no other call may be setting it.
  *
- * Resizing is a reconfiguration, not a per-call cost: the pool is rebuilt here. Its workers go back
- * to threadteam's process-wide cache, so a later widening to the old width takes them instead of
- * spawning new ones.
+ * Resizing is a reconfiguration, not a per-call cost: the pool is rebuilt here.
  *
  * The width is read once, when an operation takes the pool, so a workspace query
  * (`*_scratch`) made before the change no longer describes an operation of the new width: some

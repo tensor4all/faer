@@ -268,6 +268,30 @@ impl Accum {
 		}
 	}
 }
+/// Set while this thread is inside a call that holds a team, so a callback that calls back into this
+/// API on any handle runs its own operation sequentially instead of waiting for a pool the same thread
+/// holds. `faer-ffi` passes C callbacks into faer (`SchurParams::recommended_shift_count` and
+/// friends), and those call back into the same entry points.
+struct InCall;
+thread_local! {
+	static IN_CALL: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+impl InCall {
+	/// `None` when this thread already holds a team: the caller then runs sequentially.
+	fn enter() -> Option<InCall> {
+		// `if`, not `then_some`: `then_some` builds its value eagerly, so the untaken branch would drop
+		// an `InCall` at once and clear the flag its caller set
+		if IN_CALL.with(|inside| inside.replace(true)) {
+			return None;
+		}
+		Some(InCall)
+	}
+}
+impl Drop for InCall {
+	fn drop(&mut self) {
+		IN_CALL.with(|inside| inside.set(false));
+	}
+}
 impl Team {
 	/// the shape of the team, for the workspace queries (`*_scratch`) that never execute work
 	fn shape(team: *const Team) -> faer::ParShape {
@@ -305,6 +329,11 @@ impl Team {
 	/// out of the team between calls. The mutex is what makes the pool that travels safe: a second call
 	/// on the same handle waits for the first one to hand the pool back.
 	fn with_par<R>(&self, f: impl FnOnce(faer::Par<'_>) -> R) -> R {
+		// a call made from inside another call (a C callback calling back into this API) cannot have the
+		// pool: it runs sequentially, where waiting for the mutex this thread holds would never end
+		let Some(_in_call) = InCall::enter() else {
+			return f(faer::Par::Seq);
+		};
 		let mut held = self.pool.lock().unwrap_or_else(|e| e.into_inner());
 		let Some(pool) = held.take() else {
 			return f(faer::Par::Seq);
@@ -2730,16 +2759,20 @@ pub unsafe extern "C" fn libfaer_v0_23_alloc(
 ///   as long as they write different elements. They do not run at once: the pool is a single object
 ///   that one call holds for its duration, so the second waits for the first to hand it back. A
 ///   caller that wants its own threads to be parallel wants a handle per thread.
+/// * **A callback must not nest a parallel call.** An operation called from inside another operation
+///   on the same thread (the `SchurParams` callbacks, for one) runs sequentially: it gets no team,
+///   where waiting for the pool its caller holds would never end. It is correct, just not parallel.
 /// * **[`libfaer_v0_23_team_set_threads`] and [`libfaer_v0_23_team_destroy`] are exclusive**: no
 ///   operation may be running on the handle, on any thread, while they are called.
 /// * **After `destroy` the handle is gone.** Any later operation, `set_threads` or second `destroy`
 ///   on that pointer is a use after free: the C caller owns the pointer and nothing can detect it,
 ///   so invalidate your copy where you free it. `destroy(NULL)` is accepted and ignored.
-/// * **`fork` without `exec`.** The workers of the pool are threads, and a forked child inherits no
-///   threads, so a handle created before the `fork` cannot run in the child: create the handle in
-///   the process that uses it, after the `fork`. Whether `create` should learn the creator's pid and
-///   report a handle it inherited instead of blocking on workers that are gone is **undecided**, and
-///   nothing checks it today.
+/// * **`fork` without `exec` is not supported.** A forked child inherits threadteam's process-wide
+///   cache of its workers (and its mutex) without the threads, so any handle there — the inherited
+///   one and a fresh one alike — can block on a lock the parent held or reuse workers it does not
+///   have. Create handles in the process that uses them, and `exec` before using a team in a child
+///   whose parent already ran one. Whether `create` should record the creator's pid and refuse to
+///   work in a process it did not create the handle in is **undecided**, and nothing checks it today.
 ///
 /// The handle's contents are not the caller's to write: it is opaque and must be created and
 /// released by these three functions only.
@@ -2771,8 +2804,8 @@ pub unsafe extern "C" fn libfaer_v0_23_team_create(threads: usize) -> *mut Team 
 /// ignored.
 ///
 /// The handle is destroyed exactly once, and only while no operation that was handed it is still
-/// running: the pool's threads stop with it, and an operation still in the team would wait for
-/// members that never come back.
+/// running. Dropping the pool returns its workers to threadteam's process-wide cache rather than
+/// ending the threads, which is threadteam's own behaviour for a pool with default thread settings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn libfaer_v0_23_team_destroy(team: *mut Team) {
 	if !team.is_null() {
@@ -2784,9 +2817,7 @@ pub unsafe extern "C" fn libfaer_v0_23_team_destroy(team: *mut Team) {
 /// again builds a new one. Needs exclusive access to the handle: no operation that was handed it may
 /// be running, and no other call may be setting it.
 ///
-/// Resizing is a reconfiguration, not a per-call cost: the pool is rebuilt here. Its workers go back
-/// to threadteam's process-wide cache, so a later widening to the old width takes them instead of
-/// spawning new ones.
+/// Resizing is a reconfiguration, not a per-call cost: the pool is rebuilt here.
 ///
 /// The width is read once, when an operation takes the pool, so a workspace query
 /// (`*_scratch`) made before the change no longer describes an operation of the new width: some
@@ -2851,12 +2882,6 @@ mod alloc_probe {
 		unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
 			unsafe { System.dealloc(ptr, layout) }
 		}
-	}
-	/// The allocations `f` makes on the calling thread.
-	pub fn allocations<R>(f: impl FnOnce() -> R) -> (R, usize) {
-		reset();
-		let r = f();
-		(r, take())
 	}
 	/// Starts counting the allocations of the calling thread at zero.
 	pub fn reset() {
@@ -3135,70 +3160,104 @@ mod tests {
 		assert::<Team>();
 	}
 
-	/// Two threads may call operations on one handle at once, as long as they write different elements:
-	/// they take turns on the pool the handle owns (a call holds it for its duration), and both results
-	/// are the sequential one. A handle per thread is what a caller wants for its own threads to be
-	/// parallel; sharing one is the safe shape, not the fast one.
+	/// Two threads may call operations on one handle at once: they take turns on the pool the handle
+	/// owns, so no two calls are ever inside the team together. The counter is the claim the docs make,
+	/// and it is checked where the team is entered rather than inferred from the products (which a
+	/// per-call pool would also produce). A handle per thread is what a caller wants for its own threads
+	/// to be parallel; sharing one is the safe shape, not the fast one.
 	#[test]
-	fn two_threads_share_one_handle() {
+	fn two_threads_share_one_handle_and_take_turns() {
 		let _turn = TEAM_TURN.lock().unwrap_or_else(|e| e.into_inner());
 		let width = cpus().clamp(2, 4);
-		let n = 192;
-		let a = faer::Mat::<f64>::from_fn(n, n, |i, j| ((i * 31 + j * 7) % 13) as f64 - 6.0);
-		let b = faer::Mat::<f64>::from_fn(n, n, |i, j| ((i * 5 + j * 11) % 17) as f64 - 8.0);
-		let expected = want(n, &a, &b);
 		let team = unsafe { libfaer_v0_23_team_create(width) };
 		let addr = team as usize;
+		let inside = std::sync::atomic::AtomicUsize::new(0);
+		let most = std::sync::atomic::AtomicUsize::new(0);
 		std::thread::scope(|s| {
-			for _ in 0..2 {
-				s.spawn(|| {
+			for _ in 0..3 {
+				let (inside, most) = (&inside, &most);
+				s.spawn(move || {
 					let team = addr as *const Team;
-					let mut c = faer::Mat::<f64>::zeros(n, n);
-					for _ in 0..3 {
-						matmul(&mut c, &a, &b, team);
+					for _ in 0..4 {
+						with_team_par(team, |par| {
+							use std::sync::atomic::Ordering::AcqRel;
+							most.fetch_max(inside.fetch_add(1, AcqRel) + 1, AcqRel);
+							assert_eq!(par.degree(), width, "a call got another width");
+							std::thread::sleep(core::time::Duration::from_millis(2));
+							inside.fetch_sub(1, AcqRel);
+						});
 					}
-					assert!(close(&expected, &c), "a shared handle gave another product");
 				});
 			}
 		});
 		unsafe { libfaer_v0_23_team_destroy(team) };
+		assert_eq!(
+			most.load(std::sync::atomic::Ordering::Acquire),
+			1,
+			"two calls on one handle were inside the team at once"
+		);
 	}
 
-	/// faer#333: the handle owns its pool, so a handle reused for N calls builds one pool, not N.
-	/// The measured quantity is the allocations the calling thread makes: the first batch runs while
-	/// the handle builds its pool, so it is quoted for scale, and the second batch runs on the same
-	/// live handle and is what a reused handle costs per call. Before the pool moved into the handle
-	/// every call built a pool of its own (the reference measurement of the issue: 10 calls -> 140
-	/// allocations, and threadteam reuses its cached threads, so a rebuild is cheaper than the first).
+	/// An operation called from inside another operation on the same thread gets no team: faer calls
+	/// back into C (`SchurParams::recommended_shift_count` and its siblings), and such a callback waits
+	/// for the pool its caller holds if it is handed one, which never ends. It runs sequentially
+	/// instead, so the result is the same and the call returns. A regression here hangs rather than
+	/// fails, which is what a deadlock looks like from a test runner.
+	#[test]
+	fn a_nested_call_runs_sequentially() {
+		let _turn = TEAM_TURN.lock().unwrap_or_else(|e| e.into_inner());
+		let width = cpus().clamp(2, 4);
+		let n = 96;
+		let a = faer::Mat::<f64>::from_fn(n, n, |i, j| ((i * 31 + j * 7) % 13) as f64 - 6.0);
+		let b = faer::Mat::<f64>::from_fn(n, n, |i, j| ((i * 5 + j * 11) % 17) as f64 - 8.0);
+		let expected = want(n, &a, &b);
+		let team = unsafe { libfaer_v0_23_team_create(width) };
+		let mut inner_c = faer::Mat::<f64>::zeros(n, n);
+		let mut outer_c = faer::Mat::<f64>::zeros(n, n);
+		with_team_par(team, |_| {
+			// the callback: the same handle, from the thread its caller is already using
+			matmul(&mut inner_c, &a, &b, team);
+			assert_eq!(
+				with_team_par(team, |par| par.degree()),
+				1,
+				"a nested call was handed a team its caller holds"
+			);
+		});
+		matmul(&mut outer_c, &a, &b, team);
+		unsafe { libfaer_v0_23_team_destroy(team) };
+		assert!(close(&expected, &inner_c), "the nested call gave another product");
+		assert!(close(&expected, &outer_c), "the handle was unusable after a nested call");
+	}
+
+	/// faer#333: the handle owns its pool, so a call on a reused handle cannot pay for a pool. The
+	/// measured quantity is the allocations the calling thread makes for one call; a pool is what the
+	/// abandoned per-call shape built, and its cheapest possible cost is a dozen allocations, so the
+	/// cheapest of several consecutive calls is what separates the two shapes: reuse leaves a call that
+	/// allocates only threadteam's reservation, and a handle that rebuilt its pool per call has no such
+	/// call. The cheapest rather than the mean, because a member of the pool may park between two calls
+	/// and make the next reservation take the cold path (6 allocations here), which is still not a pool.
 	#[test]
 	fn a_reused_handle_builds_its_pool_once() {
 		let _turn = TEAM_TURN.lock().unwrap_or_else(|e| e.into_inner());
 		let width = cpus().clamp(2, 4);
 		let n = 64;
-		let calls = 5;
+		let calls = 8;
 		let a = faer::Mat::<f64>::from_fn(n, n, |i, j| ((i * 31 + j * 7) % 13) as f64 - 6.0);
 		let b = faer::Mat::<f64>::from_fn(n, n, |i, j| ((i * 5 + j * 11) % 17) as f64 - 8.0);
 		let mut c = faer::Mat::<f64>::zeros(n, n);
 		let team = unsafe { libfaer_v0_23_team_create(width) };
-		alloc_probe::reset();
+		let mut per_call = Vec::with_capacity(calls);
 		for _ in 0..calls {
+			alloc_probe::reset();
 			matmul(&mut c, &a, &b, team);
+			per_call.push(alloc_probe::take());
 		}
-		let first = alloc_probe::take();
-		alloc_probe::reset();
-		for _ in 0..calls {
-			matmul(&mut c, &a, &b, team);
-		}
-		let reused = alloc_probe::take();
 		unsafe { libfaer_v0_23_team_destroy(team) };
-		println!("width {width}: {calls} calls on a fresh handle {first} allocations, {calls} more on the same handle {reused}");
+		let cheapest = *per_call.iter().min().unwrap_or(&usize::MAX);
+		println!("width {width}: allocations per call on one handle {per_call:?}");
 		assert!(
-			first > 0,
-			"the first batch must pay for the handle's pool, not nothing: {first}"
-		);
-		assert!(
-			reused <= 2 * calls,
-			"{calls} more calls on a live handle cost {reused} allocations: the handle builds a pool per call"
+			cheapest <= 3,
+			"the cheapest of {calls} calls on a reused handle still cost {cheapest} allocations ({per_call:?}): the handle builds its pool per call"
 		);
 	}
 
