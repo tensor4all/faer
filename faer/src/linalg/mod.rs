@@ -120,10 +120,11 @@ pub(crate) fn tiled_copies() -> usize {
 ///
 /// One point of this boundary is measured: the f64 `512 x 512` pair, the first
 /// cell of `tensor4all/faer#323`'s table where the tiles win. The rest follows
-/// from that byte count and `size_of::<T>()` -- an f32 `725 x 725` pair is the
-/// same number of bytes -- and is arithmetic, not a measurement. The count is
-/// both buffers whole, so where `n > m` it is an upper bound on what the copy
-/// touches: the copy stops at `min(m, n)` columns.
+/// from that byte count and `size_of::<T>()`: `725 x 725` is the first square
+/// f32 shape at or above it, at 4205000 bytes against 4194304, and that step is
+/// arithmetic, not a measurement. The count is both buffers whole, so where
+/// `n > m` it is an upper bound on what the copy touches: the copy stops at
+/// `min(m, n)` columns.
 #[inline]
 fn tile_copy_pays<T>(nrows: usize, ncols: usize) -> bool {
 	nrows
