@@ -162,60 +162,72 @@ fn small_square_row_major_full_piv_lu_does_not_copy_the_matrix() {
 	faer::team::with_team(4, |par| run(par));
 }
 
-/// The pivot search keeps the first strict maximum of the matrix it factors:
-/// the smallest column, then the smallest row. The transpose dual factors the
-/// transpose, so a row-major input breaks the same tie by the smallest row
-/// first (`lu_in_place`, "Pivot ties").
+/// The first pivot `lu_in_place` picks on a zero matrix with two entries of
+/// magnitude 2, row-major or column-major, at `max_rank = Some(1)`: `(row,
+/// column, transposition count)`.
+fn first_pivot(
+	m: usize,
+	n: usize,
+	ties: [(usize, usize); 2],
+	row_major: bool,
+) -> (usize, usize, usize) {
+	let mut a = vec![0.0f64; m * n];
+	for (i, j) in ties {
+		a[if row_major { i * n + j } else { i + j * m }] = 2.0;
+	}
+	let view = if row_major {
+		MatMut::from_row_major_slice_mut(&mut a, m, n)
+	} else {
+		MatMut::from_column_major_slice_mut(&mut a, m, n)
+	};
+	let (mut p, mut pi, mut q, mut qi) = (
+		vec![0usize; m],
+		vec![0usize; m],
+		vec![0usize; n],
+		vec![0usize; n],
+	);
+	let mut mem = MemBuffer::new(flu::lu_in_place_scratch::<usize, f64>(
+		m,
+		n,
+		Par::Seq.shape(),
+		Default::default(),
+	));
+	let params = flu::FullPivLuParams {
+		max_rank: Some(1),
+		..<flu::FullPivLuParams as Auto<f64>>::auto()
+	};
+	let (info, _, _) = flu::lu_in_place(
+		view,
+		&mut p,
+		&mut pi,
+		&mut q,
+		&mut qi,
+		Par::Seq,
+		MemStack::new(&mut mem),
+		params.into(),
+	);
+	(p[0], q[0], info.transposition_count)
+}
+
+/// `lu_in_place`, "Pivot ties": the matrix that is searched is the input when
+/// `|row_stride| < |col_stride|` (or its column-major copy) and its transpose
+/// otherwise; a tie goes to the smallest column, then the smallest row, of the
+/// matrix searched.
 #[test]
 fn full_piv_lu_tie_order_depends_on_the_layout() {
-	let n = 64;
-	let at = |i: usize, j: usize| {
-		if (i, j) == (1, 2) || (i, j) == (0, 4) {
-			2.0
-		} else {
-			0.0
-		}
-	};
-	let first_pivot = |row_major: bool| {
-		let mut a = vec![0.0f64; n * n];
-		for i in 0..n {
-			for j in 0..n {
-				a[if row_major { i * n + j } else { i + j * n }] = at(i, j);
-			}
-		}
-		let view = if row_major {
-			MatMut::from_row_major_slice_mut(&mut a, n, n)
-		} else {
-			MatMut::from_column_major_slice_mut(&mut a, n, n)
-		};
-		let (mut p, mut pi, mut q, mut qi) = (
-			vec![0usize; n],
-			vec![0usize; n],
-			vec![0usize; n],
-			vec![0usize; n],
-		);
-		let mut mem = MemBuffer::new(flu::lu_in_place_scratch::<usize, f64>(
-			n,
-			n,
-			Par::Seq.shape(),
-			Default::default(),
-		));
-		let params = flu::FullPivLuParams {
-			max_rank: Some(1),
-			..<flu::FullPivLuParams as Auto<f64>>::auto()
-		};
-		let (info, _, _) = flu::lu_in_place(
-			view,
-			&mut p,
-			&mut pi,
-			&mut q,
-			&mut qi,
-			Par::Seq,
-			MemStack::new(&mut mem),
-			params.into(),
-		);
-		(p[0], q[0], info.transposition_count)
-	};
-	assert_eq!(first_pivot(false), (1, 2, 2));
-	assert_eq!(first_pivot(true), (0, 4, 1));
+	// two columns: the searched column wins
+	let ties = [(1, 2), (0, 4)];
+	assert_eq!(first_pivot(64, 64, ties, false), (1, 2, 2));
+	assert_eq!(first_pivot(64, 64, ties, true), (0, 4, 1));
+	// a wide row-major matrix is never copied, so it is searched transposed
+	// too (tensor4all/faer#342 review)
+	assert_eq!(first_pivot(8, 16, ties, false), (1, 2, 2));
+	assert_eq!(first_pivot(8, 16, ties, true), (0, 4, 1));
+	// a tall row-major matrix that takes the copy is searched column-major
+	assert_eq!(first_pivot(256, 32, ties, true), (1, 2, 2));
+
+	// one searched column, two rows: the smaller row wins, across the SIMD
+	// accumulators (tensor4all/faer#342 review: (2, 8) was returned)
+	assert_eq!(first_pivot(64, 64, [(2, 6), (2, 8)], true), (2, 6, 2));
+	assert_eq!(first_pivot(64, 64, [(6, 2), (8, 2)], false), (6, 2, 2));
 }

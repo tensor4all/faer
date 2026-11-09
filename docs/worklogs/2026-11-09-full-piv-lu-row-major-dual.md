@@ -30,16 +30,36 @@
   near-square shapes keep the copy.
 - No change to the dual kernel in this slice, and no change to `row_major_copy_pays`
   or to the other families that share it.
-- **Pivot ties depend on the layout.** The pivot search keeps the first strict maximum
-  of the matrix it factors (smallest column, then smallest row). The dual factors the
-  transpose, so a row-major input breaks a tie by the smallest original *row* first.
-  Example (`faer/tests/full_piv_lu_row_major_no_copy.rs`): zero 64x64 f64 with
+- **Pivot ties depend on the layout.** The search runs on the input as it is when
+  `|row_stride| < |col_stride|` (or on its column-major copy when the copy is taken),
+  and on its transpose otherwise, and keeps the smallest column, then the smallest row,
+  of that matrix. So a row-major input that is not copied breaks a tie by row first. The
+  square exclusion is not the only such case: wide row-major matrices and those below
+  `64 * 64` elements are never copied and were searched transposed before this change
+  too (#342 review: 8x16 row-major picks `(0, 4)`, column-major `(1, 2)`). Example
+  (`faer/tests/full_piv_lu_row_major_no_copy.rs`): zero 64x64 f64 with
   `A[(1, 2)] = A[(0, 4)] = 2`, `max_rank = Some(1)`, `Par::Seq` pivots on `(1, 2)` with
   two transpositions column-major and on `(0, 4)` with one row-major. #314 allows a
   different pivot order on ties if it is documented; it is, under "Pivot ties" on
-  `lu_in_place`. On the adaptation test's fixtures, which hit no such tie, the
-  pivots, permutations and transposition counts agree; that is all the test shows. The
-  first version of this change said "the same pivots" without the tie exception.
+  `lu_in_place`, which now describes that dispatch rather than the copy exclusion alone.
+  On the adaptation test's fixtures, which hit no such tie, the pivots, permutations and
+  transposition counts agree; that is all the test shows.
+- **The SIMD search did not keep the smaller row on a tie within one column**
+  (inherited from upstream, found by the second #342 review). Each column is searched
+  with four interleaved accumulators (three in the fused update), and they were merged
+  with a strict `>`, so an equal maximum in the accumulator merged first won even with
+  the larger row: zero 64x64 row-major with `A[(2, 6)] = A[(2, 8)] = 2` pivoted on
+  `(2, 8)` on Apple M5 (two f64 lanes), and column-major `A[(6, 2)] = A[(8, 2)]` on
+  `(8, 2)`. `best_score` now takes the other accumulator on a strictly larger score or
+  on an equal one with a smaller row. Red/green: `pivot_search_keeps_the_smaller_row_across_accumulators`
+  (every row pair of a 64-row column, both searches, three alignments) failed at rows
+  `(0, 2)` with row 2 returned, and the integration test returned `(2, 8, 2)`, before the
+  fix; both pass after it. This changes which pivot is taken on such ties for every
+  layout, including column-major; it is the order the scalar search and the existing
+  doc comment in `reduce_2d` already described. Not timed: the merge runs once per
+  column per step, against an O(m) column walk. The parallel step's merge across
+  column blocks keeps the earlier block with a strict `>`, which is the smaller column;
+  no tie test runs on a team.
 
 ## Where the dual loses (stage breakdown, M5 Max, f64, one thread)
 
@@ -76,10 +96,16 @@ Per-stage timers inside `lu_in_place_unblocked` (local patch, not committed):
   arm of `test_row_major_adaptation_matches_the_column_major_one` now asks the new
   guard whether the two orders must agree bit for bit (copy) or up to rounding (dual),
   and covers 127x127.
-- Whole crate suite (`cargo test -p t4a-faer --no-fail-fast`, this host): 957 passed,
-  1 failed, `lq_allocates_nothing_60x300` (allocation counts `[13, 12, 17, 17]`), which
-  fails the same way on `b16d6b8` and is one of the host failures listed in
+- Whole crate suite (`cargo test -p t4a-faer --no-fail-fast`, this host): the one
+  failure at this change's heads is `lq_allocates_nothing_60x300` (allocation counts
+  `[13, 12, 17, 17]`); the same command on `b16d6b8` (run once, 2026-11-09, separate
+  target directory) failed on that test alone, with 955 passing. The counts are in the
+  #342 description. It is one of the host failures listed in
   `2026-11-04-gevd-repeated-complex-pairs.md`.
+- Padded and reversed row-major views (`(100, 1)`, `(-100, 1)`) go through the dual by
+  the guard; the allocation test shows that for `(100, 1)` and the adaptation test
+  covers reversed rows for correctness. Their speed was **not measured**; the timed
+  cells are contiguous row-major only.
 - **Measurement 2 (the one that covers the merged code)**: the source of `32c615f`
   (clean committed tree; `faer/src` tree `38ce727`, unchanged by the later doc-only
   commits) against `main` `b16d6b8`, both built into fbench `01a1cb8` with the same

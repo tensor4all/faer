@@ -30,7 +30,16 @@ fn best_score<T: ComplexField, S: Simd>(
 	score: RealReg<T::SimdVec<S>>,
 	indices: T::SimdIndex<S>,
 ) -> (RealReg<T::SimdVec<S>>, T::SimdIndex<S>) {
-	let is_better = (**simd).gt(score, best_score);
+	// merges two accumulators of one column, which hold interleaved rows: on equal
+	// scores the smaller row wins, whichever accumulator holds it, so a tie goes to
+	// the smallest row as in the scalar search (tensor4all/faer#342)
+	let is_better = (**simd).or_mask(
+		(**simd).gt(score, best_score),
+		(**simd).and_mask(
+			(**simd).ge(score, best_score),
+			T::simd_index_less_than(&simd.0, indices, best_indices),
+		),
+	);
 	(
 		RealReg(simd.select(is_better, score.0, best_score.0)),
 		simd.iselect(is_better, indices, best_indices),
@@ -618,22 +627,32 @@ pub struct FullPivLuInfo {
 }
 /// # Pivot ties
 ///
-/// When several entries share the largest magnitude, the pivot depends on the
-/// layout. The search scans the matrix it factors column by column and keeps
-/// the first strict maximum: the smallest column, then the smallest row. A
-/// row-major square matrix below `128` with contiguous rows is factored through
-/// its transpose (the condition is `row_major_takes_the_copy` in this module's
-/// source), so there the tie goes to the smallest *row*, then the smallest
-/// column, of the original matrix. Every other input -- column-major, generic
-/// strides, or a row-major matrix that is copied to column-major first -- uses
-/// the column-then-row order.
+/// When several entries of the remaining block share the largest magnitude,
+/// the pivot depends on the layout, because the search runs on one of two
+/// matrices:
+///
+/// 1. If `row_major_takes_the_copy` holds (in this module's source: `|row
+///    stride| != 1`, tall or square, at least `64 * 64` elements, not a square
+///    matrix below `128` with `col_stride == 1`), the input is copied to
+///    column-major and the copy is searched as it is.
+/// 2. Otherwise the input itself is searched as it is when `|row_stride| <
+///    |col_stride|`, and its transpose is searched when `|row_stride| >=
+///    |col_stride|`.
+///
+/// Among the tied entries of the matrix that is searched, the pivot is the one
+/// in the smallest column, then the smallest row, of the remaining block at
+/// that step (positions after the earlier swaps). So a column-major input, or a
+/// row-major one that is copied, breaks a tie by column first, and a row-major
+/// input that is not copied (a square one below `128`, a wide one, one below
+/// `64 * 64` elements) breaks it by row first, on the SIMD search as on the
+/// scalar one.
 ///
 /// For example, a zero `64 x 64` f64 matrix with `A[(1, 2)] = A[(0, 4)] = 2`
 /// and `max_rank = Some(1)` pivots on `(1, 2)` (two transpositions) when
-/// column-major and on `(0, 4)` (one transposition) when row-major. Both are
-/// valid full-pivoting factorizations of the same matrix, but the
-/// permutations, the transposition count and so the factors differ between the
-/// two layouts.
+/// column-major and on `(0, 4)` (one transposition) when row-major; so does an
+/// `8 x 16` matrix with the same two entries. Both are valid full-pivoting
+/// factorizations of the same matrix, but the permutations, the transposition
+/// count and so the factors differ between the two layouts.
 pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 	mat: MatMut<'_, T>,
 	row_perm: &'out mut [I],
@@ -883,6 +902,45 @@ mod tests {
 				best_in_matrix_fallback(a.as_ref()),
 				"{m}x{n}"
 			);
+		}
+	}
+
+	/// Within one column the SIMD search splits the rows over four accumulators (three in the
+	/// fused update), lane by lane. Two equal maxima in one column can land in different
+	/// accumulators with the larger row in the one merged first; the merge must still keep the
+	/// smaller row (tensor4all/faer#342 review: `A[(6, 2)] = A[(8, 2)]` returned row 8 on a
+	/// two-lane build). Every pair of rows is tried, so the test holds whatever the lane count.
+	#[test]
+	fn pivot_search_keeps_the_smaller_row_across_accumulators() {
+		let m = 64;
+		for r0 in 0..m {
+			for r1 in r0 + 1..m {
+				let mut a = crate::Mat::<f64>::zeros(m, 3);
+				a[(r0, 1)] = 2.0;
+				a[(r1, 1)] = 2.0;
+				assert_eq!(
+					best_in_matrix(a.as_ref()),
+					(r0, 1, 2.0),
+					"rows {r0}, {r1}"
+				);
+
+				// the fused update with a zero update leaves the matrix as it is
+				let lhs = crate::Col::<f64>::zeros(m);
+				let rhs = crate::Row::<f64>::zeros(3);
+				for align in [0, 1, 3] {
+					let mut b = a.clone();
+					assert_eq!(
+						rank_one_update_and_best_in_matrix(
+							b.as_mut(),
+							lhs.as_ref(),
+							rhs.as_ref(),
+							align
+						),
+						(r0, 1, 2.0),
+						"update, rows {r0}, {r1}, align {align}"
+					);
+				}
+			}
 		}
 	}
 
