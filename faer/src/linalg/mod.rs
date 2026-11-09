@@ -116,9 +116,14 @@ pub(crate) fn tiled_copies() -> usize {
 	TILED_COPIES.with(|c| c.get())
 }
 /// Whether staging a `nrows x ncols` layout copy in [`COPY_TILE`] tiles pays,
-/// for a source and a destination of `size_of::<T>()` bytes per element: the
-/// tiles write every value twice, so they only win once the elementwise walk
-/// stops fitting in cache -- [`TILE_COPY_CACHE_BYTES`].
+/// for a source and a destination of `size_of::<T>()` bytes per element.
+///
+/// One point of this boundary is measured: the f64 `512 x 512` pair, the first
+/// cell of `tensor4all/faer#323`'s table where the tiles win. The rest follows
+/// from that byte count and `size_of::<T>()` -- an f32 `725 x 725` pair is the
+/// same number of bytes -- and is arithmetic, not a measurement. The count is
+/// both buffers whole, so where `n > m` it is an upper bound on what the copy
+/// touches: the copy stops at `min(m, n)` columns.
 #[inline]
 fn tile_copy_pays<T>(nrows: usize, ncols: usize) -> bool {
 	nrows
