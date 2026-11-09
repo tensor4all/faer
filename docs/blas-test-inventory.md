@@ -38,10 +38,13 @@ compared exactly instead of through `DMMCH`'s eps ratio; and the rogue value
 (`ROGUE = -1.0D10`) becomes NaN, which is the stronger sentinel. The source's
 "operand unchanged" and "leading-dimension padding" checks are kept as
 `exact`/`untouched_outside`. The two ports that put a written operand in a
-guarded parent are `DTRMM` and `DTRSM`: there the read operand and the written
-operand each sit in a rogue-filled parent with one row and one column of padding
-on each side, so the operand equality and the padding check both run against the
-whole parent, and the source itself only pads the leading dimension of the
+guarded parent are `DTRMM` and `DTRSM`: there the triangular coefficient and
+the written operand each sit in a rogue-filled parent with one row and one
+column of padding on each side, so the operand equality and the padding check
+both run against the whole parent. "Read operand" there means the triangular
+one: `DTRMM`'s rectangular `B` is allocated standalone, so what guards it is the
+entry-by-entry comparison against the reference, not a sentinel buffer. The
+source itself only pads the leading dimension of the
 arrays it passes in. `DGER`/`DSYR`/`DSYRK` allocate their destination
 standalone and check only the entries the routine must not write (the
 referenced-half rule) -- no surrounding buffer there. faer's strict-triangle
@@ -117,7 +120,7 @@ in the default (non-nightly) run:
 | Test | Property |
 | --- | --- |
 | `matmul::blas::*::trmm_matches_an_independent_product` | the product of a triangular operand equals an independently accumulated product over the bounded shape set, for every lower/upper, generic/strict/unit, `N`/`T`/`C`, left/right and `alpha` combination |
-| `matmul::blas::*::trmm_reads_and_writes_nothing_outside_its_operands` | the operand's unreferenced triangle and implicit diagonal hold NaN, so a value taken from them cannot pass through the arithmetic unnoticed (sensitivity to such a value, not proof that no read occurs); the operand and the destination each sit in a padded submatrix of their own ROGUE-filled parent, the destination is checked entry by entry against an independent product computed from the operand's pre-call snapshot, the coefficient parent comes back unchanged in full (stored operand and padding), and the destination parent changes only inside the written region |
+| `matmul::blas::*::trmm_reads_and_writes_nothing_outside_its_operands` | the operand's unreferenced triangle and implicit diagonal hold NaN, so a value taken from them cannot pass through the arithmetic unnoticed (sensitivity to such a value, not proof that no read occurs); the triangular operand and the destination each sit in a padded submatrix of their own ROGUE-filled parent (the rectangular `B` does not: it is standalone, and only its values are compared), the destination is checked entry by entry against an independent product computed from the operand's pre-call snapshot, the coefficient parent comes back unchanged in full (stored operand and padding), and the destination parent changes only inside the written region |
 | `matmul::blas::*::rank_one_update_matches_the_source_contract` | `A = alpha*x*y^T + beta*A` for `Replace`/`Add`, in a column-major and a row-major destination |
 | `matmul::blas::*::symmetric_rank_k_update_writes_only_the_stored_triangle` | the referenced half of `C` is `alpha * P + beta*C` for the four arms, with `P` = `A A^T`, `A^T A`, `A^H A` or `A A^H` (the first two unconjugated, hence not Hermitian for the complex types; the last two conjugated), the other half (NaN) is neither read nor written, and `A` is unchanged; `(n, k) = (3, 1)` covers `SYR`'s non-diagonal rank-1 update |
 | `triangular_solve::blas::*::trsm_recovers_the_exact_solution_with_an_implicit_diagonal` | the exact reference solution is recovered for both sides, `N`/`T`/`C`, lower/upper, generic/unit, with NaN in the unreferenced triangle and in a unit diagonal |
