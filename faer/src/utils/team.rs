@@ -899,6 +899,11 @@ mod tests {
 			assert_eq!(s.gemm_tiled + s.gemm_team_kernel, 0, "{s:?}");
 			r
 		});
+		// An exactly-zero difference is legitimate here because the team opened no section
+		// (`sections` and the GEMM counters above are zero), so both sides run the same
+		// one-participant partition. The `max_diff` form does not distinguish `+0.0` from
+		// `-0.0`; across thread counts only a tolerance is promised
+		// (`docs/reproducibility.md`).
 		assert_eq!(max_diff(a_seq.as_ref(), a_team.as_ref()), 0.0);
 		assert_eq!(max_diff(q_seq.as_ref(), q_team.as_ref()), 0.0);
 	}
@@ -1857,6 +1862,8 @@ mod tests {
 				matmul(got.as_mut(), Accum::Replace, a.as_ref(), b.as_ref(), 1.0, par);
 				let st = stats::take();
 				stats::enable(false);
+				// A team of one participant is the sequential partition, so an exactly-zero
+				// difference here is not a cross-thread-count claim (`docs/reproducibility.md`).
 				assert_eq!(max_diff(want.as_ref(), got.as_ref()), 0.0);
 				assert_eq!(st.gemm_team_kernel + st.gemm_tiled, 0, "{st:?}");
 			})

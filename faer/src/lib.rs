@@ -180,6 +180,12 @@
 //! The operator overloads (`&a * &b`, `&a + &b`, ...) have no room for the argument and always run
 //! sequentially; use [`linalg::matmul::matmul`] for a parallel product.
 //!
+//! Results are bitwise reproducible on the same machine and build **at a fixed thread count**,
+//! and only there: a different `Par` width is not promised to agree bit for bit, because the cost
+//! model splits work by the problem rather than by the count. See
+//! [docs/reproducibility.md](https://github.com/tensor4all/faer/blob/main/docs/reproducibility.md)
+//! (tensor4all/faer#327).
+//!
 //! with the `threadteam` feature (on by default) a team is a reservation the caller owns: its members spin while the reservation is held,
 //! instead of being woken for every region, and the token hands each region the authority to
 //! place work on them. That is what makes a sequence of short regions cheap: the

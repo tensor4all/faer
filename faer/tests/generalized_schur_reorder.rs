@@ -552,10 +552,13 @@ fn team_case<T: ComplexField>(
 				MemStack::new(&mut mem),
 			)
 			.unwrap();
-			assert_eq!(a, s);
-			assert_eq!(b, t);
-			assert_eq!(u, q);
-			assert_eq!(v, z);
+			// Within the family's tolerance, not bit for bit: bitwise agreement is
+			// promised at a fixed thread count only (docs/reproducibility.md,
+			// tensor4all/faer#327).
+			close(a.as_ref(), s.as_ref());
+			close(b.as_ref(), t.as_ref());
+			close(u.as_ref(), q.as_ref());
+			close(v.as_ref(), z.as_ref());
 		});
 	}
 }

@@ -2456,6 +2456,11 @@ mod tests {
 		check_uninit_native(|x, y| c64::new(x, y), |a: c64, b| (a - b).norm(), 1e-14);
 	}
 
+	/// The uninitialized entry matches the replace entry on a team: the reference is built with
+	/// the same team and compared with `==`, which treats `+0.0` and `-0.0` as equal, so this is
+	/// representation equality at one width rather than a bitwise claim (bitwise agreement is
+	/// promised at a fixed thread count only, `docs/reproducibility.md`, tensor4all/faer#327).
+	/// The serial product is compared within a relative tolerance.
 	#[cfg(feature = "threadteam")]
 	#[test]
 	fn test_matmul_with_conj_uninit_team() {
@@ -2464,18 +2469,33 @@ mod tests {
 				let lhs = Mat::<f64>::from_fn(130, 70, |i, j| ((i * 7 + j * 3) % 11) as f64 - 5.0);
 				let rhs = Mat::<f64>::from_fn(70, 90, |i, j| ((i * 5 + j) % 13) as f64 - 6.0);
 				let mut expected = Mat::<f64>::zeros(130, 90);
-				matmul_with_conj(expected.as_mut(), Accum::Replace, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, Par::Seq);
+				matmul_with_conj(expected.as_mut(), Accum::Replace, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, par.reborrow());
 				let mut data = alloc::vec![MaybeUninit::new(f64::NAN); 130 * 90];
 				let dst = MatUninitMut::from_column_major_slice_mut(&mut data, 130, 90);
 				let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, par.reborrow());
 				assert!(result == expected);
+				let mut sequential = Mat::<f64>::zeros(130, 90);
+				matmul_with_conj(sequential.as_mut(), Accum::Replace, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, Par::Seq);
+				// Scaled by the product itself, so the bound states a relative error: a
+				// near-zero entry is compared against the scale of the whole matrix rather
+				// than against a floor that would admit a much larger relative error.
+				let scale = (0..90)
+					.flat_map(|j| (0..130).map(move |i| (i, j)))
+					.fold(1.0f64, |scale, (i, j)| scale.max(sequential[(i, j)].abs()));
+				for j in 0..90 {
+					for i in 0..130 {
+						let diff = (result[(i, j)] - sequential[(i, j)]).abs();
+						let bound = 1e-12 * scale;
+						::core::assert!(diff <= bound, "{i}, {j}: {diff} against {bound}");
+					}
+				}
 			}
 			{
 				let from = |x: f64| <fx128 as ComplexFieldExt>::from_f64(x);
 				let lhs = Mat::<fx128>::from_fn(9, 6, |i, j| from((i + 2 * j) as f64));
 				let rhs = Mat::<fx128>::from_fn(6, 11, |i, j| from((3 * i + j) as f64));
 				let mut expected = Mat::<fx128>::zeros(9, 11);
-				matmul_with_conj(expected.as_mut(), Accum::Replace, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, from(1.0), Par::Seq);
+				matmul_with_conj(expected.as_mut(), Accum::Replace, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, from(1.0), par.reborrow());
 				let mut data = alloc::vec![MaybeUninit::<fx128>::uninit(); 9 * 11];
 				let dst = MatUninitMut::from_column_major_slice_mut(&mut data, 9, 11);
 				let result = matmul_with_conj_uninit(dst, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, from(1.0), par.reborrow());

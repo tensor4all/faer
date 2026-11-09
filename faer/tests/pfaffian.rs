@@ -4,7 +4,7 @@ use faer::linalg::pfaffian::{PfaffianError, pfaffian, pfaffian_scratch};
 use faer::{Mat, MatRef, Par, c32, c64};
 use faer_traits::ComplexField;
 use faer_traits::ext::*;
-use faer_traits::math_utils::{from_f64, one, zero};
+use faer_traits::math_utils::{eps, from_f64, one, zero};
 
 fn compute<T: ComplexField>(
 	a: MatRef<'_, T>,
@@ -393,7 +393,19 @@ fn team_agreement_and_actual_row_dispatch() {
 				let got = compute(a.as_ref(), par).unwrap();
 				let evidence = stats::take();
 				stats::enable(false);
-				assert_eq!(got, want, "width={width}");
+				// A relative tolerance, not the same bits: bitwise agreement across thread
+				// counts is not promised (docs/reproducibility.md, tensor4all/faer#327). The
+				// bound scales with the Pfaffian itself, so a wrong sign or a lost column
+				// fails: these fixtures return ~3e-21 (f32, f64) and ~0.12 (c32, c64), and an
+				// absolute floor would accept both errors on the small ones.
+				let bound = eps::<T::Real>()
+					* from_f64::<T::Real>(200.0 * a.nrows().max(1) as f64)
+					* want.clone().abs();
+				let diff = (got.clone() - want.clone()).abs();
+				assert!(
+					diff <= bound,
+					"width={width}: {got:?} against {want:?}, bound {bound:?}"
+				);
 				if width > 1 {
 					assert!(
 						evidence.run.iter().skip(2).sum::<usize>() > 0,
