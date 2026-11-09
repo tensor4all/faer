@@ -302,20 +302,26 @@ impl Team {
 	}
 
 	/// the pool of a `threads`-wide handle: one thread per participant, the width of the team it hands
-	/// out, and `None` for a sequential handle, which reserves nothing
+	/// out, and `None` for a sequential handle, which reserves nothing.
+	///
+	/// The workers are **dedicated** (a `thread_name` makes them so, threadteam 0.5.1
+	/// `Pool` docs): dropping the pool joins them, and neither `build` nor the drop touches
+	/// threadteam's process-wide cache of shared workers. That is what makes `destroy` stop the
+	/// threads, and what keeps a child forked after a `destroy` from inheriting cached Rayon workers
+	/// whose threads it does not have (its `create` would wait for them forever).
 	fn pool_for(threads: usize) -> Option<threadteam::Pool> {
 		(threads > 1).then(|| {
 			threadteam::Pool::builder()
 				.threads(threads)
+				.thread_name(|i| format!("faer-ffi-{i}"))
 				.acquire_timeout(core::time::Duration::from_secs(30))
 				.build()
 				.expect("a thread pool for the team")
 		})
 	}
 
-	/// Resets the width, rebuilding the owned pool when it changes. The new pool is a new width, so
-	/// threadteam's cache does not hand it the old pool's workers: this is a reconfiguration, and it
-	/// pays for its threads.
+	/// Resets the width, rebuilding the owned pool when it changes: the old pool's workers are joined
+	/// and the new width starts its own. This is a reconfiguration, and it pays for its threads.
 	fn set_threads(&mut self, threads: usize) {
 		if threads == self.threads {
 			return;
@@ -867,6 +873,19 @@ pub mod linalg {
 	#[derive(Copy, Clone)]
 	pub struct GevdFromSchurParams {
 		pub padding: usize,
+	}
+	/// For a test that hands EVD a C callback: the fields are C's to write, but private in Rust.
+	#[cfg(test)]
+	impl EvdParams {
+		pub(crate) fn with_shift_callback(
+			mut self,
+			shifts: extern "C" fn(usize, usize) -> usize,
+			blocking_threshold: usize,
+		) -> Self {
+			self.schur.recommended_shift_count = shifts;
+			self.schur.blocking_threshold = blocking_threshold;
+			self
+		}
 	}
 	impl GevdFromSchurParams {
 		#[allow(dead_code)]
@@ -2771,12 +2790,16 @@ pub unsafe extern "C" fn libfaer_v0_23_alloc(
 /// * **After `destroy` the handle is gone.** Any later operation, `set_threads` or second `destroy`
 ///   on that pointer is a use after free: the C caller owns the pointer and nothing can detect it,
 ///   so invalidate your copy where you free it. `destroy(NULL)` is accepted and ignored.
-/// * **`fork` without `exec` is not supported.** A forked child inherits threadteam's process-wide
-///   cache of its workers (and its mutex) without the threads, so any handle there — the inherited
-///   one and a fresh one alike — can block on a lock the parent held or reuse workers it does not
-///   have. Create handles in the process that uses them, and `exec` before using a team in a child
-///   whose parent already ran one. Whether `create` should record the creator's pid and refuse to
-///   work in a process it did not create the handle in is **undecided**, and nothing checks it today.
+/// * **After `fork`, a child uses only handles it creates itself.** A handle created before the
+///   fork names worker threads that do not exist in the child: an operation on it there can wait for
+///   them forever, and `destroy` there would join threads of another process, so the child must
+///   neither use nor destroy it. A handle the child creates starts its own workers, which are
+///   dedicated to it and never pass through threadteam's process-wide cache, so it works whether the
+///   parent's handles were destroyed before the fork or are still alive at it. The usual limits of
+///   forking a multithreaded process still apply to everything else (a lock another parent thread
+///   held at the fork stays held in the child), so `exec` remains the safe shape for a child that
+///   does more than this. Whether `create` should record the creator's pid and refuse an inherited
+///   handle is **undecided**, and nothing checks it today.
 ///
 /// The handle's contents are not the caller's to write: it is opaque and must be created and
 /// released by these three functions only.
@@ -2808,8 +2831,9 @@ pub unsafe extern "C" fn libfaer_v0_23_team_create(threads: usize) -> *mut Team 
 /// ignored.
 ///
 /// The handle is destroyed exactly once, and only while no operation that was handed it is still
-/// running. Dropping the pool returns its workers to threadteam's process-wide cache rather than
-/// ending the threads, which is threadteam's own behaviour for a pool with default thread settings.
+/// running. Dropping the pool ends its workers: they are dedicated to this handle (not threadteam's
+/// process-wide cache of shared workers), so when `destroy` returns every worker thread of the
+/// handle has been joined.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn libfaer_v0_23_team_destroy(team: *mut Team) {
 	if !team.is_null() {
@@ -2879,7 +2903,12 @@ mod alloc_probe {
 			Self::tick();
 			unsafe { System.alloc_zeroed(layout) }
 		}
-		unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+		unsafe fn realloc(
+			&self,
+			ptr: *mut u8,
+			layout: Layout,
+			new_size: usize,
+		) -> *mut u8 {
 			Self::tick();
 			unsafe { System.realloc(ptr, layout, new_size) }
 		}
@@ -3185,9 +3214,18 @@ mod tests {
 					for _ in 0..4 {
 						with_team_par(team, |par| {
 							use std::sync::atomic::Ordering::AcqRel;
-							most.fetch_max(inside.fetch_add(1, AcqRel) + 1, AcqRel);
-							assert_eq!(par.degree(), width, "a call got another width");
-							std::thread::sleep(core::time::Duration::from_millis(2));
+							most.fetch_max(
+								inside.fetch_add(1, AcqRel) + 1,
+								AcqRel,
+							);
+							assert_eq!(
+								par.degree(),
+								width,
+								"a call got another width"
+							);
+							std::thread::sleep(
+								core::time::Duration::from_millis(2),
+							);
 							inside.fetch_sub(1, AcqRel);
 						});
 					}
@@ -3212,8 +3250,12 @@ mod tests {
 		let _turn = TEAM_TURN.lock().unwrap_or_else(|e| e.into_inner());
 		let width = cpus().clamp(2, 4);
 		let n = 96;
-		let a = faer::Mat::<f64>::from_fn(n, n, |i, j| ((i * 31 + j * 7) % 13) as f64 - 6.0);
-		let b = faer::Mat::<f64>::from_fn(n, n, |i, j| ((i * 5 + j * 11) % 17) as f64 - 8.0);
+		let a = faer::Mat::<f64>::from_fn(n, n, |i, j| {
+			((i * 31 + j * 7) % 13) as f64 - 6.0
+		});
+		let b = faer::Mat::<f64>::from_fn(n, n, |i, j| {
+			((i * 5 + j * 11) % 17) as f64 - 8.0
+		});
 		let expected = want(n, &a, &b);
 		let team = unsafe { libfaer_v0_23_team_create(width) };
 		let mut inner_c = faer::Mat::<f64>::zeros(n, n);
@@ -3229,54 +3271,206 @@ mod tests {
 		});
 		matmul(&mut outer_c, &a, &b, team);
 		unsafe { libfaer_v0_23_team_destroy(team) };
-		assert!(close(&expected, &inner_c), "the nested call gave another product");
-		assert!(close(&expected, &outer_c), "the handle was unusable after a nested call");
+		assert!(
+			close(&expected, &inner_c),
+			"the nested call gave another product"
+		);
+		assert!(
+			close(&expected, &outer_c),
+			"the handle was unusable after a nested call"
+		);
+	}
+
+	/// The review's reproducer through the real callback path rather than a closure: an EVD whose
+	/// `SchurParams::recommended_shift_count` callback multiplies two other matrices on the *same*
+	/// handle, for a sequential handle and a parallel one. Before the reentrancy guard this hung: EVD
+	/// holds the handle's lock while faer calls the callback, and the nested multiplication waited for
+	/// it. The EVD runs on a helper thread and is given a deadline, so a regression fails instead of
+	/// hanging the runner. The callback also records whether it ran on the thread that made the outer
+	/// call, which is the thread the guard marks.
+	#[test]
+	fn an_evd_callback_may_call_back_on_the_same_handle() {
+		use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+		static HANDLE: AtomicUsize = AtomicUsize::new(0);
+		static CALLER: AtomicUsize = AtomicUsize::new(0);
+		static CALLED: AtomicUsize = AtomicUsize::new(0);
+		static OFF_THREAD: AtomicBool = AtomicBool::new(false);
+		static WRONG: AtomicBool = AtomicBool::new(false);
+		fn tid() -> usize {
+			thread_local!(static ID: u8 = const { 0 });
+			ID.with(|id| id as *const u8 as usize)
+		}
+		extern "C" fn shifts(dim: usize, active: usize) -> usize {
+			CALLED.fetch_add(1, SeqCst);
+			if tid() != CALLER.load(SeqCst) {
+				OFF_THREAD.store(true, SeqCst);
+			}
+			let n = 24;
+			let a = faer::Mat::<f64>::from_fn(n, n, |i, j| {
+				((i * 3 + j) % 7) as f64 - 3.0
+			});
+			let b = faer::Mat::<f64>::from_fn(n, n, |i, j| {
+				((i + 2 * j) % 5) as f64 - 2.0
+			});
+			let mut c = faer::Mat::<f64>::zeros(n, n);
+			matmul(&mut c, &a, &b, HANDLE.load(SeqCst) as *const Team);
+			if !close(&want(n, &a, &b), &c) {
+				WRONG.store(true, SeqCst);
+			}
+			let _ = (dim, active);
+			12
+		}
+
+		let _turn = TEAM_TURN.lock().unwrap_or_else(|e| e.into_inner());
+		for width in [1, cpus().clamp(2, 4)] {
+			CALLED.store(0, SeqCst);
+			let team = unsafe { libfaer_v0_23_team_create(width) };
+			HANDLE.store(team as usize, SeqCst);
+			let (done, wait) = std::sync::mpsc::channel();
+			std::thread::spawn(move || {
+				CALLER.store(tid(), SeqCst);
+				let n = 160usize;
+				let a = faer::Mat::<f64>::from_fn(n, n, |i, j| {
+					(((i * 37 + j * 11) % 23) as f64 - 11.0) / 7.0
+				});
+				let params = unsafe { la::libfaer_v0_23_EvdParams_f64() }
+					.with_shift_callback(shifts, 32);
+				let team = HANDLE.load(SeqCst) as *const Team;
+				let no = la::ComputeEigenvectors::No;
+				let layout = unsafe {
+					la::libfaer_v0_23_evd_scratch_f64(n, no, no, team, params)
+				};
+				let lay = core::alloc::Layout::from_size_align(
+					layout.len_bytes.max(1),
+					layout.align_bytes,
+				)
+				.unwrap();
+				let mem = MemAlloc {
+					ptr: unsafe { std::alloc::alloc(lay) } as *mut c_void,
+					len_bytes: layout.len_bytes,
+				};
+				let (mut re, mut im) = (vec![0.0f64; n], vec![0.0f64; n]);
+				let empty = MatMut {
+					ptr: core::ptr::null_mut(),
+					nrows: n,
+					ncols: 0,
+					row_stride: 1,
+					col_stride: n as isize,
+				};
+				let status = unsafe {
+					la::libfaer_v0_23_evd_f64(
+						MatRef::of(&a),
+						empty,
+						empty,
+						VecMut {
+							ptr: re.as_mut_ptr() as *mut c_void,
+							len: n,
+							stride: 1,
+						},
+						VecMut {
+							ptr: im.as_mut_ptr() as *mut c_void,
+							len: n,
+							stride: 1,
+						},
+						team,
+						mem,
+						params,
+					)
+				};
+				unsafe { std::alloc::dealloc(mem.ptr as *mut u8, lay) };
+				let trace: f64 = (0..n).map(|i| a[(i, i)]).sum();
+				let sum: f64 = re.iter().sum();
+				let _ = done.send((
+					matches!(status, la::EvdStatus::Ok { .. }),
+					(trace - sum).abs(),
+				));
+			});
+			let (ok, err) = wait
+				.recv_timeout(core::time::Duration::from_secs(60))
+				.unwrap_or_else(|_| panic!("width {width}: an EVD whose callback calls the same handle never returned (deadlock)"));
+			unsafe { libfaer_v0_23_team_destroy(team) };
+			assert!(ok, "width {width}: the EVD did not converge");
+			assert!(
+				err < 1e-8,
+				"width {width}: the eigenvalues do not sum to the trace ({err})"
+			);
+			assert!(
+				CALLED.load(SeqCst) > 0,
+				"width {width}: the callback was never called, so nothing was tested"
+			);
+			assert!(
+				!WRONG.load(SeqCst),
+				"width {width}: the nested product was wrong"
+			);
+			assert!(
+				!OFF_THREAD.load(SeqCst),
+				"width {width}: the callback ran off the calling thread, where the guard does not reach"
+			);
+		}
 	}
 
 	/// faer#333: a handle reused for N calls pays for its pool once, so the calls after the first cost
-	/// what one reservation costs; a handle built per call pays that pool again on every call. Both
-	/// shapes are measured in one run, so they see the same threadteam thread-cache state: the first
-	/// call of a pool is threadteam's first acquisition of it (cold on the members' own state, thousands
-	/// of allocations here) and the pool-building shape pays that on every call, so the reused handle's
-	/// first call is excluded and its tail is compared with the whole of the pool-per-call shape. The
-	/// comparison is a sum over the same number of calls, so no single call being warm or cold decides
-	/// it. Before the pool moved into the handle both shapes cost the same, per call.
+	/// what one reservation costs. The reference is what the handle replaced, measured in the same
+	/// run on the same matrices: `faer::team::with_team` per call, which is what every C call ran on
+	/// `origin/main` (it builds a pool of shared workers from threadteam's cache, reserves it and
+	/// drops it again). The first call of each shape is excluded: for the handle it is threadteam's
+	/// first acquisition of the pool (thousands of allocations, the members' own state), for the
+	/// reference the first build of its cached workers. The tails are summed over the same number of
+	/// calls, so no single call being warm (1 allocation) or cold (6, after the members parked) decides
+	/// it, and the bound asks for a third less than the reference: with the implementation reverted to
+	/// a pool per call the two tails are the same code and cost the same.
 	#[test]
 	fn a_reused_handle_builds_its_pool_once() {
 		let _turn = TEAM_TURN.lock().unwrap_or_else(|e| e.into_inner());
 		let width = cpus().clamp(2, 4);
 		let n = 64;
 		const CALLS: usize = 8;
-		let a = faer::Mat::<f64>::from_fn(n, n, |i, j| ((i * 31 + j * 7) % 13) as f64 - 6.0);
-		let b = faer::Mat::<f64>::from_fn(n, n, |i, j| ((i * 5 + j * 11) % 17) as f64 - 8.0);
+		let a = faer::Mat::<f64>::from_fn(n, n, |i, j| {
+			((i * 31 + j * 7) % 13) as f64 - 6.0
+		});
+		let b = faer::Mat::<f64>::from_fn(n, n, |i, j| {
+			((i * 5 + j * 11) % 17) as f64 - 8.0
+		});
 		let mut c = faer::Mat::<f64>::zeros(n, n);
 
-		// one handle, CALLS calls: the first is the pool's first acquisition, the rest are its tail
+		// one handle, CALLS calls through the C entry point
 		let team = unsafe { libfaer_v0_23_team_create(width) };
-		let mut per_call = [0usize; CALLS];
-		for slot in &mut per_call {
+		let mut reused = [0usize; CALLS];
+		for slot in &mut reused {
 			alloc_probe::reset();
 			matmul(&mut c, &a, &b, team);
 			*slot = alloc_probe::take();
 		}
-
-		// CALLS handles of one call each (the same number of calls, one pool built for each)
-		alloc_probe::reset();
-		for _ in 0..CALLS {
-			let team = unsafe { libfaer_v0_23_team_create(width) };
-			matmul(&mut c, &a, &b, team);
-			unsafe { libfaer_v0_23_team_destroy(team) };
-		}
-		let rebuilt = alloc_probe::take();
-
 		unsafe { libfaer_v0_23_team_destroy(team) };
-		let reused: usize = per_call[1..].iter().sum();
+
+		// the same CALLS products on a pool per call, the shape the handle replaced
+		let mut per_call = [0usize; CALLS];
+		for slot in &mut per_call {
+			alloc_probe::reset();
+			faer::team::with_team(width, |par| {
+				faer::linalg::matmul::matmul(
+					c.as_mut(),
+					faer::Accum::Replace,
+					a.as_ref(),
+					b.as_ref(),
+					1.0,
+					par,
+				)
+			});
+			*slot = alloc_probe::take();
+		}
+
+		let tail = |calls: &[usize]| -> usize { calls[1..].iter().sum() };
+		let (reused_tail, per_call_tail) = (tail(&reused), tail(&per_call));
 		println!(
-			"width {width}: per call on one handle {per_call:?} (tail {reused}), {CALLS} handles of one call {rebuilt}"
+			"width {width}: one handle {reused:?} (tail {reused_tail}), a pool per call \
+			 {per_call:?} (tail {per_call_tail})"
 		);
 		assert!(
-			2 * reused < rebuilt,
-			"the tail of one handle cost {reused} allocations against {rebuilt} for the same calls on a pool per call: the handle builds its pool per call"
+			3 * reused_tail < 2 * per_call_tail,
+			"the tail of one handle cost {reused_tail} allocations against \
+			 {per_call_tail} for the same calls on a pool per call: the handle \
+			 builds its pool per call"
 		);
 	}
 

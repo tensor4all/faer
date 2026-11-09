@@ -6347,12 +6347,16 @@ struct FaerV0_24_Layout libfaer_v0_23_svd_scratch_fx128(size_t nrows,
  * * **After `destroy` the handle is gone.** Any later operation, `set_threads` or second `destroy`
  *   on that pointer is a use after free: the C caller owns the pointer and nothing can detect it,
  *   so invalidate your copy where you free it. `destroy(NULL)` is accepted and ignored.
- * * **`fork` without `exec` is not supported.** A forked child inherits threadteam's process-wide
- *   cache of its workers (and its mutex) without the threads, so any handle there — the inherited
- *   one and a fresh one alike — can block on a lock the parent held or reuse workers it does not
- *   have. Create handles in the process that uses them, and `exec` before using a team in a child
- *   whose parent already ran one. Whether `create` should record the creator's pid and refuse to
- *   work in a process it did not create the handle in is **undecided**, and nothing checks it today.
+ * * **After `fork`, a child uses only handles it creates itself.** A handle created before the
+ *   fork names worker threads that do not exist in the child: an operation on it there can wait for
+ *   them forever, and `destroy` there would join threads of another process, so the child must
+ *   neither use nor destroy it. A handle the child creates starts its own workers, which are
+ *   dedicated to it and never pass through threadteam's process-wide cache, so it works whether the
+ *   parent's handles were destroyed before the fork or are still alive at it. The usual limits of
+ *   forking a multithreaded process still apply to everything else (a lock another parent thread
+ *   held at the fork stays held in the child), so `exec` remains the safe shape for a child that
+ *   does more than this. Whether `create` should record the creator's pid and refuse an inherited
+ *   handle is **undecided**, and nothing checks it today.
  *
  * The handle's contents are not the caller's to write: it is opaque and must be created and
  * released by these three functions only.
@@ -6380,8 +6384,9 @@ struct FaerV0_24_Team *libfaer_v0_23_team_create(size_t threads);
  * ignored.
  *
  * The handle is destroyed exactly once, and only while no operation that was handed it is still
- * running. Dropping the pool returns its workers to threadteam's process-wide cache rather than
- * ending the threads, which is threadteam's own behaviour for a pool with default thread settings.
+ * running. Dropping the pool ends its workers: they are dedicated to this handle (not threadteam's
+ * process-wide cache of shared workers), so when `destroy` returns every worker thread of the
+ * handle has been joined.
  */
 void libfaer_v0_23_team_destroy(struct FaerV0_24_Team *team);
 
