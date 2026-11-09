@@ -657,14 +657,20 @@ pub struct FullPivLuInfo {
 /// breaks it by row first.
 ///
 /// For a **complex** `T` the index order among tied entries is not part of the
-/// contract, because the two searches do not score an entry the same way. The
-/// scalar one compares `|re| + |im|`; the SIMD one, used when `T` has SIMD
-/// support and the matrix searched is column-major, compares the components of
-/// the absolute value separately, so an entry with the larger real or imaginary
-/// part wins over one with a larger `|re| + |im|`. On an Apple M5 a zero `16 x
-/// 16` c64 matrix with `A[(0, 1)] = 3 + 4i` and `A[(2, 1)] = 5` and `max_rank =
-/// Some(1)` pivots on `(2, 1)` under SIMD and on `(0, 1)` without it, although
-/// `|re| + |im|` is larger at `(0, 1)`. Ties are still resolved inside the
+/// contract, because the two searches do not always score an entry the same
+/// way. The scalar one compares `|re| + |im|`. The SIMD one, used when `T` has
+/// SIMD support and the matrix searched is column-major, compares `|re| +
+/// |im|` too for a generic `Complex<T>` such as `cx128`; for the native `c32`
+/// and `c64`, when the dispatched vector holds the parts in separate lanes (a
+/// target with SIMD lanes, not pulp's `Scalar` fallback), it compares the
+/// components of the absolute value separately, so an entry with the larger
+/// real or imaginary part wins over one with a larger `|re| + |im|`. On an
+/// Apple M5 a zero `16 x 16` c64 matrix with `A[(0, 1)] = 3 + 4i` and `A[(2,
+/// 1)] = 5` and `max_rank = Some(1)` pivots on `(2, 1)` under SIMD and on `(0,
+/// 1)` without it, although `|re| + |im|` is larger at `(0, 1)`; the same
+/// `cx128` matrix pivots on `(0, 1)` either way. Both scores lie within
+/// `sqrt(2)` of the modulus, so the pivot's modulus is at least `1 / sqrt(2)`
+/// of the largest in the block either way. Ties are still resolved inside the
 /// matrix that is searched, so the layout argument above holds; only the index
 /// order within one searched matrix is unspecified for complex `T`.
 ///

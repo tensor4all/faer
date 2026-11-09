@@ -6,10 +6,11 @@
 //! The shapes that still take the copy are the control: there the same counter
 //! must see it.
 #![cfg(all(feature = "std", feature = "threadteam"))]
-use faer::c64;
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::lu::full_pivoting::factor as flu;
-use faer::{Auto, MatMut, Par};
+use faer::traits::ComplexField;
+use faer::traits::math_utils::zero;
+use faer::{Auto, MatMut, Par, c64, cx128, fx128};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -233,15 +234,15 @@ fn full_piv_lu_tie_order_depends_on_the_layout() {
 	assert_eq!(first_pivot(64, 64, [(6, 2), (8, 2)], false), (6, 2, 2));
 }
 
-/// First pivot `(row, column, transpositions)` on a zero `m x n` c64 matrix with
-/// two entries, at `max_rank = Some(1)`.
-fn first_pivot_c64(
+/// First pivot `(row, column, transpositions)` on a zero `m x n` complex matrix
+/// with two entries, at `max_rank = Some(1)`.
+fn first_pivot_complex<T: ComplexField>(
 	m: usize,
 	n: usize,
-	ties: [(usize, usize, c64); 2],
+	ties: [(usize, usize, T); 2],
 	row_major: bool,
 ) -> (usize, usize, usize) {
-	let mut a = vec![c64::new(0.0, 0.0); m * n];
+	let mut a = vec![zero::<T>(); m * n];
 	for (i, j, v) in ties {
 		a[if row_major { i * n + j } else { i + j * m }] = v;
 	}
@@ -256,7 +257,7 @@ fn first_pivot_c64(
 		vec![0usize; n],
 		vec![0usize; n],
 	);
-	let mut mem = MemBuffer::new(flu::lu_in_place_scratch::<usize, c64>(
+	let mut mem = MemBuffer::new(flu::lu_in_place_scratch::<usize, T>(
 		m,
 		n,
 		Par::Seq.shape(),
@@ -264,7 +265,7 @@ fn first_pivot_c64(
 	));
 	let params = flu::FullPivLuParams {
 		max_rank: Some(1),
-		..<flu::FullPivLuParams as Auto<c64>>::auto()
+		..<flu::FullPivLuParams as Auto<T>>::auto()
 	};
 	let (info, _, _) = flu::lu_in_place(
 		view,
@@ -279,20 +280,19 @@ fn first_pivot_c64(
 	(p[0], q[0], info.transposition_count)
 }
 
-
-/// `lu_in_place`, "Pivot ties" for a complex `T`: the index order is not part of
-/// the contract, and which of the two documented scores the search uses is
+/// `lu_in_place`, "Pivot ties" for a complex `T`: the index order is not part
+/// of the contract, and which of the two documented scores the search uses is
 /// visible. `(0, 1)` holds `3 + 4i` and `(2, 1)` holds `5`, so `|re| + |im|` is
 /// larger at `(0, 1)` and the largest single component at `(2, 1)`. The scalar
-/// search compares the sum, the SIMD one the components; both fixtures below are
-/// asserted as a pair, so the test needs no knowledge of which backend the
+/// search compares the sum, the SIMD one the components; both fixtures below
+/// are asserted as a pair, so the test needs no knowledge of which backend the
 /// build dispatches to (tensor4all/faer#342 review).
 #[test]
 fn full_piv_lu_complex_tie_follows_the_search_score() {
 	let ties = [(0, 1, c64::new(3.0, 4.0)), (2, 1, c64::new(5.0, 0.0))];
 	let swapped = [(0, 1, c64::new(5.0, 0.0)), (2, 1, c64::new(3.0, 4.0))];
-	let first = first_pivot_c64(16, 16, ties, false);
-	let second = first_pivot_c64(16, 16, swapped, false);
+	let first = first_pivot_complex(16, 16, ties, false);
+	let second = first_pivot_complex(16, 16, swapped, false);
 	// Component score keeps the larger component: (2, 1) then (0, 1). Sum score
 	// keeps the larger |re| + |im|: (0, 1) then (2, 1). Index order would keep
 	// (0, 1) in both, so either arm below is a score and the pair rules it out.
@@ -301,4 +301,29 @@ fn full_piv_lu_complex_tie_follows_the_search_score() {
 			|| (first, second) == ((0, 1, 1), (2, 1, 2)),
 		"first pivot {first:?}, swapped {second:?}"
 	);
+}
+
+/// The component score belongs to the native `c32` and `c64` vectors only; a
+/// generic `Complex<T>` such as `cx128` sums `|re| + |im|` on its SIMD path too
+/// (tensor4all/faer#342 review r5).
+#[test]
+fn full_piv_lu_cx128_pivot_uses_the_sum_score() {
+	let c = |re: f64, im: f64| cx128 {
+		re: fx128::from_f64(re),
+		im: fx128::from_f64(im),
+	};
+	let ties = [(0, 1, c(3.0, 4.0)), (2, 1, c(5.0, 0.0))];
+	let swapped = [(0, 1, c(5.0, 0.0)), (2, 1, c(3.0, 4.0))];
+	// the larger |re| + |im| wins in both fixtures, column-major (SIMD search
+	// on the input) and row-major (SIMD search on the transpose)
+	for row_major in [false, true] {
+		assert_eq!(
+			(
+				first_pivot_complex(16, 16, ties, row_major),
+				first_pivot_complex(16, 16, swapped, row_major),
+			),
+			((0, 1, 1), (2, 1, 2)),
+			"row_major = {row_major}"
+		);
+	}
 }
