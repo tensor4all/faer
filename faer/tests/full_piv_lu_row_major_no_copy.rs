@@ -5,7 +5,9 @@
 //! copy is one `m * n` buffer, so the dual path stays below that size.
 //! The shapes that still take the copy are the control: there the same counter
 //! must see it.
-#![cfg(all(feature = "std", feature = "threadteam"))]
+// Only the team run below needs `threadteam`; the sequential checks also run
+// without it, as in the benchmark build (`std`, `rayon`).
+#![cfg(feature = "std")]
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::lu::full_pivoting::factor as flu;
 use faer::traits::ComplexField;
@@ -161,6 +163,7 @@ fn small_square_row_major_full_piv_lu_does_not_copy_the_matrix() {
 		}
 	};
 	run(Par::Seq);
+	#[cfg(feature = "threadteam")]
 	faer::team::with_team(4, |par| run(par));
 }
 
