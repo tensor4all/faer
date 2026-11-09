@@ -863,7 +863,18 @@ mod tests {
 		let mut d: f64 = 0.0;
 		for j in 0..a.ncols() {
 			for i in 0..a.nrows() {
-				d = d.max((a[(i, j)] - b[(i, j)]).abs());
+				let x = (a[(i, j)] - b[(i, j)]).abs();
+				// `f64::max` returns its other operand when one is NaN, so a NaN entry
+				// would otherwise read as agreement. A non-finite difference passes only
+				// where the two entries are the same bits: `q` below holds `+inf` at
+				// (3, 31) on both routes.
+				assert!(
+					x.is_finite() || a[(i, j)].to_bits() == b[(i, j)].to_bits(),
+					"{i},{j}: {} and {} differ by {x}",
+					a[(i, j)],
+					b[(i, j)]
+				);
+				d = d.max(x);
 			}
 		}
 		d

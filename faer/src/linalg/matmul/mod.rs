@@ -2478,17 +2478,34 @@ mod tests {
 				matmul_with_conj(sequential.as_mut(), Accum::Replace, lhs.as_ref(), Conj::No, rhs.as_ref(), Conj::No, 1.0, Par::Seq);
 				// Scaled by the product itself, so the bound states a relative error: a
 				// near-zero entry is compared against the scale of the whole matrix rather
-				// than against a floor that would admit a much larger relative error.
-				let scale = (0..90)
-					.flat_map(|j| (0..130).map(move |i| (i, j)))
-					.fold(1.0f64, |scale, (i, j)| scale.max(sequential[(i, j)].abs()));
+				// than against a floor that would admit a much larger relative error. An
+				// all-zero reference leaves a zero bound, which demands exact equality.
+				let bound_of = |m: MatRef<'_, f64>| {
+					let scale = (0..90)
+						.flat_map(|j| (0..130).map(move |i| (i, j)))
+						.fold(0.0f64, |scale, (i, j)| scale.max(m[(i, j)].abs()));
+					assert!(scale > 0.0, "a reference of zeros is outside this test");
+					1e-12 * scale
+				};
+				let bound = bound_of(sequential.as_ref());
 				for j in 0..90 {
 					for i in 0..130 {
 						let diff = (result[(i, j)] - sequential[(i, j)]).abs();
-						let bound = 1e-12 * scale;
 						::core::assert!(diff <= bound, "{i}, {j}: {diff} against {bound}");
 					}
 				}
+				// The same product shrunk by 1e-20, where the largest entry is 1.01e-18:
+				// an all-zero result must exceed the bound, which it cannot do under a
+				// `max(1, ...)` floor (that bound is 1e-12 whatever the entries are).
+				let tiny = Mat::<f64>::from_fn(130, 90, |i, j| 1e-20 * sequential[(i, j)]);
+				let tiny_bound = bound_of(tiny.as_ref());
+				let zeros = (0..90)
+					.flat_map(|j| (0..130).map(move |i| (i, j)))
+					.fold(0.0f64, |d, (i, j)| d.max(tiny[(i, j)].abs()));
+				::core::assert!(
+					zeros > tiny_bound,
+					"{zeros} against {tiny_bound}: the bound admits an all-zero product"
+				);
 			}
 			{
 				let from = |x: f64| <fx128 as ComplexFieldExt>::from_f64(x);

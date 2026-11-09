@@ -386,6 +386,7 @@ fn team_agreement_and_actual_row_dispatch() {
 	fn check<T: ComplexField>(a: Mat<T>) {
 		use faer::utils::team::stats;
 		let want = compute(a.as_ref(), Par::Seq).unwrap();
+		let scalar = core::any::type_name::<T>();
 		for width in [1, 3, 8, 32] {
 			faer::team::with_team(width, |par| {
 				stats::enable(true);
@@ -402,6 +403,9 @@ fn team_agreement_and_actual_row_dispatch() {
 					* from_f64::<T::Real>(200.0 * a.nrows().max(1) as f64)
 					* want.clone().abs();
 				let diff = (got.clone() - want.clone()).abs();
+				// Recorded, so "the difference is exactly zero" is a measurement: run with
+				// `-- --nocapture`. Not asserted, because the contract is the bound below.
+				eprintln!("{scalar} width={width} diff={diff:?} want={want:?}");
 				assert!(
 					diff <= bound,
 					"width={width}: {got:?} against {want:?}, bound {bound:?}"
