@@ -15,14 +15,19 @@
 //! than one thread, and the matmul fallback on hosts without AVX2/FMA allocates
 //! (PATCHSET rows #58/#56). Both apply to a `Par::Team` call, not to this one.
 //!
-//! A third path is host-dependent and does reach this one: where the `gemm` crate
-//! dispatches to its aarch64 SME kernel, `PackBuffer::take` builds a fresh
-//! `MemBuffer` on every call, so `unitary` allocates through
-//! `apply_block_householder_on_the_left_in_place_generic` on such a host. Measured
-//! on an aarch64 macOS host at `60 x 300`, the one shape far enough into that
-//! dispatch: 13, 12, 17, 17 allocations for (f64, f32, c64, c32), the same numbers
-//! at `620b96a` and at head. On `x86_64` the test passes, so this is the kernel the
-//! build's `gemm` selects, not the LQ code.
+//! A third path is host-dependent and does reach this one: on an aarch64 host the
+//! `gemm` crate dispatches to its SME kernel, whose pack buffer is per thread but
+//! not free. `t4a-gemm-common 0.20.4` (`Cargo.lock:2709-2712`) reuses the buffer in
+//! the thread-local slot only when that one can hold the request (`src/gemm.rs:84-97`),
+//! and its `Drop` keeps a buffer only up to `CACHE_INFO[1].cache_bytes`
+//! (`src/gemm.rs:114-129`), which that build reports as 2796202 B on this host. The
+//! `60 x 300` pipeline allocates 3993600 and 4390912 B buffers for f64, above that
+//! cap, so each pass leaves the slot empty; the smaller requests that follow
+//! (57344, 114688, 65536, 131072, 147456 B) are each larger than the buffer then in
+//! the slot. That accounts for the 13 allocations counted for f64, and for the same
+//! reason 12 (f32, 7895040 and 8781824 B buffers), 17 (c64) and 17 (c32) — measured
+//! on an aarch64 macOS host, identical at `620b96a` and at head. The same test passes
+//! on `x86_64`, which does not dispatch to that kernel.
 #![cfg(feature = "std")]
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::lq::no_pivoting::{factor, reconstruct, unitary};
