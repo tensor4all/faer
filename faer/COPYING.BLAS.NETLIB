@@ -1,0 +1,49 @@
+Reference BLAS test programs
+============================
+
+The BLAS-level unit tests in this crate adapt the checks of the netlib
+reference BLAS test programs, as distributed in OpenBLAS `test/` and `ctest/`
+at commit 791b02a1a00c996b66a894f6df93421c53b62d80:
+
+  faer/src/linalg/matmul/tests/blas_trmm.rs         (test/{s,d,c,z}blat3.f, DCHK3, DTRMM)
+  faer/src/linalg/matmul/tests/blas_rank_update.rs  (test/blat2.f DCHK4/DCHK5; test/blat3.f DCHK4)
+  faer/src/linalg/tests/blas_trsm_cases.rs          (test/blat3.f DCHK3, DTRSM; test/blat2.f DCHK3, DTRSV)
+
+The Rust files are new code under this crate's MIT license and contain no
+translated Fortran. What they adapt is the set of properties the source test
+programs check (an independently accumulated reference product, operands that
+must stay unchanged, an unreferenced triangle and an implicit unit diagonal
+that must not be read) together with the fixture generator's shape. The
+inventory, the exact source files and the material changes are recorded in
+docs/blas-test-inventory.md.
+
+The notice below is the license of the directory that holds the source test
+programs, quoted from OpenBLAS `test/LICENSE` and `ctest/LICENSE` (identical
+files). It asks for credit rather than imposing a redistribution condition, so
+the crate's `license` metadata is unchanged; this file carries the credit.
+
+-------------------------------------------------------------------------------
+
+This directory contains the reference implementation of BLAS
+which is obtainable at: http://netlib.org/blas/
+
+The license, obtained from http://netlib.org/blas/faq.html#2 on November 3,
+2010, is as follows:
+
+2) Are there legal restrictions on the use of BLAS reference implementation
+software?
+
+The reference BLAS is a freely-available software package. It is available from
+netlib via anonymous ftp and the World Wide Web. Thus, it can be included in
+commercial software packages (and has been). We only ask that proper credit be
+given to the authors.
+
+Like all software, it is copyrighted. It is not trademarked, but we do ask the
+following:
+
+If you modify the source for these routines we ask that you change the name of
+the routine and comment the changes made to the original.
+
+We will gladly answer any questions regarding the software. If a modification
+is done, however, it is the responsibility of the person who modified the
+routine to provide support.

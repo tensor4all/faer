@@ -33,12 +33,19 @@ terms and their notices ship alongside the crate:
                                         column-pivoting QR, Schur, Hessenberg,
                                         Schur reordering, tridiagonal QR step,
                                         selected LAPACK EIG/LIN numerical validation tests
+  faer/COPYING.BLAS.NETLIB              credit for the reference BLAS test programs
+                                        whose BLAS-level checks the matmul,
+                                        rank-update and triangular-solve unit tests
+                                        adapt (docs/blas-test-inventory.md)
   faer/COPYING.SUITE_SPARSE.AMD.BSD     AMD ordering
   faer/COPYING.SUITE_SPARSE.COLAMD.BSD  COLAMD ordering
 
 The faer package's `license = "MIT AND BSD-3-Clause"` metadata includes the
 LAPACK numerical test adaptations. It does not relicense the other ported files;
-read the COPYING files for their actual terms.
+read the COPYING files for their actual terms. The netlib reference BLAS test
+programs ask for credit rather than imposing a license condition, and no Fortran
+is translated: `faer/COPYING.BLAS.NETLIB` carries that credit and the quoted
+notice, so the `license` expression stays as it is.
 
 The packages published from this repository are the temporary tensor4all fork
 names `t4a-faer` and `t4a-faer-traits`, so that downstream crates can depend on

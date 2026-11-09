@@ -1060,6 +1060,10 @@ mod tests {
 #[path = "tests/lapack_triangular.rs"]
 mod lapack;
 
+#[cfg(test)]
+#[path = "tests/blas_trsm.rs"]
+mod blas;
+
 #[cfg(all(test, feature = "std"))]
 mod aliased_rhs {
 	use super::*;

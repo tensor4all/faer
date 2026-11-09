@@ -2075,6 +2075,10 @@ pub fn matmul_with_conj<T: ComplexField, M: Shape, N: Shape, K: Shape>(
 	);
 }
 #[cfg(test)]
+#[path = "tests/mod.rs"]
+mod blas;
+
+#[cfg(test)]
 mod tests {
 	use super::triangular::{BlockStructure, DiagonalKind};
 	use super::*;
