@@ -313,8 +313,9 @@ impl Team {
 		})
 	}
 
-	/// Resets the width, rebuilding the owned pool when it changes. Dropping the old pool returns its
-	/// threads to threadteam's process-wide cache, so the new one takes them instead of spawning.
+	/// Resets the width, rebuilding the owned pool when it changes. The new pool is a new width, so
+	/// threadteam's cache does not hand it the old pool's workers: this is a reconfiguration, and it
+	/// pays for its threads.
 	fn set_threads(&mut self, threads: usize) {
 		if threads == self.threads {
 			return;
@@ -326,8 +327,9 @@ impl Team {
 
 	/// Runs `f` on the team this handle owns, and leaves it again before returning: the pool goes into
 	/// a team for the duration of this call and comes back out, which is what keeps the calling thread
-	/// out of the team between calls. The mutex is what makes the pool that travels safe: a second call
-	/// on the same handle waits for the first one to hand the pool back.
+	/// out of the team between calls. The mutex is what makes the pool that travels safe: a call on a
+	/// handle another thread is using waits for it to hand the pool back. A call nested in another call
+	/// (see [`InCall`]) never reaches the pool, so it takes no lock.
 	fn with_par<R>(&self, f: impl FnOnce(faer::Par<'_>) -> R) -> R {
 		// a call made from inside another call (a C callback calling back into this API) cannot have the
 		// pool: it runs sequentially, where waiting for the mutex this thread holds would never end
@@ -2762,6 +2764,8 @@ pub unsafe extern "C" fn libfaer_v0_23_alloc(
 /// * **A callback must not nest a parallel call.** An operation called from inside another operation
 ///   on the same thread (the `SchurParams` callbacks, for one) runs sequentially: it gets no team,
 ///   where waiting for the pool its caller holds would never end. It is correct, just not parallel.
+///   Such a call takes no lock, so the turn-taking above does not order it against another thread
+///   using the same handle: a nested call runs whenever it is made.
 /// * **[`libfaer_v0_23_team_set_threads`] and [`libfaer_v0_23_team_destroy`] are exclusive**: no
 ///   operation may be running on the handle, on any thread, while they are called.
 /// * **After `destroy` the handle is gone.** Any later operation, `set_threads` or second `destroy`
@@ -3229,35 +3233,50 @@ mod tests {
 		assert!(close(&expected, &outer_c), "the handle was unusable after a nested call");
 	}
 
-	/// faer#333: the handle owns its pool, so a call on a reused handle cannot pay for a pool. The
-	/// measured quantity is the allocations the calling thread makes for one call; a pool is what the
-	/// abandoned per-call shape built, and its cheapest possible cost is a dozen allocations, so the
-	/// cheapest of several consecutive calls is what separates the two shapes: reuse leaves a call that
-	/// allocates only threadteam's reservation, and a handle that rebuilt its pool per call has no such
-	/// call. The cheapest rather than the mean, because a member of the pool may park between two calls
-	/// and make the next reservation take the cold path (6 allocations here), which is still not a pool.
+	/// faer#333: a handle reused for N calls pays for its pool once, so the calls after the first cost
+	/// what one reservation costs; a handle built per call pays that pool again on every call. Both
+	/// shapes are measured in one run, so they see the same threadteam thread-cache state: the first
+	/// call of a pool is threadteam's first acquisition of it (cold on the members' own state, thousands
+	/// of allocations here) and the pool-building shape pays that on every call, so the reused handle's
+	/// first call is excluded and its tail is compared with the whole of the pool-per-call shape. The
+	/// comparison is a sum over the same number of calls, so no single call being warm or cold decides
+	/// it. Before the pool moved into the handle both shapes cost the same, per call.
 	#[test]
 	fn a_reused_handle_builds_its_pool_once() {
 		let _turn = TEAM_TURN.lock().unwrap_or_else(|e| e.into_inner());
 		let width = cpus().clamp(2, 4);
 		let n = 64;
-		let calls = 8;
+		const CALLS: usize = 8;
 		let a = faer::Mat::<f64>::from_fn(n, n, |i, j| ((i * 31 + j * 7) % 13) as f64 - 6.0);
 		let b = faer::Mat::<f64>::from_fn(n, n, |i, j| ((i * 5 + j * 11) % 17) as f64 - 8.0);
 		let mut c = faer::Mat::<f64>::zeros(n, n);
+
+		// one handle, CALLS calls: the first is the pool's first acquisition, the rest are its tail
 		let team = unsafe { libfaer_v0_23_team_create(width) };
-		let mut per_call = Vec::with_capacity(calls);
-		for _ in 0..calls {
+		let mut per_call = [0usize; CALLS];
+		for slot in &mut per_call {
 			alloc_probe::reset();
 			matmul(&mut c, &a, &b, team);
-			per_call.push(alloc_probe::take());
+			*slot = alloc_probe::take();
 		}
+
+		// CALLS handles of one call each (the same number of calls, one pool built for each)
+		alloc_probe::reset();
+		for _ in 0..CALLS {
+			let team = unsafe { libfaer_v0_23_team_create(width) };
+			matmul(&mut c, &a, &b, team);
+			unsafe { libfaer_v0_23_team_destroy(team) };
+		}
+		let rebuilt = alloc_probe::take();
+
 		unsafe { libfaer_v0_23_team_destroy(team) };
-		let cheapest = *per_call.iter().min().unwrap_or(&usize::MAX);
-		println!("width {width}: allocations per call on one handle {per_call:?}");
+		let reused: usize = per_call[1..].iter().sum();
+		println!(
+			"width {width}: per call on one handle {per_call:?} (tail {reused}), {CALLS} handles of one call {rebuilt}"
+		);
 		assert!(
-			cheapest <= 3,
-			"the cheapest of {calls} calls on a reused handle still cost {cheapest} allocations ({per_call:?}): the handle builds its pool per call"
+			2 * reused < rebuilt,
+			"the tail of one handle cost {reused} allocations against {rebuilt} for the same calls on a pool per call: the handle builds its pool per call"
 		);
 	}
 

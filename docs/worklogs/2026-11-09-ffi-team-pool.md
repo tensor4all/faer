@@ -44,13 +44,17 @@ rather than per handle, which is the wrong shape for a caller that makes many ca
 ## Verification conclusions and constraints
 
 - Acceptance is the allocation count, measured on the real C entry points:
-  `tests::a_reused_handle_builds_its_pool_once` counts the allocations the calling thread makes, once
-  per call, on one live handle. Before this change every call cost 13 allocations (the old handle
-  built and dropped a pool per call, the issue's own reference measurement: 140 for 10 calls); after
-  it, the first call costs the pool's construction and every later call 1 (threadteam's warm
-  reservation). The test asserts on the cheapest of eight calls, so a pool rebuild on every call
-  cannot pass, and a member that parks and makes the next reservation take the cold six-allocation
-  path cannot fail.
+  `tests::a_reused_handle_builds_its_pool_once` counts the allocations the calling thread makes for
+  each call, then compares two shapes over the same number of calls in one run: one handle for eight
+  calls, and eight handles of one call each. The first call of a pool is threadteam's first
+  *acquisition* of it — thousands of allocations, because it builds the members' own state — and the
+  pool-per-call shape pays that on every call, so the reused handle's first call is excluded and its
+  tail compared with the whole of the other shape. Measured here: tail 7 allocations against 158, and
+  with the implementation reverted to `origin/main` (the test kept) tail 91 against 112, which fails
+  the assertion. The comparison is a sum, so no single call being warm (1 allocation) or cold
+  (6, after a member parks) decides it; the margin is over ten times.
+- The pool itself is built by `team_create`, not by the first call, and `create` is outside the
+  measured region: what the first call pays is the acquisition.
 - The probe counts only the calling thread. The crate's tests run in parallel and a pool member
   allocates on its own thread, so a global counter would mix tests.
 - The existing affinity test `the_team_handle_is_entered_per_call_and_left_again` still passes: the
@@ -58,7 +62,11 @@ rather than per handle, which is the wrong shape for a caller that makes many ca
   the observable that would fail if the handle held a team instead of a pool.
 - `tests::two_threads_share_one_handle_and_take_turns` counts the calls inside the team from three
   threads and requires the maximum to be one, which is the serialisation the docs promise; the
-  products alone would not show it, since a per-call pool produces them too.
+  products alone would not show it, since a per-call pool produces them too. It forces no overlap
+  (the calls sleep to make one likely), so a fully serialised schedule would also pass it: it can
+  show that two calls were never inside the team at once, not that they were ever offered the chance.
+  A call nested in another call is the exception the docs state: it never takes the lock, so it is not
+  ordered against another thread using the same handle.
   `tests::the_handle_is_shareable` fails to compile if the handle stops being `Send + Sync`.
 - `tests::a_nested_call_runs_sequentially` is the reentrancy guard's test. Without the guard the
   nested call waits for a mutex the same thread holds, so the regression is a hang (measured: the test

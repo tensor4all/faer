@@ -6340,6 +6340,8 @@ struct FaerV0_24_Layout libfaer_v0_23_svd_scratch_fx128(size_t nrows,
  * * **A callback must not nest a parallel call.** An operation called from inside another operation
  *   on the same thread (the `SchurParams` callbacks, for one) runs sequentially: it gets no team,
  *   where waiting for the pool its caller holds would never end. It is correct, just not parallel.
+ *   Such a call takes no lock, so the turn-taking above does not order it against another thread
+ *   using the same handle: a nested call runs whenever it is made.
  * * **[`libfaer_v0_23_team_set_threads`] and [`libfaer_v0_23_team_destroy`] are exclusive**: no
  *   operation may be running on the handle, on any thread, while they are called.
  * * **After `destroy` the handle is gone.** Any later operation, `set_threads` or second `destroy`
