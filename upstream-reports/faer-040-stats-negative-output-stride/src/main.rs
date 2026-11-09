@@ -29,7 +29,10 @@ fn main() {
         row_varm(vo.as_mut(), owned_cols.as_ref(), mo.as_ref(), nan);
         println!("row_mean {nan:?}: view {:?}  owned {:?}", mv, mo);
         println!("row_varm {nan:?}: view {:?}  owned {:?}", vv, vo);
-        if mv != mo || vv != vo {
+        if mv != mo {
+            failures += 1;
+        }
+        if vv != vo {
             failures += 1;
         }
     }
@@ -46,7 +49,10 @@ fn main() {
         col_varm(vo.as_mut(), owned_rows.as_ref(), mo.as_ref(), nan);
         println!("col_mean {nan:?}: view {:?}  owned {:?}", mv, mo);
         println!("col_varm {nan:?}: view {:?}  owned {:?}", vv, vo);
-        if mv != mo || vv != vo {
+        if mv != mo {
+            failures += 1;
+        }
+        if vv != vo {
             failures += 1;
         }
     }

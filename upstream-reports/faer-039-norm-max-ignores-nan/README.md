@@ -15,7 +15,7 @@ The program calls `norm_max` on each case, prints the expected and the actual va
 
 | case | route taken inside `norm_max` | expected | `faer` 0.24.4, x86_64 |
 |---|---|---|---|
-| 1x2 row-major, one NaN | SIMD kernel | NaN | **1** |
+| 1x2 owned matrix, one NaN | SIMD kernel | NaN | **1** |
 | 2-vector, one NaN | SIMD kernel | NaN | **1** |
 | 2-vector `c64`, NaN real part | SIMD kernel | NaN | **1** (aarch64: **0**) |
 | 2-vector `c64`, NaN imaginary part | SIMD kernel | NaN | **1** |
@@ -29,7 +29,7 @@ The program calls `norm_max` on each case, prints the expected and the actual va
 
 The NaN is lost in the contiguous SIMD kernel, in the split (the 129-element row shows the split losing it, but not that the combine is the only cause), in the strided row and in the complex cases, so all three branches of `norm_max` are wrong. The strided row is the case that exercises the scalar fallback, and that branch is reachable from a standalone program: `norm_max` transposes the view when `ncols() > 1 && col_stride().unsigned_abs() == 1` (`:60-62`) and then takes the SIMD route only when `try_as_col_major()` accepts the view, i.e. when its row stride is 1 (`mat/matref.rs:1448`); every other view falls through to the scalar loop at `:118-126`.
 
-`RowRef::norm_max` reaches that loop through its own view: `RowRef::as_mat` is `transpose().as_mat().transpose()` (`row/rowref.rs:422-424`), and `ColRef::as_mat` gives the matrix it builds a column stride of zero (`col/colref.rs:465-477`). A row of the column-major `m` in this program therefore becomes a 1 x 3 view with **row stride 0** and column stride `m.col_stride() = 2`: `:60-62` does not transpose it (its column stride is not 1), and `try_as_col_major` rejects it (its row stride is not 1), so `m.row(1).norm_max()` runs the scalar loop. A row of a *row-major* matrix, whose stride is 1, is transposed at `:60-62` into a contiguous column instead and does take the SIMD route.
+`RowRef::norm_max` reaches that loop through its own view: `RowRef::as_mat` is `transpose().as_mat().transpose()` (`row/rowref.rs:422-424`), and `ColRef::as_mat` gives the matrix it builds a column stride of zero (`col/colref.rs:465-477`). A row of the column-major `m` in this program therefore becomes a 1 x 3 view with **row stride 0** and column stride `m.col_stride() = 8` — an owned `f64` allocation is padded to eight elements per column for 64-byte alignment, and the row view inherits that stride (measured: `(1, 8)`, row view `(8, 0)`): `:60-62` does not transpose it (its column stride is not 1), and `try_as_col_major` rejects it (its row stride is not 1), so `m.row(1).norm_max()` runs the scalar loop. A row of a *row-major* matrix, whose stride is 1, is transposed at `:60-62` into a contiguous column instead and does take the SIMD route.
 
 The table was recorded on an x86_64 Linux host with `cargo run --locked`; the aarch64 macOS run this entry was first recorded on agrees on every row except the one marked above.
 
