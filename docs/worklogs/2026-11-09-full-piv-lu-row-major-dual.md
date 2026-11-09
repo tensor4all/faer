@@ -106,9 +106,11 @@ Per-stage timers inside `lu_in_place_unblocked` (local patch, not committed):
   the guard; the allocation test shows that for `(100, 1)` and the adaptation test
   covers reversed rows for correctness. Their speed was **not measured**; the timed
   cells are contiguous row-major only.
-- **Measurement 2 (the one that covers the merged code)**: the source of `32c615f`
-  (clean committed tree; `faer/src` tree `38ce727`, unchanged by the later doc-only
-  commits) against `main` `b16d6b8`, both built into fbench `01a1cb8` with the same
+- **Measurement 2 (the guard as merged, before the tie fix)**: the source of `32c615f`
+  (clean committed tree; `faer/src` tree `38ce727`). `63790b0` then changed `faer/src`
+  again (the `best_score` tie fix, one more mask per accumulator merge, and doc
+  comments); that head was **not re-timed**, so the numbers below do not cover it.
+  It was measured against `main` `b16d6b8`, both built into fbench `01a1cb8` with the same
   one-line local `set_threads` patch (returns Ok for `NAME == "none"`), family
   `full_piv_lu`, row `faer-fork`, the `in_place` line, `--reps 5 --prime-ms 250
   --statistic median`. Cells: square 64, 80, 96, 112, 120, 127 (changed) and 128, 256
