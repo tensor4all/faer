@@ -120,11 +120,18 @@ fn hessenberg_to_qz_unblocked<T: ComplexField>(
 											.get_mut(.., jch + 1..ilastm + 1)
 											.two_rows_mut(jch, jch + 1);
 										rot(c.copy(), s.copy(), x, y);
-										if let Some(mut Q) = Q.rb_mut() {
-											let (x, y) = Q
-												.rb_mut()
-												.two_rows_mut(jch, jch + 1);
-											rot(c.copy(), s.copy(), x, y);
+										// the rotation acts on rows `jch, jch + 1` of `H`
+										// and `T`, so `Q` takes its adjoint on the right:
+										// columns `jch, jch + 1`, with `conj(s)` (faer#324)
+										if let Some(Q) = Q.rb_mut() {
+											let (x, y) =
+												Q.two_cols_mut(jch, jch + 1);
+											rot(
+												c.copy(),
+												s.conj(),
+												x.transpose_mut(),
+												y.transpose_mut(),
+											);
 										}
 										if ilazr2 {
 											H[(jch, jch - 1)] =
@@ -1571,6 +1578,91 @@ mod tests {
 				for i in j + 1..n {
 					assert!(A_clone[(i, j)] == c64::ZERO);
 				}
+			}
+		}
+	}
+	/// faer#324: a zero on the diagonal of `B` at `j`, with `j == ilo` or a
+	/// negligible `A[(j, j - 1)]`, is chased to the bottom by rotations applied
+	/// from the left. those rotations must update the columns of `Q`; they used
+	/// to rotate its rows, so `Q` stayed unitary but no longer satisfied
+	/// `A = Q S Z^H`, and every left eigenvector built from it was wrong.
+	fn check_unblocked_zero_chase<T: ComplexField>(
+		A: Mat<T>,
+		B: Mat<T>,
+		zero_at: usize,
+	) {
+		let n = A.nrows();
+		let mut A = A;
+		let mut B = B;
+		for j in 0..n {
+			for i in j + 2..n {
+				A[(i, j)] = zero();
+			}
+			for i in j + 1..n {
+				B[(i, j)] = zero();
+			}
+		}
+		B[(zero_at, zero_at)] = zero();
+		if zero_at > 0 {
+			A[(zero_at, zero_at - 1)] = zero();
+		}
+		let mut Q = Mat::<T>::identity(n, n);
+		let mut Z = Mat::<T>::identity(n, n);
+		let mut S = A.clone();
+		let mut P = B.clone();
+		let mut alpha = Col::<T>::zeros(n);
+		let mut beta = Col::<T>::zeros(n);
+		hessenberg_to_qz_unblocked(
+			0,
+			n - 1,
+			S.as_mut(),
+			P.as_mut(),
+			Some(Q.as_mut()),
+			Some(Z.as_mut()),
+			alpha.as_mut(),
+			beta.as_mut(),
+			false,
+		);
+		// LAPACK's QZ tests divide by `n * ulp` and accept ratios up to 30
+		let ref tol = from_f64::<T::Real>(10.0 * n as f64) * eps::<T::Real>();
+		let I = Mat::<T>::identity(n, n);
+		assert!((Q.adjoint() * &Q - &I).norm_max() < *tol);
+		assert!((Z.adjoint() * &Z - &I).norm_max() < *tol);
+		assert!((&Q * &S * Z.adjoint() - &A).norm_max() < tol * A.norm_max());
+		assert!((&Q * &P * Z.adjoint() - &B).norm_max() < tol * B.norm_max());
+		for j in 0..n {
+			for i in j + 1..n {
+				::core::assert!(
+					S[(i, j)] == zero::<T>() && P[(i, j)] == zero::<T>()
+				);
+			}
+		}
+		::core::assert_eq!(
+			beta.iter().filter(|b| **b == zero::<T>()).count(),
+			1
+		);
+	}
+	#[test]
+	fn unblocked_zero_chase_updates_q_columns() {
+		let rng = &mut StdRng::seed_from_u64(324);
+		for n in [2, 3, 6, 12] {
+			let rand = stats::CwiseMatDistribution {
+				nrows: n,
+				ncols: n,
+				dist: ComplexDistribution::new(StandardNormal, StandardNormal),
+			};
+			let A: Mat<c64> = rand.sample(rng);
+			let B: Mat<c64> = rand.sample(rng);
+			let to_c32 = |M: &Mat<c64>| {
+				Mat::from_fn(n, n, |i, j| {
+					c32::new(M[(i, j)].re as f32, M[(i, j)].im as f32)
+				})
+			};
+			// `zero_at == 0` takes the `j == ilo` path, `zero_at == n / 2` the
+			// negligible subdiagonal path
+			for zero_at in [0, n / 2] {
+				check_unblocked_zero_chase(A.clone(), B.clone(), zero_at);
+				check_unblocked_zero_chase(to_c32(&A), to_c32(&B), zero_at);
 			}
 		}
 	}

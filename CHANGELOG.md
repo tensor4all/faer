@@ -12,6 +12,11 @@ Changes since `t4a-faer` 0.32.0 (tag `faer-v0.32.0`). Numbers are tensor4all/fae
 
 ## Correctness
 
+- `gevd_cplx` returned wrong left eigenvectors for some pencils with an infinite eigenvalue (a zero on the diagonal of `B` during the QZ
+  iteration, `n < 15`), while the eigenvalues and the right eigenvectors were right. The rotations that chase that zero to the bottom were
+  applied to the rows of `Q` instead of its columns. Whether a pencil reaches that branch depends on rounding, so the same input could fail on
+  x86-64 with AVX2 and pass on aarch64 (#324).
+
 - `stats::col_mean` and `stats::col_varm` wrote their results in reverse order when the input had a negative row stride (for example
   `mat.reverse_rows()`), and `row_mean`/`row_varm` did the same for a negative column stride (`mat.reverse_cols()`). Both `NanHandling` modes
   were affected, and `varm` also subtracted the mean of the mirrored row. The input rows were reversed to get a positive stride, but `out` and the
