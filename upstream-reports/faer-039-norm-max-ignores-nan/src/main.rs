@@ -13,6 +13,15 @@ fn main() {
     let z = Col::<c64>::from_fn(2, |i| [c64::new(1.0, 0.0), c64::new(f64::NAN, 0.0)][i]);
     let zi = Col::<c64>::from_fn(2, |i| [c64::new(1.0, 0.0), c64::new(0.0, f64::NAN)][i]);
     let m = Mat::<f64>::from_fn(2, 3, |i, j| if (i, j) == (1, 1) { f64::NAN } else { 1.0 });
+    // The layout the route column of the table depends on. An owned matrix keeps
+    // its column stride at the 64 byte alignment of its allocation, not at nrows.
+    println!(
+        "m: row_stride {} col_stride {}; m.row(1).as_mat(): row_stride {} col_stride {}",
+        m.row_stride(),
+        m.col_stride(),
+        m.row(1).as_mat().row_stride(),
+        m.row(1).as_mat().col_stride(),
+    );
     let only = Col::<f64>::from_fn(1, |_| f64::NAN);
     let big = Col::<f64>::from_fn(100, |i| if i == 57 { f64::NAN } else { i as f64 });
     // 129 elements is the first length whose column reaches the pairwise split
@@ -25,7 +34,7 @@ fn main() {
             failures += 1;
         }
     };
-    check("1x2 row-major, one NaN", a.norm_max());
+    check("1x2 column-major, one NaN", a.norm_max());
     check("2-vector, one NaN", v.norm_max());
     check("2-vector c64, NaN real part", z.norm_max());
     check("2-vector c64, NaN imag part", zi.norm_max());

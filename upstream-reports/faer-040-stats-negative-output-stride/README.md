@@ -11,7 +11,7 @@
 cargo run
 ```
 
-The program runs each reduction on a negative-stride view and on an owned copy of that view, and exits with status 1 when the two disagree. In 0.24.4 `row_*` writes one value per column (`out.ncols() == mat.ncols()`) and `col_*` one per row (`out.nrows() == mat.nrows()`), so the axis that must be reversed with the input is the one that carries the output.
+The program runs each reduction on a negative-stride view and on an owned copy of that view, counts the calls where the two disagree, and exits with status 1 when any do. That is 8 calls — 2 operations x 2 axes x 2 `NanHandling` values — and it counts the means and the variances separately, so a fix to one of the two changes the total. On 0.24.4 all 8 disagree and the program prints `WRONG: 8 of 8 calls disagree between a negative-stride view and its owned copy (4 mean, 4 variance)`. In 0.24.4 `row_*` writes one value per column (`out.ncols() == mat.ncols()`) and `col_*` one per row (`out.nrows() == mat.nrows()`), so the axis that must be reversed with the input is the one that carries the output.
 
 | call | expected (owned copy) | negative-stride view, `faer` 0.24.4 |
 |---|---|---|

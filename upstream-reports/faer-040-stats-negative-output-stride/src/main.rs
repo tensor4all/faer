@@ -11,7 +11,9 @@ use faer::stats::{col_mean, col_varm, row_mean, row_varm, NanHandling};
 use faer::{Col, Mat, Row};
 
 fn main() {
-    let mut failures = 0usize;
+    // Counted per call: a fix to the means alone and a fix to the variances alone
+    // each change the total, so the number says which of the two still disagrees.
+    let (mut mean_failures, mut var_failures) = (0usize, 0usize);
 
     // Column j holds [0, 2(j+1)]: means 1, 2, 3, 4 and variances 2, 8, 18, 32.
     let a = Mat::<f64>::from_fn(2, 4, |i, j| (j + 1) as f64 * if i == 0 { 0.0 } else { 2.0 });
@@ -30,10 +32,10 @@ fn main() {
         println!("row_mean {nan:?}: view {:?}  owned {:?}", mv, mo);
         println!("row_varm {nan:?}: view {:?}  owned {:?}", vv, vo);
         if mv != mo {
-            failures += 1;
+            mean_failures += 1;
         }
         if vv != vo {
-            failures += 1;
+            var_failures += 1;
         }
     }
 
@@ -50,15 +52,18 @@ fn main() {
         println!("col_mean {nan:?}: view {:?}  owned {:?}", mv, mo);
         println!("col_varm {nan:?}: view {:?}  owned {:?}", vv, vo);
         if mv != mo {
-            failures += 1;
+            mean_failures += 1;
         }
         if vv != vo {
-            failures += 1;
+            var_failures += 1;
         }
     }
 
+    let failures = mean_failures + var_failures;
     if failures > 0 {
-        println!("\nWRONG: {failures} reduction(s) disagree between a negative-stride view and its owned copy");
+        println!(
+            "\nWRONG: {failures} of 8 calls disagree between a negative-stride view and its owned copy ({mean_failures} mean, {var_failures} variance)"
+        );
         std::process::exit(1);
     }
 }
