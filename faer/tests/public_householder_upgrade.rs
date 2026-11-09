@@ -133,8 +133,14 @@ fn input_factor<T: Scalar>(v: &Mat<T>, prev: usize) -> Mat<T> {
 
 /// Checks every entry of the upgraded factor separately: the within-block Gram coefficients
 /// against the `c64` product within the rounding bound, and the denominators, the lower triangle
-/// and the between-block entries for being exactly what the caller passed.
-fn check<T: Scalar>(label: &str, v: &Mat<T>, factor: &Mat<T>, block: usize) {
+/// and the between-block entries for being exactly what the caller passed. Returns the report of
+/// one failing shape, so a test can go on and report every shape that fails.
+fn check<T: Scalar>(
+	label: &str,
+	v: &Mat<T>,
+	factor: &Mat<T>,
+	block: usize,
+) -> Option<String> {
 	let n = v.ncols();
 	let m = v.nrows();
 	let sentinel = T::new(SENTINEL.0, SENTINEL.1);
@@ -165,16 +171,23 @@ fn check<T: Scalar>(label: &str, v: &Mat<T>, factor: &Mat<T>, block: usize) {
 			}
 		}
 	}
-	assert!(
-		wrong.is_empty(),
-		"{label} [{}]: {} wrong entries:\n{}",
-		core::any::type_name::<T>(),
-		wrong.len(),
-		wrong.join("\n")
-	);
+	(!wrong.is_empty()).then(|| {
+		format!(
+			"{label} [{}]: {} wrong entries:\n{}",
+			core::any::type_name::<T>(),
+			wrong.len(),
+			wrong.join("\n")
+		)
+	})
 }
 
-fn run<T: Scalar>(m: usize, n: usize, block: usize, prev: usize, par: Par) {
+fn run<T: Scalar>(
+	m: usize,
+	n: usize,
+	block: usize,
+	prev: usize,
+	par: Par,
+) -> Option<String> {
 	let v = basis::<T>(m, n);
 	let mut factor = input_factor(&v, prev);
 	upgrade_householder_factor(factor.as_mut(), v.as_ref(), block, prev, par);
@@ -183,6 +196,16 @@ fn run<T: Scalar>(m: usize, n: usize, block: usize, prev: usize, par: Par) {
 		&v,
 		&factor,
 		block,
+	)
+}
+
+/// fails with the report of every failing shape, not only the first
+fn assert_all_pass(failures: Vec<String>) {
+	assert!(
+		failures.is_empty(),
+		"{} failing shapes:\n{}",
+		failures.len(),
+		failures.join("\n")
 	);
 }
 
@@ -208,9 +231,14 @@ const SEQ_CASES: &[(usize, usize, usize, usize)] = &[
 ];
 
 fn seq_all<T: Scalar>() {
-	for &(m, n, block, prev) in SEQ_CASES {
-		run::<T>(m, n, block, prev, Par::Seq);
-	}
+	assert_all_pass(
+		SEQ_CASES
+			.iter()
+			.filter_map(|&(m, n, block, prev)| {
+				run::<T>(m, n, block, prev, Par::Seq)
+			})
+			.collect(),
+	);
 }
 
 #[test]
@@ -303,10 +331,12 @@ fn several_blocks_on_a_team() {
 		(4096, 37, 8, 4, true),
 		(4096, 70, 16, 8, true),
 	];
-	fn all<T: Scalar>(mut par: Par, width: usize) {
+	fn all<T: Scalar>(mut par: Par, width: usize, failures: &mut Vec<String>) {
 		for &(m, n, block, prev, dispatch) in TEAM_CASES {
 			let _ = stats::take();
-			run::<T>(m, n, block, prev, par.reborrow());
+			if let Some(report) = run::<T>(m, n, block, prev, par.reborrow()) {
+				failures.push(format!("width={width} {report}"));
+			}
 			let evidence = stats::take();
 			assert!(
 				!dispatch
@@ -318,14 +348,16 @@ fn several_blocks_on_a_team() {
 			);
 		}
 	}
+	let mut failures = Vec::new();
 	for width in [2, 4] {
 		faer::team::with_team(width, |mut par| {
 			stats::enable(true);
-			all::<f32>(par.reborrow(), width);
-			all::<f64>(par.reborrow(), width);
-			all::<c32>(par.reborrow(), width);
-			all::<c64>(par.reborrow(), width);
+			all::<f32>(par.reborrow(), width, &mut failures);
+			all::<f64>(par.reborrow(), width, &mut failures);
+			all::<c32>(par.reborrow(), width, &mut failures);
+			all::<c64>(par.reborrow(), width, &mut failures);
 			stats::enable(false);
 		});
 	}
+	assert_all_pass(failures);
 }
