@@ -228,8 +228,20 @@ fn residuals<T: ComplexField>(
 			den > 0.0,
 			"column {j}: residual denominator {den:e}, ||A|| = {na:e}, ||B|| = {nb:e}, alpha = {al:?}, beta = {be:?}"
 		);
-		left = left.max(nlu / (nu * den));
-		right = right.max(nrv / (nv * den));
+		let (lj, rj) = (nlu / (nu * den), nrv / (nv * den));
+		// `f64::max` returns the other operand when one is `NaN`, so a `NaN`
+		// folded into `left`/`right` would leave it unchanged and read as a
+		// perfect residual instead of failing.
+		assert!(
+			lj.is_finite(),
+			"column {j}: left residual {lj:e} (numerator {nlu:e}, ||u|| {nu:e}, denominator {den:e})"
+		);
+		assert!(
+			rj.is_finite(),
+			"column {j}: right residual {rj:e} (numerator {nrv:e}, ||v|| {nv:e}, denominator {den:e})"
+		);
+		left = left.max(lj);
+		right = right.max(rj);
 	}
 	(left, right, beta_min)
 }
