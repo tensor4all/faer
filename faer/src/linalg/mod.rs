@@ -639,12 +639,25 @@ mod tests {
 		cm: &[T],
 		rm: &[T],
 	) {
-		let flipped = flipped && m > 0 && n > 0;
 		// Above the copy floor both orders take the same arithmetic and must
 		// agree bit for bit; below it the row-major side factors in place
 		// through a strided panel, which is the same matrix but a different
 		// summation order.
 		let exact = crate::linalg::row_major_copy_pays(m, n);
+		compare_row_major_exact_if(m, n, flipped, what, cm, rm, exact);
+	}
+	/// [`compare_row_major`] with the exactness given by the caller, for an entry
+	/// point whose own guard decides when the copy is taken.
+	fn compare_row_major_exact_if<T: Entry>(
+		m: usize,
+		n: usize,
+		flipped: bool,
+		what: &str,
+		cm: &[T],
+		rm: &[T],
+		exact: bool,
+	) {
+		let flipped = flipped && m > 0 && n > 0;
 		for j in 0..n {
 			for i in 0..m {
 				let k = if flipped { m - 1 - i } else { i };
@@ -825,7 +838,18 @@ mod tests {
 				&mut ci_rm,
 				rm_strides(m, n, flipped),
 			);
-			compare_row_major(m, n, flipped, "full pivoting lu", &cm, &rm);
+			// bit for bit where the copy is taken; the square shapes below 128 go
+			// through the transpose dual instead (the same pivots, the complex
+			// products in another order)
+			compare_row_major_exact_if(
+				m,
+				n,
+				flipped,
+				"full pivoting lu",
+				&cm,
+				&rm,
+				flu::row_major_takes_the_copy(m, n),
+			);
 			same_index("full pivoting lu row perm", &p_cm, &p_rm);
 			same_index("full pivoting lu row perm inv", &pi_cm, &pi_rm);
 			same_index("full pivoting lu col perm", &c_cm, &c_rm);
@@ -862,6 +886,7 @@ mod tests {
 			(16, 16),
 			(17, 15),
 			(64, 64),
+			(127, 127),
 			(128, 128),
 			(300, 17),
 		] {

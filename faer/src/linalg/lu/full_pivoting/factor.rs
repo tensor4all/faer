@@ -571,6 +571,29 @@ pub fn lu_in_place_scratch<I: Index, T: ComplexField>(
 		.array(2)
 		.and(StackReq::new::<(usize, usize, T::Real)>(par.degree()))
 }
+/// Whether `lu_in_place` factors a row-major `nrows x ncols` matrix through a
+/// column-major copy rather than in place through the transpose dual
+/// (`lu_in_place_unblocked(.., transpose = true)`).
+///
+/// The copy is [`linalg::row_major_copy_pays`]'s (tall or square, at least
+/// `64 * 64` elements), less the square matrices below `128`. There the dual runs
+/// within 1.05x of a column-major input, so the copy -- two passes over `m * n`
+/// and an `m * n` buffer -- is a pure loss: `64 x 64` f64 one thread costs 1.24x
+/// a column-major input through the copy and 1.01x through the dual on Apple M5
+/// Max, 1.32x and 1.03x on Zen 5 (tensor4all/faer#314). From `128` up the dual's
+/// row scaling `A[(k, j)] *= inv` walks a strided row every step, one cache line
+/// per element, and the dual leaves the band: 1.09x at `512` and `1024` on four
+/// threads (M5), 1.11x at `128` and 1.08-1.27x from `256` on Zen 5 (the scaling
+/// alone goes from 0.22 to 3.26 ms at `1024`, one thread). On a tall matrix the dual also makes the long swap strided and the trailing block
+/// wide (1.4-1.9x), and off the square the dual leaves the 1.05x band early
+/// (`80 x 64`: 1.06x), so only the square shapes skip the copy.
+#[inline]
+pub(crate) fn row_major_takes_the_copy(nrows: usize, ncols: usize) -> bool {
+	nrows >= ncols
+		&& ncols > 1
+		&& linalg::row_major_copy_pays(nrows, ncols)
+		&& !(nrows == ncols && ncols < 128)
+}
 #[derive(Copy, Clone, Debug)]
 pub struct FullPivLuInfo {
 	pub transposition_count: usize,
@@ -598,13 +621,11 @@ pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 			"LU with full pivoting prefers column-major or row-major matrix. Found matrix with generic strides."
 		);
 	}
-	// Same row-major adaptation as the partial-pivoting factorisation above.
+	// Same row-major adaptation as the partial-pivoting factorisation above, except
+	// on the small square shapes the transpose dual factors in place at the
+	// column-major speed.
 	let (M, N) = mat.shape();
-	if mat.row_stride().unsigned_abs() != 1
-		&& M >= N
-		&& N > 1
-		&& linalg::row_major_copy_pays(M, N)
-	{
+	if mat.row_stride().unsigned_abs() != 1 && row_major_takes_the_copy(M, N) {
 		let mut work = linalg::column_major_copy(mat.rb(), par.reborrow());
 		let mut work = MatMut::from_column_major_slice_mut(&mut work, M, N);
 		let ret = lu_in_place(
