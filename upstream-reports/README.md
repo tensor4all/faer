@@ -71,6 +71,24 @@ The sweep of the three is `cd upstream-reports && for d in faer-039-* faer-040-*
 Each README states, in its first three lines, what goes wrong, for which input and in which version.
 It then gives the command, a table of expected and actual output, the cause with file and line in the upstream source, and how this fork fixed it.
 
+## Performance reports, at a glance
+
+The defect table above answers "is the value wrong". Its sibling answers "is the same code path needlessly slow", and it is
+easy to miss one level down, so the three reports that are built today are listed here as well. A performance entry's symptom is
+always a **time or a ratio**, never a wrong value, and its program asserts that the faster route produces the same data before it
+prints a time.
+
+| Report | What is slow | Host-specific? |
+|---|---|---|
+| [perf-faer-001](performance/perf-faer-001-qr-row-major/) | QR of a row-major matrix is up to 31 times slower than copying it to column major first | no |
+| [perf-faer-002](performance/perf-faer-002-trsm-aliased-rhs/) | The unit lower triangular solve is up to 2.6 times slower at a power-of-two stride | no |
+| [perf-gemm-001](performance/perf-gemm-001-apple-sme-unused/) | `gemm` does not use the matrix unit of an Apple M4 or M5 | yes, needs SME |
+
+[`performance/README.md`](performance/README.md) is the authoritative page: it carries the confirmed upstream versions, the fix in
+this fork, whether upstream has fixed it, the measurement contract, and the inventory of claims that are not yet reports. This table
+deliberately does not repeat those columns — two copies of a version number drift, and the copy that drifts is the one a reader trusts.
+
+
 Upstream sources:
 [faer](https://codeberg.org/sarah-quinones/faer),
 [private-gemm-x86](https://github.com/sarah-quinones/gemm-x64-v2).
