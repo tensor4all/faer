@@ -195,7 +195,9 @@ pub fn upgrade_householder_factor<T: ComplexField>(
 			block_size > prev_block_size,
 			block_size % prev_block_size == 0,
 		));
-		let mid = block_count / 2;
+		// a column offset on a block boundary, so neither half cuts through a target block
+		// (tensor4all/faer#265: `block_count / 2` alone counts blocks, not columns)
+		let mid = (block_count / 2) * block_size;
 		let (tau_tl, _, _, tau_br) = householder_factor.split_at_mut(mid, mid);
 		let (basis_left, basis_right) = essentials.split_at_col(mid);
 		let basis_right = basis_right.split_at_row(mid).1;
