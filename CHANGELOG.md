@@ -13,7 +13,8 @@ Changes since `t4a-faer` 0.32.0 (tag `faer-v0.32.0`). Numbers are tensor4all/fae
 ## Correctness
 
 - `gevd_cplx` returned wrong left eigenvectors for some pencils with an infinite eigenvalue (a zero on the diagonal of `B` during the QZ
-  iteration, `n < 15`), while the eigenvalues and the right eigenvectors were right. The rotations that chase that zero to the bottom were
+  iteration's unblocked path, which the default parameters run for `n < max(15, blocking_threshold)`, i.e. `n < 75`, and which the blocked path
+  also ends in), while the eigenvalues and the right eigenvectors were right. The rotations that chase that zero to the bottom were
   applied to the rows of `Q` instead of its columns. Whether a pencil reaches that branch depends on rounding, so the same input could fail on
   x86-64 with AVX2 and pass on aarch64 (#324).
 

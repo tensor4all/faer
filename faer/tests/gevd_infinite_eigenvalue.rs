@@ -1,14 +1,15 @@
 //! faer#324: `gevd_cplx` returned wrong left eigenvectors for a pencil with an
 //! infinite eigenvalue, while its eigenvalues and right eigenvectors were right.
 //!
-//! When the complex QZ iteration (`hessenberg_to_qz_unblocked`, the path for
-//! `n < 15`) finds a zero on the diagonal of `B` at `j == ilo` or below a
-//! negligible subdiagonal of `A`, it chases that zero to the bottom with
-//! rotations applied to rows `jch, jch + 1` of `A` and `B`. `Q` must then
-//! take the adjoint rotation on columns `jch, jch + 1`; it rotated rows
-//! instead. `Q` stayed unitary but `A = Q S Z^H` no longer held, so every
-//! left eigenvector `Q * y` was wrong. `Z` was untouched, so the right
-//! eigenvectors were fine.
+//! When the complex QZ iteration's unblocked path (`hessenberg_to_qz_unblocked`,
+//! which the default parameters run for `n < max(15, blocking_threshold)`, i.e.
+//! `n < 75`, and which the blocked path also calls at the end) finds a zero on
+//! the diagonal of `B` at `j == ilo` or below a negligible subdiagonal of `A`,
+//! it chases that zero to the bottom with rotations applied to rows
+//! `jch, jch + 1` of `A` and `B`. `Q` must then take the adjoint rotation on
+//! columns `jch, jch + 1`; it rotated rows instead. `Q` stayed unitary but
+//! `A = Q S Z^H` no longer held, so every left eigenvector `Q * y` was wrong.
+//! `Z` was untouched, so the right eigenvectors were fine.
 //!
 //! Whether the iteration takes that branch depends on rounding: the issue's
 //! `c32` pencil takes it on x86-64 with AVX2/FMA and not on aarch64 or on
@@ -20,7 +21,8 @@
 //! The test checks, for every column, the relative residuals
 //! `||beta u^H A - alpha u^H B|| / (||u|| (|beta| ||A|| + |alpha| ||B||))` and
 //! `||beta A v - alpha B v|| / (||v|| (|beta| ||A|| + |alpha| ||B||))`,
-//! computed in `c64`, against `10 * n * eps` of the scalar type.
+//! computed in `c64`, against `10 * n * eps` of the scalar type. A `NaN`
+//! residual or `beta` fails the test instead of being dropped by `f64::max`.
 use faer::diag::Diag;
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::evd::ComputeEigenvectors;
@@ -191,14 +193,43 @@ fn residuals<T: ComplexField>(
 	let (mut left, mut right, mut beta_min) = (0.0f64, 0.0f64, f64::INFINITY);
 	for j in 0..n {
 		let (al, be) = (up(&s[j]), up(&beta[j]));
-		beta_min = beta_min.min(be.norm() / (al.norm() + be.norm()));
+		// `f64::max` and `f64::min` drop a NaN operand, so a `0/0` residual
+		// would leave the maximum untouched and read as a perfect one.
+		let ratio = be.norm() / (al.norm() + be.norm());
+		assert!(
+			ratio.is_finite(),
+			"column {j}: |beta|/(|alpha|+|beta|) = {ratio:e}, alpha = {al:?}, beta = {be:?}"
+		);
+		beta_min = beta_min.min(ratio);
 		let u = Mat::from_fn(n, 1, |i, _| up(&ul[(i, j)]));
 		let v = Mat::from_fn(n, 1, |i, _| up(&ur[(i, j)]));
 		let lu = u.adjoint() * &a * Scale(be) - u.adjoint() * &b * Scale(al);
 		let rv = &a * &v * Scale(be) - &b * &v * Scale(al);
 		let den = be.norm() * na + al.norm() * nb;
-		left = left.max(lu.norm_l2() / (u.norm_l2() * den));
-		right = right.max(rv.norm_l2() / (v.norm_l2() * den));
+		let (nlu, nrv) = (lu.norm_l2(), rv.norm_l2());
+		let (nu, nv) = (u.norm_l2(), v.norm_l2());
+		assert!(
+			nlu.is_finite(),
+			"column {j}: left residual numerator {nlu:e}, alpha = {al:?}, beta = {be:?}"
+		);
+		assert!(
+			nrv.is_finite(),
+			"column {j}: right residual numerator {nrv:e}, alpha = {al:?}, beta = {be:?}"
+		);
+		assert!(
+			nu > 0.0,
+			"column {j}: left eigenvector has norm {nu:e}, alpha = {al:?}, beta = {be:?}"
+		);
+		assert!(
+			nv > 0.0,
+			"column {j}: right eigenvector has norm {nv:e}, alpha = {al:?}, beta = {be:?}"
+		);
+		assert!(
+			den > 0.0,
+			"column {j}: residual denominator {den:e}, ||A|| = {na:e}, ||B|| = {nb:e}, alpha = {al:?}, beta = {be:?}"
+		);
+		left = left.max(nlu / (nu * den));
+		right = right.max(nrv / (nv * den));
 	}
 	(left, right, beta_min)
 }
