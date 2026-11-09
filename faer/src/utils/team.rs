@@ -900,6 +900,14 @@ mod tests {
 		assert_eq!(max_diff(inf.as_ref(), inf.as_ref()), 0.0);
 	}
 
+	/// The guard the manual comparisons rely on, which no `max_diff` test reaches: a NaN must not
+	/// fold into the running maximum.
+	#[test]
+	#[should_panic(expected = "non-finite difference")]
+	fn max_finite_rejects_a_nan() {
+		max_finite(0.0, f64::NAN);
+	}
+
 	/// A factorization too small to pay for a section asks the gates of a team token as the
 	/// sequential path does: the same factors to the last bit, and no section opened. The block
 	/// apply decides once at its top (`householder.rs`, the floor of the whole apply) and runs its
