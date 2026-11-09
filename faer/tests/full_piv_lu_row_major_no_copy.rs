@@ -279,29 +279,28 @@ fn first_pivot_c64(
 	(p[0], q[0], info.transposition_count)
 }
 
+
 /// `lu_in_place`, "Pivot ties" for a complex `T`: the index order is not part of
 /// the contract, and the score the search uses is visible. `(0, 1)` holds
 /// `3 + 4i` and `(2, 1)` holds `5`: `|re| + |im|` is larger at `(0, 1)`, the
 /// largest single component at `(2, 1)`. The scalar search compares the sum, the
-/// SIMD one (column-major input) the components, so the pivot differs by build
-/// (tensor4all/faer#342 review).
+/// SIMD one the components, so the pivot differs by backend; the SIMD entry
+/// point is taken only when the runtime CPU has one (tensor4all/faer#342 review).
 #[test]
 fn full_piv_lu_complex_tie_follows_the_search_score() {
-	use faer::traits::ComplexField;
+	// `SIMD_CAPABILITIES` is a compile-time target capability, not the runtime arch
+	// `pulp` dispatches on, so it cannot choose the expectation here.
+	#[cfg(target_arch = "x86_64")]
+	let simd = std::is_x86_feature_detected!("avx");
+	#[cfg(not(target_arch = "x86_64"))]
+	let simd = true;
 	let ties = [(0, 1, c64::new(3.0, 4.0)), (2, 1, c64::new(5.0, 0.0))];
-	let simd = const { <c64 as ComplexField>::SIMD_CAPABILITIES.is_simd() };
-	assert_eq!(
-		first_pivot_c64(16, 16, ties, false),
-		if simd { (2, 1, 2) } else { (0, 1, 1) }
-	);
-	// the same two entries swapped: both searches keep the larger component
-	assert_eq!(
-		first_pivot_c64(
-			16,
-			16,
-			[(0, 1, c64::new(5.0, 0.0)), (2, 1, c64::new(3.0, 4.0))],
-			false
-		),
-		(0, 1, 1)
-	);
+	let swapped = [(0, 1, c64::new(5.0, 0.0)), (2, 1, c64::new(3.0, 4.0))];
+	let (for_ties, for_swapped) = if simd {
+		((2, 1, 2), (0, 1, 1))
+	} else {
+		((0, 1, 1), (2, 1, 2))
+	};
+	assert_eq!(first_pivot_c64(16, 16, ties, false), for_ties);
+	assert_eq!(first_pivot_c64(16, 16, swapped, false), for_swapped);
 }

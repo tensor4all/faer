@@ -618,6 +618,15 @@ pub(crate) fn row_major_takes_the_copy(
 		&& linalg::row_major_copy_pays(nrows, ncols)
 		&& !(col_stride == 1 && nrows == ncols && ncols < 128)
 }
+/// `perf-warn`: whether neither stride walks a line, i.e. the input is neither
+/// column-major (`row_stride` 1) nor row-major (`col_stride` 1). Both preferred
+/// layouts factor at the same speed, so only a matrix that is neither warns;
+/// the predicate this replaced warned on every row-major input.
+#[cfg(any(feature = "perf-warn", test))]
+#[inline]
+pub(crate) fn has_generic_strides(row_stride: isize, col_stride: isize) -> bool {
+	row_stride.unsigned_abs() != 1 && col_stride.unsigned_abs() != 1
+}
 #[derive(Copy, Clone, Debug)]
 pub struct FullPivLuInfo {
 	pub transposition_count: usize,
@@ -676,9 +685,7 @@ pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 	params: Spec<FullPivLuParams, T>,
 ) -> (FullPivLuInfo, PermRef<'out, I>, PermRef<'out, I>) {
 	#[cfg(feature = "perf-warn")]
-	if (mat.col_stride().unsigned_abs() == 1
-		|| mat.row_stride().unsigned_abs() != 1)
-		&& crate::__perf_warn!(LU_WARN)
+	if has_generic_strides(mat.row_stride(), mat.col_stride()) && crate::__perf_warn!(LU_WARN)
 	{
 		log::warn!(
 			target : "faer_perf",
@@ -1810,5 +1817,17 @@ mod tests {
 		let b = ColRef::from_slice(&b);
 		let lu = A.full_piv_lu(Par::Seq);
 		assert!(lu.solve(b, Par::Seq).is_all_finite());
+	}
+
+	/// `perf-warn`: contiguous column-major and row-major inputs are the two
+	/// recommended layouts, so the warning fires only for a matrix that is neither.
+	/// The predicate this replaced warned on every row-major one.
+	#[test]
+	fn perf_warn_predicate_excludes_both_preferred_layouts() {
+		assert!(!has_generic_strides(1, 64)); // column-major
+		assert!(!has_generic_strides(64, 1)); // row-major
+		assert!(!has_generic_strides(-64, 1)); // reversed row-major
+		assert!(has_generic_strides(2, 130)); // neither strides a line
+		assert!(has_generic_strides(-2, -130));
 	}
 }
