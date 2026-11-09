@@ -228,7 +228,10 @@ fn residuals<T: ComplexField>(
 			den > 0.0,
 			"column {j}: residual denominator {den:e}, ||A|| = {na:e}, ||B|| = {nb:e}, alpha = {al:?}, beta = {be:?}"
 		);
-		let (lj, rj) = (nlu / (nu * den), nrv / (nv * den));
+		// Two divisions, not `nlu / (nu * den)`: the product overflows to
+		// infinity for a column with a huge norm, and the quotient is then 0,
+		// which reads as a perfect residual.
+		let (lj, rj) = ((nlu / nu) / den, (nrv / nv) / den);
 		// `f64::max` returns the other operand when one is `NaN`, so a `NaN`
 		// folded into `left`/`right` would leave it unchanged and read as a
 		// perfect residual instead of failing.
