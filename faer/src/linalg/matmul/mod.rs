@@ -2479,7 +2479,8 @@ mod tests {
 				// Scaled by the product itself, so the bound states a relative error: a
 				// near-zero entry is compared against the scale of the whole matrix rather
 				// than against a floor that would admit a much larger relative error. An
-				// all-zero reference leaves a zero bound, which demands exact equality.
+				// all-zero reference has no scale to be relative to; it is outside this test,
+				// and the assert below rejects it before any comparison.
 				let bound_of = |m: MatRef<'_, f64>| {
 					let scale = (0..90)
 						.flat_map(|j| (0..130).map(move |i| (i, j)))
