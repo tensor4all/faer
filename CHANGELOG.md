@@ -17,8 +17,8 @@ Changes since `t4a-faer` 0.32.0 (tag `faer-v0.32.0`). Numbers are tensor4all/fae
   `StackReq::or(colamd::order_scratch(..), ..)` either way, so the ordering was paid for twice. On the issue's reproducer (n = 2000,
   nnz = 7990, identity ordering, `--release`) the largest single allocation of a simplicial analysis drops from 332712 B, which was
   exactly the `colamd::order_scratch` request, to 239928 B, which is the analysis workspace (92784 B less); the supernodal arm still
-  allocates 468080 B, which did not change; the call site of that allocation was not traced, so
-  which helper it belongs to is not asserted here. The `None` path requests what it
+  allocates 468080 B, which did not change; that figure is #337's reported run and was not re-measured here, and its call site
+  was not traced, so which helper it belongs to is not asserted. The `None` path requests what it
   requested before, and no caller `MemStack` variant is added: that is an API decision, not part of this fix (#322).
 
 ## Correctness
