@@ -152,7 +152,12 @@ Per-stage timers inside `lu_in_place_unblocked` (local patch, not committed):
   agents in `working` state, is in the #342 description.
   - Acceptance (C/A within a process): new 0.962-1.071 on the 24 changed cells, 23 at
     or below 1.05, the exception 4T `c64` 127 at 1.071 (repetitions 1.159 / 1.071 /
-    1.015). Old 0.949-1.093.
+    1.015). Old 0.949-1.093. **That cell is accepted as an exception to the 1.05
+    criterion**: its repetitions spread 1.015-1.159, so the median sits inside the
+    run-to-run swing; the same executed code read 0.998 there in measurement 3 (and
+    0.996 in measurement 2, before the tie fix); and its neighbours, 4T `c64` 112 /
+    120 / 128 at 1.001 / 0.962 / 1.032 and 1T `c64` 127 at 1.002, stay in the band, so
+    no size boundary is indicated. The guard keeps 127 on the dual.
   - Before/after in absolute time: column-major A is slower at new in all 32 cells
     (median 1.036; changed cells 1.002-1.130, controls 1.005-1.053), row-major C too
     (median 1.041 on the changed cells). A is column-major on both revisions, so this
