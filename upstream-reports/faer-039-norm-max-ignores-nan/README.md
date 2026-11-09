@@ -27,7 +27,7 @@ The program calls `norm_max` on each case, prints the expected and the actual va
 | transpose of the 2x3 | NaN | **1** |
 | reference: `norm_l1`, `norm_l2` of the 2-vector | NaN | NaN (correct) |
 
-The NaN is lost in the contiguous SIMD kernel, in the pairwise split (the 129-element case), in strided rows and in the complex cases. The scalar fallback combines with the same `fmax` (`:126`), but the four native element types all take a SIMD path, so a standalone program cannot reach it.
+The NaN is lost in the contiguous SIMD kernel, in the pairwise split (the 129-element case), in strided rows and in the complex cases. The scalar fallback combines with the same `fmax` (`:126`) and a standalone program does reach it: `norm_max` takes the SIMD path only when `ncols() > 1 && col_stride().unsigned_abs() == 1`, so the strided row in the table above (row stride 0, column stride greater than one) is the scalar case.
 
 ## Cause
 
