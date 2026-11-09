@@ -111,17 +111,19 @@ does), and the complex-only rank updates are `ZCHK4` (`GERC`/`GERU`), `ZCHK5`
 
 ## What this batch establishes
 
-Six test functions over four scalar types (`f64`, `f32`, `c64`, `c32`), 24 tests
+Eight test functions over four scalar types (`f64`, `f32`, `c64`, `c32`), 32 tests
 in the default (non-nightly) run:
 
 | Test | Property |
 | --- | --- |
 | `matmul::blas::*::trmm_matches_an_independent_product` | the product of a triangular operand equals an independently accumulated product over the bounded shape set, for every lower/upper, generic/strict/unit, `N`/`T`/`C`, left/right and `alpha` combination |
-| `matmul::blas::*::trmm_reads_and_writes_nothing_outside_its_operands` | the operand's unreferenced triangle and implicit diagonal (NaN) are never read; the operand and the destination each sit in a padded submatrix of their own ROGUE-filled parent, the destination is checked entry by entry against an independent product computed from the operand's pre-call snapshot, and both whole parents (padding and stored operand alike) must come back unchanged |
+| `matmul::blas::*::trmm_reads_and_writes_nothing_outside_its_operands` | the operand's unreferenced triangle and implicit diagonal hold NaN, so a value taken from them cannot pass through the arithmetic unnoticed (sensitivity to such a value, not proof that no read occurs); the operand and the destination each sit in a padded submatrix of their own ROGUE-filled parent, the destination is checked entry by entry against an independent product computed from the operand's pre-call snapshot, and both whole parents (padding and stored operand alike) must come back unchanged |
 | `matmul::blas::*::rank_one_update_matches_the_source_contract` | `A = alpha*x*y^T + beta*A` for `Replace`/`Add`, in a column-major and a row-major destination |
 | `matmul::blas::*::symmetric_rank_k_update_writes_only_the_stored_triangle` | the referenced half of `C` is `alpha*op(A)*op(A)^H + beta*C` for all four arms (`A A^T`, `A^T A`, `A^H A`, `A A^H`), the other half (NaN) is neither read nor written, and `A` is unchanged; `(n, k) = (3, 1)` covers `SYR`'s non-diagonal rank-1 update |
 | `triangular_solve::blas::*::trsm_recovers_the_exact_solution_with_an_implicit_diagonal` | the exact reference solution is recovered for both sides, `N`/`T`/`C`, lower/upper, generic/unit, with NaN in the unreferenced triangle and in a unit diagonal |
 | `triangular_solve::blas::*::trsm_does_not_touch_memory_outside_its_operand` | for `TriangularLower` and `UnitTriangularUpper` on both sides, a known system's exact solution is recovered in place; the coefficient matrix and the in-place right-hand side each sit in a padded submatrix of their own ROGUE-filled parent, and each whole parent (stored operand and padding) must come back unchanged |
+| `triangular_solve::blas::*::trsv_conjugates_an_imaginary_diagonal_exactly` | `conj(A) X = B` and `A X = B` on a 1x1 system with a purely imaginary pivot (`2i`), asserting the exact reciprocal (`i/2` and `-i/2`); a real pivot cannot tell `1/a` from `1/conj(a)`. The real suites return immediately: `conj` is the identity there |
+| `triangular_solve::blas::*::trsm_conjugates_wide_imaginary_diagonals_exactly` | the same conjugation on the 2-, 3- and 4-element base cases, which invert their diagonal entries in their own code, with `2i` in every diagonal position and an exact integer solution |
 
 Which of these are new, and which overlap existing coverage:
 

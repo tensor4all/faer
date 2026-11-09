@@ -7,7 +7,8 @@
 // These helpers keep that structure. The fixture values themselves are new
 // exact-integer sequences -- complex-valued for the complex types, so that a
 // conjugation is observable -- and the unreferenced half holds NaN instead of
-// the rogue value, so that a masked read still poisons the result.
+// the rogue value, so that a value taken from a position the routine must not
+// read poisons the result: sensitivity to such a value, not proof of no read.
 // Netlib BLAS test-program credit: see faer/COPYING.BLAS.NETLIB.
 
 /// the block structure of a matmul operand; aliased so that an includer can

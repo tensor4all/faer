@@ -285,3 +285,61 @@ fn trsv_conjugates_an_imaginary_diagonal_exactly() {
 		}
 	}
 }
+
+/// The 2-, 3- and 4-element base cases invert their diagonal entries with their
+/// own `maybe_conj_lhs`, so a real pivot hides a missing conjugation there as
+/// well as in the one-element case above. `2i` in every diagonal position is
+/// exact under conjugation and its reciprocal is exact in binary.
+#[test]
+fn trsm_conjugates_wide_imaginary_diagonals_exactly() {
+	use BlockStructure::*;
+	let pivot = scalar(0.0, 2.0);
+	if pivot == zero() {
+		return;
+	}
+	for order in [2usize, 3, 4] {
+		for structure in [TriangularLower, TriangularUpper] {
+			let mut a = Mat::<Scalar>::full(order, order, zero());
+			for i in 0..order {
+				for j in 0..order {
+					let stored = match structure {
+						TriangularLower => i >= j,
+						TriangularUpper => i <= j,
+						_ => false,
+					};
+					if !stored {
+						continue;
+					}
+					a[(i, j)] = if i == j { pivot } else { integer(i + 1, j) };
+				}
+			}
+			let a_before = a.clone();
+			let conj_a =
+				Mat::<Scalar>::from_fn(order, order, |i, j| a[(i, j)].conj());
+			let x = Mat::<Scalar>::from_fn(order, 2, |i, j| integer(i + j, j + 2));
+			for conj in [Conj::No, Conj::Yes] {
+				// the right-hand side is built with the matrix the solve divides by:
+				// `A X` for `Conj::No` and `conj(A) X` for `Conj::Yes`
+				let system = if matches!(conj, Conj::Yes) {
+					conj_a.as_ref()
+				} else {
+					a.as_ref()
+				};
+				let mut b =
+					rhs_from_solution(system, structure, 0, true, x.as_ref(), one());
+				solve(a.as_ref(), structure, conj, b.as_mut(), Par::Seq);
+				let ctx = format!("order={order} structure={structure:?} conj={conj:?}");
+				crate::assert!(
+					exact(b.as_ref(), x.as_ref()),
+					"{ctx}\\ngot={:?}\\nwant={:?}",
+					b.as_ref(),
+					x.as_ref()
+				);
+				crate::assert!(
+					exact(a.as_ref(), a_before.as_ref()),
+					"{ctx}: the operand was modified"
+				);
+			}
+		}
+	}
+}
