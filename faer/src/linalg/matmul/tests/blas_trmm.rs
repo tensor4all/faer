@@ -195,13 +195,16 @@ fn trmm_reads_and_writes_nothing_outside_its_operands() {
 		let ctx = format!(
 			"trmm structure={structure:?} left={left} m={m} n={n}"
 		);
-		// the guarded destination holds the product, not a discarded buffer
+		// the reference product is computed from the operand as it was stored
+		// before the call, so a kernel that rewrites the operand -- including the
+		// unreferenced triangle it must leave alone -- cannot supply its own
+		// reference
 		let want = if left {
 			blended(
 				Accum::Replace,
 				Mat::<Scalar>::zeros(m, n).as_ref(),
 				Rectangular,
-				a_parent.as_ref().submatrix(1, 1, order, order),
+				a_before.as_ref().submatrix(1, 1, order, order),
 				structure,
 				Conj::No,
 				b.as_ref(),
@@ -217,7 +220,7 @@ fn trmm_reads_and_writes_nothing_outside_its_operands() {
 				b.as_ref(),
 				Rectangular,
 				Conj::No,
-				a_parent.as_ref().submatrix(1, 1, order, order),
+				a_before.as_ref().submatrix(1, 1, order, order),
 				structure,
 				Conj::No,
 				one(),
@@ -230,16 +233,11 @@ fn trmm_reads_and_writes_nothing_outside_its_operands() {
 			got,
 			want.as_ref()
 		);
+		// the whole parent, not only its padding: the stored operand has to come
+		// back unchanged, unreferenced triangle included (NaN compares to NaN)
 		crate::assert!(
-			untouched_outside(
-				a_before.as_ref(),
-				a_parent.as_ref(),
-				1,
-				1,
-				order,
-				order
-			),
-			"{ctx}: the triangular operand's parent was modified"
+			exact(a_before.as_ref(), a_parent.as_ref()),
+			"{ctx}: the triangular operand or its parent was modified"
 		);
 		crate::assert!(
 			untouched_outside(
