@@ -76,8 +76,8 @@ It then gives the command, a table of expected and actual output, the cause with
 The defect table above answers "is the value wrong". Its sibling answers "is the same code path needlessly slow", and it is
 easy to miss one level down, so the three reports that are built today are listed here as well. A performance entry's symptom is
 always a **time or a ratio**, never a wrong value, and where an entry compares two routes to the same answer its README states
-which equality the program checks before it prints a time — bit-identical for the triangular solve and for the SME comparison, the
-column-major factorization for the row-major QR.
+which check the program runs: the adapted factorization must equal the column-major one exactly for the row-major QR, the solutions
+must be bit-identical for the triangular solve, and the SME comparison holds the product to an `n · eps` bound.
 
 | Report | What is slow | Host-specific? |
 |---|---|---|
