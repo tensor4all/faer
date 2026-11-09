@@ -22,6 +22,11 @@ pub fn tolerance<T: ComplexField>(n: usize) -> T::Real {
 pub fn close<T: ComplexField>(a: MatRef<'_, T>, b: MatRef<'_, T>) {
 	let error = (a - b).norm_l2();
 	let bound = tolerance::<T>(a.nrows()) * b.norm_l2().fmax(one::<T::Real>());
+	// An infinity on one side makes both `error` and `bound` infinite, and `inf <= inf` holds.
+	assert!(
+		error.is_finite() && bound.is_finite(),
+		"non-finite residual {error:?} or bound {bound:?}"
+	);
 	assert!(error <= bound, "residual {error:?}, bound {bound:?}");
 }
 pub fn unitary<T: ComplexField>(q: MatRef<'_, T>) {
