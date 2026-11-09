@@ -163,6 +163,10 @@ Per-stage timers inside `lu_in_place_unblocked` (local patch, not committed):
     (median 1.041 on the changed cells). A is column-major on both revisions, so this
     is the tie fix's extra mask in every column search or binary layout; the design
     does not separate the two. **A 2-4% absolute regression, reported as measured.**
+    The 1.036 is the median of **32 cell-level medians**, one per cell, and not a median of paired
+    repetition differences: the per-cell values are the before/after columns of the table in the #342
+    description, so a reader can check each cell but cannot recompute the spread of a single cell's
+    repetitions across the two revisions from this file. That limit is stated rather than implied.
   - `candidate_compare.py` was not run: it needs campaign run directories (`run.yaml`,
     an upstream control row) and refuses a merge revision whose `faer/src` differs
     from the measured one, as `fb29edb` does (a doc comment).
