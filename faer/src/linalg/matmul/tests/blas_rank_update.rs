@@ -26,6 +26,11 @@ fn rank_one_update_matches_the_source_contract() {
 			for alpha in [z(0.0), z(1.0), z(-2.0), z(0.5)] {
 				let x = Mat::<Scalar>::from_fn(m, 1, |i, _| integer(i + 1, 0));
 				let y = Mat::<Scalar>::from_fn(1, n, |_, j| integer(0, j + 2));
+				// the reference product comes from the vectors as they were
+				// stored before the call, so an update that rewrites its own
+				// operands cannot supply its own reference
+				let x_before = x.clone();
+				let y_before = y.clone();
 				let a = Mat::<Scalar>::from_fn(m, n, |i, j| integer(i + 3, j));
 				// column major: the rank_update branch
 				let mut dst = a.clone();
@@ -35,10 +40,10 @@ fn rank_one_update_matches_the_source_contract() {
 					&a,
 					&dst,
 					BlockStructure::Rectangular,
-					x.as_ref(),
+					x_before.as_ref(),
 					BlockStructure::Rectangular,
 					Conj::No,
-					y.as_ref(),
+					y_before.as_ref(),
 					BlockStructure::Rectangular,
 					Conj::No,
 					beta,
@@ -59,14 +64,21 @@ fn rank_one_update_matches_the_source_contract() {
 					&a,
 					&storage.transpose().to_owned(),
 					BlockStructure::Rectangular,
-					x.as_ref(),
+					x_before.as_ref(),
 					BlockStructure::Rectangular,
 					Conj::No,
-					y.as_ref(),
+					y_before.as_ref(),
 					BlockStructure::Rectangular,
 					Conj::No,
 					beta,
 					alpha,
+				);
+				crate::assert!(
+					exact(x.as_ref(), x_before.as_ref())
+						&& exact(y.as_ref(), y_before.as_ref()),
+					"ger modified an operand: m={m} n={n} beta={beta:?} \
+					 alpha={:?}",
+					real(&alpha)
 				);
 			}
 		}
