@@ -216,15 +216,10 @@ fn views<T: ComplexField>(m: usize, n: usize) {
 fn team_agrees<T: ComplexField>(m: usize, n: usize) {
 	let k = Ord::min(m, n);
 	// `Q` is compared entry by entry against `200 n eps`, which holds only for a
-	// well-conditioned leading block: `Q` moves by about `cond * eps` under any
-	// change of summation order. `sample_mat` alone gives condition numbers of
-	// 1e9-1e11 at these shapes (257x129: 1.4e9, its leading 129x129 block 4.3e10),
-	// so the comparison passed only while the team and the sequential run did the
-	// same arithmetic; the staged LQ panel (tensor4all/faer#314) runs the
-	// column-major kernels, whose threaded paths sum in a different order
-	// (column-major c64 QR on `main` differs by 3.4e-7 between the two on the
-	// same matrix, both reconstructing it to 7e-16). The shift brings the
-	// condition number to at most 21.
+	// well-conditioned matrix: `Q` moves by about `cond * eps` under any change of
+	// summation order. The shift brings the condition number of these fixtures to
+	// at most 21; the unshifted ones (1e9-1e11) are checked against the
+	// perturbation bound in `team_agrees_ill_conditioned` instead.
 	let mut a = sample_mat::<T>(m, n, 0.5);
 	for i in 0..k {
 		a[(i, i)] = a[(i, i)].clone() + T::from_f64(16.0);
@@ -272,6 +267,80 @@ fn team_agrees<T: ComplexField>(m: usize, n: usize) {
 	});
 }
 
+/// The unshifted `sample_mat` fixtures, whose condition numbers are 1e9-1e11
+/// (257x129: 1.4e9). Here the two runs need not agree to `200 n eps`: on
+/// `main` (`c7470bd`) column-major c64 QR of the same matrix already differs by
+/// 3.4e-7 between a 2-thread team and `Par::Seq`, and both reconstruct it. What
+/// holds is checked instead:
+///
+/// - each run is a backward-stable factorization: `|A - L Q|_F <= 1e-12 |A|_F`
+///   (measured: below 1e-15), and `Q` has orthonormal rows to the same level;
+/// - the two `Q` agree within the first-order perturbation bound of the `Q`
+///   factor. With the positive diagonal gauge, `Q` is a function of the first
+///   `k` rows `G` of `A` (for `m <= n`, all of `A`; for `m > n`, `Q = L1^-1 G`
+///   with `G` square), and `|dQ|_F <= sqrt(2) |dG|_F / sigma_min(G)` to first
+///   order (the QR bound applied to `G^H`). A computed `Q^` is within its
+///   orthogonality defect `o = |Q^ Q^H - I|_F` of an exactly unitary `Q~` that
+///   factors `A + dA` with `|dA|_F <= |A - L Q^|_F + |A|_F o`. So
+///   `|Q^_1 - Q^_2|_F <= sqrt(2) (|dA_1|_F + |dA_2|_F) / sigma_min(G) + o_1 + o_2`,
+///   every term measured in the run itself. The expansion holds while that
+///   first-order term `eps1` is small against 1, and the terms it drops are a
+///   relative `O(eps1)` of it; the test requires `eps1 < 0.1` and allows a
+///   factor 2 for them, which is the only constant in the bound. Measured at
+///   this revision: residuals 7e-16 to 1e-15 of `|A|_F`, `eps1` up to 7.7e-3
+///   (257x257), and the c64 runs differ by 3.0e-7 (257x129) and 4.4e-8
+///   (257x257) against bounds of 6.3e-3 and 1.5e-2; the f64 runs agree exactly.
+#[cfg(feature = "threadteam")]
+fn team_agrees_ill_conditioned<T: ComplexField<Real = f64>>(m: usize, n: usize) {
+	let k = Ord::min(m, n);
+	let a = sample_mat::<T>(m, n, 0.5);
+	let block_size = Ord::max(
+		factor::recommended_block_size::<T>(m, n).min(Ord::max(k, 1)) / 2,
+		1,
+	);
+	// `L` and `Q` in the positive gauge, and the run's backward error and
+	// orthogonality defect
+	let factors = |mut par: Par<'_>| {
+		let (packed, coeff) = pack(a.as_ref(), block_size, par.reborrow());
+		let mut l = Mat::<T>::zeros(m, k);
+		factor::copy_l(l.as_mut(), packed.as_ref(), true);
+		let mut q = Mat::<T>::zeros(k, n);
+		let mut mem = MemBuffer::new(unitary::unitary_scratch::<T>(
+			m,
+			n,
+			k,
+			block_size,
+			par.shape(),
+		));
+		unitary::unitary(
+			q.as_mut(),
+			packed.as_ref(),
+			coeff.as_ref(),
+			true,
+			par,
+			MemStack::new(&mut mem),
+		);
+		let residual = (&a - &l * &q).norm_l2();
+		let defect = (&q * q.adjoint() - Mat::<T>::identity(k, k)).norm_l2();
+		(q, residual, defect)
+	};
+	let a_norm = a.norm_l2();
+	let (q_seq, r_seq, o_seq) = factors(Par::Seq);
+	let (q_team, r_team, o_team) = faer::team::with_team(2, |par| factors(par));
+	let tag = format!("{m}x{n}");
+	for (residual, defect, run) in [(r_seq, o_seq, "seq"), (r_team, o_team, "team")] {
+		assert!(residual <= 1e-12 * a_norm, "{tag} {run}: |A - LQ| = {residual:e}");
+		assert!(defect <= 1e-12, "{tag} {run}: |QQ^H - I| = {defect:e}");
+	}
+	let sigma = a.as_ref().subrows(0, k).singular_values(Par::Seq).unwrap();
+	let sigma_min = sigma.iter().cloned().fold(f64::INFINITY, f64::min);
+	let backward = (r_seq + a_norm * o_seq) + (r_team + a_norm * o_team);
+	let first_order = 2.0f64.sqrt() * backward / sigma_min + o_seq + o_team;
+	assert!(first_order < 0.1, "{tag}: the linearization does not hold ({first_order:e})");
+	let diff = (&q_team - &q_seq).norm_l2();
+	assert!(diff <= 2.0 * first_order, "{tag}: |Q_team - Q_seq| = {diff:e}, bound {:e}", 2.0 * first_order);
+}
+
 #[test]
 fn lq_contract() {
 	for (m, n) in [(0, 0), (0, 3), (3, 0), (1, 1), (8, 8), (8, 3), (3, 8), (100, 33)] {
@@ -296,5 +365,14 @@ fn lq_parallel_matches_sequential() {
 	for (m, n) in [(257, 129), (129, 257), (257, 257)] {
 		team_agrees::<f64>(m, n);
 		team_agrees::<c64>(m, n);
+	}
+}
+
+#[cfg(feature = "threadteam")]
+#[test]
+fn lq_parallel_ill_conditioned_within_perturbation_bound() {
+	for (m, n) in [(257, 129), (129, 257), (257, 257)] {
+		team_agrees_ill_conditioned::<f64>(m, n);
+		team_agrees_ill_conditioned::<c64>(m, n);
 	}
 }

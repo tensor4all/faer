@@ -106,8 +106,15 @@
   entry by entry at `200 n eps`, on `sample_mat` fixtures whose condition numbers are
   `1e9`-`1e11`, where `Q` moves by about `cond * eps` under any change of summation order. The
   packed forms of the two runs agree to `1e-15`, and the staged team run reconstructs `A` as
-  well as the sequential one. Its fixture now carries `16` on the diagonal (condition number at
-  most 21); it passes at `3cdfaf34` and at `c7470bd`.
+  well as the sequential one. On `main` (`c7470bd`) column-major c64 QR of the same matrix
+  already differs by `3.4e-7` between the two runs, so this is a defect of the test's premise and
+  not a regression of this change. The test is split: `lq_parallel_matches_sequential` keeps the
+  `200 n eps` comparison on fixtures with `16` on the diagonal (condition number at most 21), and
+  `lq_parallel_ill_conditioned_within_perturbation_bound` keeps the original fixtures and asserts
+  what holds there: each run reconstructs `A` to `1e-12 |A|_F` with orthonormal rows, and the two
+  `Q` agree within the first-order perturbation bound of the `Q` factor, built from the runs' own
+  backward errors and `sigma_min` of the first `k` rows (derivation in the test's comment). Both
+  pass at this branch and at `c7470bd`.
 
 ## Upstream
 
