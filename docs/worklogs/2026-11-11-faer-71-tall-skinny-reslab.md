@@ -12,12 +12,17 @@
   (c) and 2.00x (f) for f64, 1.27x and 1.54x for c64. A slab of a row-major operand still misses the
   kernel's fused path, which is why the f-order gain is smaller than the c-order one at 8T and why
   c64 gains least.
-- 0.25.0 did not move this cell: `main` (`5c2f4b70`) and `0e15729` agree within 2% in all eight
-  cells. Order c also still does not scale from 4T to 8T at 0.25.0 here (0.1848 -> 0.1856), which is
-  the shape of the issue's own table; only the absolute times differ, because the issue's numbers
-  come from a different host (`EVO-X1Pro`, Ryzen AI 9 HX 470: 0.429 -> 0.430). So the branch is the
-  only change that moves this cell, and the issue's premise that 0.25.0 had already taken most of the
-  gain is a statement about a different machine.
+- 0.25.0 moved this cell little. Measured against `main` (`5c2f4b70`, the baseline; `0e15729`, the
+  0.25.0 tag, is its ancestor 246 commits back), 0.25.0 is slower in all eight cells of the table
+  below: 0.3-1.9% in the four 4T cells and 1.9-2.0% in order c at 8T, but 6.7% in f64 order f
+  (0.1058 against 0.0992 ms) and 2.8% in c64 order f (0.2831 against 0.2755) at 8T. Those two are
+  outside the 1.8% spread between process sets, so main is measurably faster than 0.25.0 there.
+  Order c also still does not scale from 4T to 8T at 0.25.0 here (0.1848 -> 0.1856), which is the
+  shape of the issue's own table; only the absolute times differ, because the issue's numbers come
+  from a different host (`EVO-X1Pro`, Ryzen AI 9 HX 470: 0.429 -> 0.430). So the branch (1.26-2.70x
+  against main) is what moves this cell, not the 246 commits since 0.25.0 (at most 6.7%), and the
+  issue's premise that 0.25.0 had already taken most of the gain is a statement about a different
+  machine.
 - The rebase conflicts and how they were resolved:
   - `faer/src/linalg/matmul/mod.rs`, the thread count handed to `private_gemm_x86::gemm`: the branch
     passed its `budget` there; main passes `1`, because `Par::Team` (`gemm_team`) is now the only
@@ -89,8 +94,10 @@ effect of the change; the 64x64x64 cell is identical to main's.
 The three process-set medians of one condition are within 1.8% of each other (largest: c64 8T
 order c on the slab, 0.2165/0.2199/0.2204), so the branch/main gap is far outside this machine's
 spread. Reproducing the frozen campaign policy instead (250 ms priming, 5 calls) changes the 8T
-f64 readings by under 1% (slab c 0.0670 / f 0.0497, main c 0.1813 / f 0.0978), so the priming
-policy is not what produces the gap.
+f64 readings by at most 1.4%, against the table's 3000 ms / 30-call values as the baseline: slab c
+0.0670 (-0.6%) / f 0.0497 (+0.4%), main c 0.1813 (-0.3%) / f 0.0978 (-1.4%). The branch/main
+ratios are 0.37 and 0.51 under that policy, against 0.37 and 0.50, so the priming policy is not
+what produces the gap.
 
 `cargo test -p t4a-faer --lib` at the rebased head: 751 passed, 0 failed, 162 ignored; on main: 749
 passed, 0 failed, 162 ignored (the two extra are the branch's). `fbench verify` reports `ok` for
