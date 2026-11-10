@@ -77,14 +77,19 @@ which that cell ran in its own process.
 - What the tables establish: (A) the faer/MKL ratio per dtype, order, size and thread budget;
   (B) the stage split, with MKL's own `?sytrd`/`?stedc` measured on the *same* tridiagonal, the
   sum of faer's three stages closing with `self_adjoint_evd` within 2.6% at 1T and 4.6% at 8T
-  except f64 n = 64 at 8T (+11.0%) and f64 n = 256 at 8T (-8.4%); the residual is the
-  lower-triangle copy, the team dispatch and each region's fill/drain, none of which a stage row
-  contains. At f64 n = 256 8T the three rows already sum to more than the whole call, so that
-  difference is left unexplained, not attributed (each stage row takes its own timestamps);
+  except f64 n = 64 at 8T (+11.0%) and f64 n = 256 at 8T (-8.4%). The residual is **consistent
+  with** the lower-triangle copy, the team dispatch and each region's fill/drain, none of which a
+  stage row contains — but the tables do not isolate those, so the residual is not attributed to
+  them. At f64 n = 256 8T the three rows already sum to more than the whole call (7.208 against
+  6.649 ms), where no extra work can explain a negative remainder: that difference is unexplained,
+  and each stage row takes its own timestamps;
   (C) the threshold
   knob; (D) the raw samples of the cells under test.
-- **Hypothesis (1) is half right, and the half that is wrong matters.** MKL does use divide and
-  conquer where faer uses QR, and that is the mechanism. But "add a small-size D&C branch" is
+- **Hypothesis (1) is half right, and the half that is wrong matters.** MKL's `?syevd` is
+  documented and widely reported to use divide and conquer for the tridiagonal problem at these
+  sizes; what this worklog measures is a standalone `?stedc` on the same tridiagonal, not which
+  routine `?syevd` calls, so treat "divide and conquer" as the likely mechanism rather than as a
+  measured fact about the driver. But "add a small-size D&C branch" is
   already there - what is missing is that the branch is unreachable at n <= 128 (the `n <=
   qr_fallback_threshold` fallback) and that its leaves are serial QR. A change that only lowers
   the threshold gets the 13-32% and stops.
@@ -144,8 +149,10 @@ which that cell ran in its own process.
    QR/D&C choice is a parameter there), so the regression surface is those fixtures, not new
    code. Cost: one gate, no new algorithm.
 2. **Parallelise the QR leaf** (deflated blocks as tasks inside `qr_algorithm`). This is the only
-   option that can move the 1T gap too, and it is what would let n = 64/96 use a threshold
-   without paying D&C's merge. Risk: the eigenvector chase is a sequential recurrence over
+   option that changes the arithmetic order rather than the schedule. It is not the only one that
+   moves 1T: the threshold knob already does (table C, f64 n = 128 at 1T, 2.318 → 2.105 ms), it
+   just stops at D&C's merge cost. What this option adds is the use of n = 64/96 with a threshold
+   without paying that merge. Risk: the eigenvector chase is a sequential recurrence over
    rotations; block-parallel variants change the arithmetic order, so it needs its own accuracy
    and residual tests. Unmeasured.
 3. **Leave it.** The band is 1.77-1.94x behind MKL at 8T (f64) and 1.29-1.38x at 1T; faer already
