@@ -29,6 +29,8 @@ jobs:
       - run: cargo test -p faer-ffi -j4
       - run: cargo test -p t4a-faer --no-default-features --features "std,linalg" --test lsmr_initial_residual --test generalized_schur_reorder --test generalized_schur_reorder_no_alloc --test public_qz_aed --test public_qz_scratch --test public_householder_upgrade
       - run: cargo test -p t4a-faer --features perf-warn --test lu_perf_warn --test evd_perf_warn
+      # #271: held-team Schur eigenvectors allocate nothing warm; the `q` case runs only on x86_64.
+      - run: cargo test -p t4a-faer --test schur_eigenvectors_team_no_alloc
       - run: python3 scripts/check-migration-examples.py
       - run: cargo build --examples -j8
       - run: |

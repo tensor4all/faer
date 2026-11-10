@@ -886,6 +886,56 @@ mod matvec_colmajor {
 	use super::*;
 	use crate::col::ColMut;
 	use crate::utils::bound::IdxInc;
+	#[cfg(feature = "rayon")]
+	use dyn_stack::StackReq;
+
+	/// Runs `f` on a stack that holds `req`: the per-thread partial sums of a parallel
+	/// column-major product (`nrows x width`), which are a reduction buffer and not part of any
+	/// caller's scratch, since `matmul` takes none.
+	///
+	/// Under `std` the buffer is the calling thread's, kept between calls and grown to the
+	/// largest request it has seen, so a warm product allocates nothing (tensor4all/faer#271,
+	/// the per-call allocation rule of #111). It was a `MemBuffer::new` on every call: the
+	/// recursive shifted triangular solve of `eigenvectors_from_schur_*` on a team calls this
+	/// product once per recursion step. What a thread keeps is `nrows * width` scalars of the
+	/// largest such product, less than the matrix it multiplied whenever `ncols >= width`.
+	/// A call that finds the buffer lent out (a product nested on the same thread) allocates its
+	/// own, as before. The partition and the order of the reduction are unchanged, so the
+	/// result is bitwise the same.
+	#[cfg(all(feature = "rayon", feature = "std"))]
+	fn with_partials<R>(req: StackReq, f: impl FnOnce(&mut MemStack) -> R) -> R {
+		use core::cell::RefCell;
+		std::thread_local! {
+			static PARTIALS: RefCell<Option<(MemBuffer, StackReq)>> = const { RefCell::new(None) };
+		}
+		let mut f = Some(f);
+		let reused = PARTIALS.try_with(|cell| {
+			let Ok(mut slot) = cell.try_borrow_mut() else {
+				return None;
+			};
+			let fits = slot.as_ref().is_some_and(|(_, held)| {
+				held.size_bytes() >= req.size_bytes() && held.align_bytes() >= req.align_bytes()
+			});
+			if !fits {
+				let grown = slot.as_ref().map_or(req, |(_, held)| held.or(req));
+				// free the old buffer before allocating the larger one
+				*slot = None;
+				*slot = Some((MemBuffer::new(grown), grown));
+			}
+			let (buf, _) = slot.as_mut().unwrap();
+			Some((f.take().unwrap())(MemStack::new(buf)))
+		});
+		match reused {
+			Ok(Some(r)) => r,
+			_ => (f.take().unwrap())(MemStack::new(&mut MemBuffer::new(req))),
+		}
+	}
+
+	/// Without `std` there is no thread-local storage: one buffer per call, as before.
+	#[cfg(all(feature = "rayon", not(feature = "std")))]
+	fn with_partials<R>(req: StackReq, f: impl FnOnce(&mut MemStack) -> R) -> R {
+		f(MemStack::new(&mut MemBuffer::new(req)))
+	}
 
 	use faer_traits::SimdArch;
 	pub fn matvec<'M, 'K, T: ComplexField>(
@@ -997,11 +1047,8 @@ mod matvec_colmajor {
 				let nthreads = core::num::NonZeroUsize::new(par.degree()).unwrap();
 					use rayon::prelude::*;
 					let nthreads = nthreads.get();
-					let mut mem = MemBuffer::new(temp_mat_scratch::<T>(
-						dst.nrows().unbound(),
-						nthreads,
-					));
-					let stack = MemStack::new(&mut mem);
+					let req = temp_mat_scratch::<T>(dst.nrows().unbound(), nthreads);
+					with_partials(req, move |stack| {
 					alloca!('stack: {
 						let tmp =
 							unsafe { mat![uninit::<T>, dst.nrows(), nthreads] };
@@ -1048,6 +1095,7 @@ mod matvec_colmajor {
 						zip!(dst.rb_mut(), tmp.rb().col(j))
 							.for_each(|unzip!(dst, src)| *dst = &*dst + &*src)
 					}
+					});
 				},
 			}
 		});
