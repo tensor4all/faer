@@ -60,9 +60,8 @@ counter**, not five.
   - allocation: **zero heap allocations per call** at every level and phase, in both builds, at 1T and 8T,
     for every cell. The merge takes all its workspace from the `MemStack`;
   - the leaf: 0.152 ms (10%) at 1T and 0.022 ms of the 8T path. A leaf in place measures 19.1 µs at n = 16
-    against 18.5 µs for the standalone QR timing; the recursion therefore shows no overhead larger than the
-    spread between two differently generated inputs. It is not a paired experiment on one matrix, so this
-    bounds the overhead rather than proving it zero.
+    against 18.5 µs for the standalone QR timing; the two runs use different inputs, so this is an observed
+    timing difference, not an isolated measure of the recursion overhead.
     QR alone costs 69-77 ns per n^2 from n = 8 to 48 and rises to 108 ns per n^2 at n = 128 (table D).
 - **The threshold knob still holds at 1T, and is not neutral at small n.** Unmodified, `recursion_threshold
   = 16` against the default gives 1.574 vs 1.773 ms at f64 n = 128 (-11%), 0.894 vs 0.926 at n = 96 (-3%) and
