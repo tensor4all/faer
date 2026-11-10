@@ -150,10 +150,13 @@ const TILE_COPY_POWER_OF_TWO_STRIDE_BYTES: usize = 2048;
 /// bound on what the copy touches: the copy stops at `min(m, n)` columns.
 ///
 /// And the destination's column stride, when it is a power of two at or above
-/// [`TILE_COPY_POWER_OF_TWO_STRIDE_BYTES`]: there the elementwise walk collides
-/// in the cache sets and the tiles pay although the working set is small. It is
-/// a byte count and not a type, so the clause follows `size_of::<T>()` the way
-/// the working-set gate does.
+/// [`TILE_COPY_POWER_OF_TWO_STRIDE_BYTES`]: measured cells with such a stride
+/// run faster with the tiles although their working set is small. This one is
+/// an **empirically selected heuristic**, not a mechanism: the cells that
+/// produced it change the source's row stride along with the destination's, so
+/// isolating a destination-write conflict is still open. It is a byte count and
+/// not a type, so the clause follows `size_of::<T>()` the way the working-set
+/// gate does.
 #[inline]
 fn tile_copy_pays<T>(
 	nrows: usize,
