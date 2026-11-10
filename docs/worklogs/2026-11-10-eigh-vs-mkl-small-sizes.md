@@ -43,16 +43,12 @@ which that cell ran in its own process.
   driver internal branch was not traced here, since table B times `?sytrd` and `?stedc` as
   separate calls.
 - **The measured consequence of that threshold, not a hypothesis:** `recursion_threshold = 16`
-  (D&C at every size, the only knob, no code change) gives, at 8T, f64 n = 64 0.472 ms (default
-  0.565), n = 96 1.043 (1.263), n = 128 1.627 (2.391) - **16-32% off the call** - and c64 0.568
-  (0.654), 1.173 (1.494), 2.049 (2.780) - **13-26%**. faer/MKL at 8T moves from 1.77/1.85/1.94 to
-  1.47/1.52/1.32 for f64, and from 0.96/1.08/1.22 to 0.83/0.84/0.91 for c64: the complex cells
-  flip from a small loss to a win. At 1T the knob is neutral at n = 64 and 96 (f64 -1% / +1%,
-  c64 -5% / +1%) and better at n = 128 (2.105 vs 2.318, 9% for f64; 3.161 vs 3.287, 4% for
-  c64). It is not limited to the band: at 8T it is also worth 8% at f64 n = 256 (6.088 vs 6.649)
-  and 3% at c64 n = 256 (8.909 vs 9.222), and 1% at n = 512. So the default is not wrong at 1T;
-  it is wrong at 8T, where D&C's merge is cheaper than a serial QR of the same tridiagonal, and
-  slightly wrong at 8T above the band as well.
+  (D&C at every size, the only knob, no code change) takes 16-32% off the f64 call and 13-26% off
+  the c64 call at 8T for n = 64..128, turns the complex cells from a small loss into a win, and is
+  worth 8% / 3% / 1% at n = 256 / 256 / 512. At 1T it is neutral at n = 64 and 96 and 9% (f64) /
+  4% (c64) better at n = 128. **Table C is the measurement**; the per-cell numbers are not repeated
+  here. So the default is not wrong at 1T; it is wrong at 8T, where D&C's merge is cheaper than a
+  serial QR of the same tridiagonal, and slightly wrong at 8T above the band as well.
 - **Hypothesis (2) (thread start-up) is real but an order of magnitude too small to explain
   2x.** f64 stage 1 at 8T is 0.71x (n = 96) and 0.79x (n = 128) of its own 1T time: the parallel
   gate opens a region that does not pay, costing 20-29% of a stage that is 15% of the call.
@@ -85,14 +81,8 @@ which that cell ran in its own process.
   and each stage row takes its own timestamps;
   (C) the threshold
   knob; (D) the raw samples of the cells under test.
-- **Hypothesis (1) is half right, and the half that is wrong matters.** MKL's `?syevd` is
-  documented and widely reported to use divide and conquer for the tridiagonal problem at these
-  sizes; what this worklog measures is a standalone `?stedc` on the same tridiagonal, not which
-  routine `?syevd` calls, so treat "divide and conquer" as the likely mechanism rather than as a
-  measured fact about the driver. But "add a small-size D&C branch" is
-  already there - what is missing is that the branch is unreachable at n <= 128 (the `n <=
-  qr_fallback_threshold` fallback) and that its leaves are serial QR. A change that only lowers
-  the threshold gets the 13-32% and stops.
+- **Hypothesis (1) is half right** — the branch is already there and unreachable at n <= 128; see the
+  gate argument above, which this paragraph does not repeat.
 - **What remains unverified.**
   - Whether a parallel QR leaf (deflated blocks as tasks) beats lowering the threshold. The
     threshold knob is measured; a threaded QR is not, and it is the route that can move the 1T
