@@ -87,7 +87,7 @@ BLAS thread count is 1.
 
 **default (`V3`, 4 `f64` / 2 `c64` lanes)**
 
-| n | dtype | Fortran 1T | Seq | Team4 | Team8 | Team16 | Seq/F | T8/Seq | T16/Seq | F/T8 |
+| n | dtype | Fortran 1T | Seq | Team4 | Team8 | Team16 | Seq/F | Seq/T8 | Seq/T16 | F/T8 |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 64 | f64 | 0.0175 | 0.0204 | 0.0177 | 0.0173 | 0.0239 | 1.168 | 1.18 | 0.85 | 1.01 |
 | 64 | c64 | 0.0659 | 0.0442 | 0.0366 | 0.0356 | 0.0461 | 0.671 | 1.24 | 0.96 | 1.85 |
@@ -102,7 +102,7 @@ BLAS thread count is 1.
 
 **`x86-v4` (`V4`, 8 `f64` / 4 `c64` lanes)**
 
-| n | dtype | Fortran 1T | Seq | Team4 | Team8 | Team16 | Seq/F | T8/Seq | T16/Seq | F/T8 |
+| n | dtype | Fortran 1T | Seq | Team4 | Team8 | Team16 | Seq/F | Seq/T8 | Seq/T16 | F/T8 |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 64 | f64 | 0.0175 | 0.0197 | 0.0169 | 0.0169 | 0.0231 | 1.125 | 1.17 | 0.85 | 1.04 |
 | 64 | c64 | 0.0659 | 0.0411 | 0.0336 | 0.0326 | 0.0423 | 0.624 | 1.26 | 0.97 | 2.02 |
@@ -152,7 +152,7 @@ the SMT twin helps)**
   `V4` lane runs and returns the right answer (below); against the `V3` build it
   buys 2.5–7.6 % on `c64` Seq and 6.1–9.4 % on the `c64` Team cells from n = 64 to
   512, and 3.6–5.9 % on the `c64` Team cells at n = 1024, while `f64` is neutral
-  to −6 %: +3.9 % at n = 64 Seq and slower in seven of the eight Team cells
+  to −6 %: +3.9 % at n = 64 Seq and slower in seven of the ten Team cells
   (0.989 at 128 Team8, 0.976 at 128 Team16, 0.997 at 256 Team8, 0.959 at 256
   Team16, 0.943 at 512 Team16, 0.968 at 1024 Team8, 0.951 at 1024 Team16).
   Doubling the register width does not move the factorization much. **The reason
@@ -169,8 +169,8 @@ the SMT twin helps)**
   Seq (1.18–1.75x) because Seq is only 0.02–0.27 ms there.
 - **Team16 is not extra compute.** Sixteen threads are the SMT siblings of the
   same eight cores. It *loses* 16–38 % to Team8 at n ≤ 256, ties at 512 (0.947 –
-  1.013), and wins 4.7–7.3 % at n = 1024 only, where the memory-bound cells have
-  enough idle issue slots for a second thread. So on this host the useful width
+  1.013), and wins 4.7–7.3 % at n = 1024 only, where the largest cells sit; why a second thread helps there is not
+  measured (no counters), so treat that explanation as a hypothesis. So on this host the useful width
   is 8; 16 is a 5 % large-n effect, not a second machine.
 - **The #176 4x target still misses at n = 256 and meets at n ≥ 512.**
   `best 1T / Team8` with the best measured 1-thread arm (Fortran PFAPACK or
