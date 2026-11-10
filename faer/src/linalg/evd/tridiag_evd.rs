@@ -264,6 +264,61 @@ fn batch_secular_eq<const N: usize, T: RealField>(
 	}
 	res
 }
+/// The width the root loop of a merge with `k` non deflated poles runs at on `par` (1:
+/// serial): the widest width that pays for the loop's estimated serial time, `k^2` units of
+/// [`secular_roots`](crate::utils::cost::rate::secular_roots), one section, never more than `k`.
+///
+/// It is a function of `k`, the degree of `par` and the host's cost table only, never of
+/// scheduling. A `Par::Seq` or a one-thread team gives 1.
+fn secular_width<T: RealField>(par: &Par, k: usize) -> usize {
+	crate::utils::cost::par_width_upto::<T>(
+		par,
+		k.saturating_mul(k),
+		crate::utils::cost::rate::secular_roots(),
+		1,
+		k,
+	)
+}
+
+/// One root of the secular equation of a merge: the root in `(d[i], d[i + 1])`, or above
+/// `d[n - 1]` for the last one, as `(shift, mu)` with the root equal to `shift + mu`. Reads only
+/// `d`, `z` and `rho`, so every root is independent of every other.
+#[inline(always)]
+fn secular_root<T: RealField>(
+	i: usize,
+	d: ColRef<'_, T, usize, ContiguousFwd>,
+	z: ColRef<'_, T, usize, ContiguousFwd>,
+	rho: &T,
+	rho_recip: &T,
+	n: usize,
+) -> (T, T) {
+	let left = d[i].copy();
+	let last = i == n - 1;
+	let right = if last {
+		&d[i] + rho * z.squared_norm_l2()
+	} else {
+		d[i + 1].copy()
+	};
+	let d = d.subrows(0, n);
+	let z = z.subrows(0, n);
+	secular_eq_root_finder(
+		&|shift, mu| secular_eq(shift, mu, d, z, rho_recip.copy()),
+		&|shift, mu| batch_secular_eq(shift, mu, d, z, rho_recip.copy()),
+		left,
+		right,
+		last,
+	)
+}
+
+/// Solves the `non_deflated` roots of the secular equation into `(shifts, mus)` and writes the
+/// deflated entries as `(0, d[i])`.
+///
+/// With a team, the roots are dealt out in contiguous blocks over [`secular_width`]
+/// participants (tensor4all/faer#391). Each root is computed by [`secular_root`] alone, with no
+/// arithmetic shared between roots, so its bits do not depend on which participant computes it
+/// or on how the roots are split: the output is bitwise identical to the serial loop for every
+/// width and every thread count. Without a team, or when the split does not pay, the loop is
+/// the serial one.
 fn compute_eigenvalues<T: RealField>(
 	mut mus: ColMut<'_, T, usize, ContiguousFwd>,
 	mut shifts: ColMut<'_, T, usize, ContiguousFwd>,
@@ -271,30 +326,40 @@ fn compute_eigenvalues<T: RealField>(
 	z: ColRef<'_, T, usize, ContiguousFwd>,
 	rho: T,
 	non_deflated: usize,
+	par: Par,
 ) {
 	let n = non_deflated;
 	let full_n = d.nrows();
 	let ref rho = rho;
 	let ref rho_recip = rho.recip();
-	for i in 0..n {
-		let left = d[i].copy();
-		let last = i == n - 1;
-		let right = if last {
-			&d[i] + rho * z.squared_norm_l2()
-		} else {
-			d[i + 1].copy()
-		};
-		let d = d.subrows(0, n);
-		let z = z.subrows(0, n);
-		let (shift, mu) = secular_eq_root_finder(
-			&|shift, mu| secular_eq(shift, mu, d, z, rho_recip.copy()),
-			&|shift, mu| batch_secular_eq(shift, mu, d, z, rho_recip.copy()),
-			left,
-			right,
-			last,
-		);
-		shifts[i] = shift;
-		mus[i] = mu;
+	let width = secular_width::<T>(&par, n);
+	if width < 2 {
+		for i in 0..n {
+			let (shift, mu) = secular_root(i, d, z, rho, rho_recip, n);
+			shifts[i] = shift;
+			mus[i] = mu;
+		}
+	} else {
+		#[cfg(feature = "rayon")]
+		{
+			use rayon::prelude::*;
+			let mus = mus.rb_mut().subrows_mut(0, n).as_slice_mut();
+			let shifts = shifts.rb_mut().subrows_mut(0, n).as_slice_mut();
+			crate::utils::thread::with_width(par, width, |par| {
+				crate::utils::thread::for_each(
+					par,
+					width,
+					mus.par_iter_mut().zip(shifts.par_iter_mut()).enumerate(),
+					|(i, (mu, shift))| {
+						let (s, m) = secular_root(i, d, z, rho, rho_recip, n);
+						*shift = s;
+						*mu = m;
+					},
+				)
+			});
+		}
+		#[cfg(not(feature = "rayon"))]
+		unreachable!("a width of two or more needs a team");
 	}
 	for i in n..full_n {
 		shifts[i] = zero();
@@ -533,6 +598,7 @@ fn divide_and_conquer_recurse<T: RealField>(
 		permuted_z.rb(),
 		rho.copy(),
 		non_deflated,
+		par.reborrow(),
 	);
 	for i in 0..non_deflated {
 		let ref di = permuted_diag[i].copy();
@@ -919,5 +985,169 @@ mod evd_qr_tests {
 		let offdiag = [7.216449660063518e-16];
 		test_qr(&diag, &offdiag);
 		test_dc(&diag, &offdiag);
+	}
+}
+#[cfg(test)]
+mod secular_split_tests {
+	//! tensor4all/faer#391: the root loop of a merge split across a team.
+	//!
+	//! What is claimed: every root is computed by the same serial code from read-only inputs, so
+	//! the `(shifts, mus)` of a merge are bitwise identical for any split, and therefore for any
+	//! thread count, `Par::Seq` included. This is narrower than the public routine: the rest of
+	//! the merge (the two `matmul`s) is not claimed to be identical across thread counts
+	//! (`docs/reproducibility.md`), only at a fixed one, which the last test pins.
+	use super::*;
+	use crate::{ColMut, Mat, assert};
+	use dyn_stack::MemBuffer;
+
+	fn lcg(st: &mut u64) -> f64 {
+		*st = st.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+		((*st >> 11) as f64) / ((1u64 << 53) as f64)
+	}
+
+	/// The inputs of one merge: `full` sorted poles of which the first `k` are not deflated,
+	/// and a unit `z`.
+	fn merge_input(full: usize, k: usize, seed: u64) -> (Vec<f64>, Vec<f64>, f64) {
+		let mut st = seed;
+		let mut d: Vec<f64> = (0..full).map(|_| 4.0 * lcg(&mut st) - 2.0).collect();
+		d[..k].sort_by(f64::total_cmp);
+		let mut z: Vec<f64> = (0..full).map(|_| lcg(&mut st) + 0.05).collect();
+		let norm = z[..k].iter().map(|x| x * x).sum::<f64>().sqrt();
+		z.iter_mut().for_each(|x| *x /= norm);
+		(d, z, 0.75)
+	}
+
+	/// `(shifts, mus)` as bits.
+	fn roots(par: Par, d: &[f64], z: &[f64], rho: f64, k: usize) -> Vec<(u64, u64)> {
+		let full = d.len();
+		let mut mus = vec![f64::NAN; full];
+		let mut shifts = vec![f64::NAN; full];
+		compute_eigenvalues(
+			ColMut::from_slice_mut(&mut mus).try_as_col_major_mut().unwrap(),
+			ColMut::from_slice_mut(&mut shifts).try_as_col_major_mut().unwrap(),
+			ColRef::from_slice(d).try_as_col_major().unwrap(),
+			ColRef::from_slice(z).try_as_col_major().unwrap(),
+			rho,
+			k,
+			par,
+		);
+		shifts.iter().zip(&mus).map(|(s, m)| (s.to_bits(), m.to_bits())).collect()
+	}
+
+	#[test]
+	fn serial_without_a_team() {
+		assert!(secular_width::<f64>(&Par::Seq, 128) == 1);
+		assert!(secular_width::<f64>(&Par::Seq, 0) == 1);
+	}
+
+	/// The roots are solved, i.e. every one lies in its interval and is finite.
+	#[test]
+	fn serial_roots_interlace() {
+		let (d, z, rho) = merge_input(70, 64, 0x391);
+		let r = roots(Par::Seq, &d, &z, rho, 64);
+		for i in 0..64 {
+			let lambda = f64::from_bits(r[i].0) + f64::from_bits(r[i].1);
+			assert!(lambda.is_finite());
+			assert!(lambda >= d[i]);
+			if i + 1 < 64 {
+				assert!(lambda <= d[i + 1]);
+			}
+		}
+		// the deflated tail is `(0, d[i])`
+		for i in 64..70 {
+			assert!(r[i] == (0.0f64.to_bits(), d[i].to_bits()));
+		}
+	}
+
+	#[cfg(feature = "threadteam")]
+	#[test]
+	fn split_roots_are_bitwise_identical_at_every_width() {
+		for (full, k) in [(128, 128), (100, 96), (70, 64), (33, 32)] {
+			let (d, z, rho) = merge_input(full, k, 0x391 + k as u64);
+			let seq = roots(Par::Seq, &d, &z, rho, k);
+			for threads in [2usize, 3, 8] {
+				let (first, second, width) = crate::team::with_team(threads, |mut par| {
+					(
+						roots(par.reborrow(), &d, &z, rho, k),
+						roots(par.reborrow(), &d, &z, rho, k),
+						secular_width::<f64>(&par, k),
+					)
+				});
+				// same thread count, same split: same bits
+				assert!(first == second, "k = {k}, {threads} threads");
+				// the split changes nothing, so a different thread count, or none, does not either
+				assert!(first == seq, "k = {k}, {threads} threads against Par::Seq");
+				// the gate is the cost model's, at most `k` participants and at most the team
+				assert!(width <= Ord::min(k, threads));
+			}
+		}
+		// the loop of the top merge at the record's sizes is split on a team of 8 (the work is
+		// `k^2` at the host's `secular_roots` rate against one width-8 section)
+		crate::team::with_team(8, |par| {
+			assert!(secular_width::<f64>(&par, 128) >= 2);
+		});
+	}
+
+	/// The whole divide and conquer on a team, run twice at the same thread count: same bits
+	/// (`docs/reproducibility.md`). Against `Par::Seq` it is compared by its residual only.
+	#[cfg(feature = "threadteam")]
+	#[test]
+	fn divide_and_conquer_on_a_team_is_reproducible() {
+		let n = 128;
+		let mut st = 0x391u64;
+		let diag: Vec<f64> = (0..n).map(|_| 2.0 * lcg(&mut st) - 1.0).collect();
+		let offdiag: Vec<f64> = (0..n - 1).map(|_| 2.0 * lcg(&mut st) - 1.0).collect();
+		let run = |par: Par| {
+			let mut d = diag.clone();
+			let mut e = offdiag.clone();
+			let mut u = Mat::<f64>::zeros(n, n);
+			divide_and_conquer(
+				ColMut::from_slice_mut(&mut d).try_as_col_major_mut().unwrap(),
+				ColMut::from_slice_mut(&mut e).try_as_col_major_mut().unwrap(),
+				u.as_mut(),
+				par,
+				MemStack::new(&mut MemBuffer::new(divide_and_conquer_scratch::<f64>(
+					n,
+					ParShape::Seq,
+				))),
+				16,
+			)
+			.unwrap();
+			(d, u)
+		};
+		let bits = |(d, u): &(Vec<f64>, Mat<f64>)| {
+			let mut v: Vec<u64> = d.iter().map(|x| x.to_bits()).collect();
+			for j in 0..n {
+				for i in 0..n {
+					v.push(u[(i, j)].to_bits());
+				}
+			}
+			v
+		};
+		let (a, b) = crate::team::with_team(8, |mut par| (run(par.reborrow()), run(par.reborrow())));
+		assert!(bits(&a) == bits(&b));
+		// residual and orthogonality of the team result
+		let (s, u) = &a;
+		let t = Mat::from_fn(n, n, |i, j| {
+			if i == j {
+				diag[i]
+			} else if i == j + 1 {
+				offdiag[j]
+			} else if j == i + 1 {
+				offdiag[i]
+			} else {
+				0.0
+			}
+		});
+		let lam = Mat::from_fn(n, n, |i, j| if i == j { s[i] } else { 0.0 });
+		let tol = n as f64 * f64::EPSILON;
+		let res = (&t * u - u * &lam).norm_max() / t.norm_max();
+		let orth = (u.transpose() * u - Mat::<f64>::identity(n, n)).norm_max();
+		assert!(res < tol, "{res}");
+		assert!(orth < tol, "{orth}");
+		let seq = run(Par::Seq);
+		for i in 0..n {
+			assert!((seq.0[i] - s[i]).abs() <= tol * t.norm_max());
+		}
 	}
 }

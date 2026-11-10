@@ -326,6 +326,15 @@ pub struct Rates {
 	/// serial solve of size `m` per `m^2`, used as `bidiag_svd_dc` (88 to 102 on the Zen 5 over
 	/// `m` 64 to 512). Real types only.
 	pub tridiag_evd_dc: Rate,
+	/// The secular-equation roots of one divide and conquer merge (`tridiag_evd`'s
+	/// `compute_eigenvalues`): all `k` roots of a merge with `k` non deflated poles, per `k^2`
+	/// (each root costs a fixed number of `O(k)` passes, 12 to 13 on a random spectrum). The
+	/// Zen 5 value is the median of the six top level cells of
+	/// `docs/worklogs/2026-11-11-eigh-dc-merge-phases.md` table A (f64 and c64, `k` 64, 96 and
+	/// 128, one thread: 34.4 to 37.1). The M5 value is **not measured**: it is the Zen 5 value
+	/// scaled by the ratio of the two rows' `tridiag_evd_dc` (31.0 / 97.4), of which this loop is
+	/// the larger part. Real types only.
+	pub secular_roots: Rate,
 	/// Triangular inverse (`invert_*_triangular`), the whole serial inverse of size `m` per
 	/// `m^3`; the join of size `n` has the two halves as work, `2 (n/2)^3`. The constant is the
 	/// median over `m` 64 to 512 and falls with the size (on the Zen 5, `f64` 0.047 per `m^3`
@@ -370,6 +379,7 @@ impl Rates {
 			matvec: rmin(a.matvec, b.matvec),
 			bidiag_svd_dc: rmin(a.bidiag_svd_dc, b.bidiag_svd_dc),
 			tridiag_evd_dc: rmin(a.tridiag_evd_dc, b.tridiag_evd_dc),
+			secular_roots: rmin(a.secular_roots, b.secular_roots),
 			triangular_inverse: rmin(a.triangular_inverse, b.triangular_inverse),
 			sparse_matmul: rmin(a.sparse_matmul, b.sparse_matmul),
 			householder_rank_one: rmin(a.householder_rank_one, b.householder_rank_one),
@@ -392,6 +402,7 @@ impl Rates {
 		matvec: r(0.1654, 0.4215),
 		bidiag_svd_dc: r(152.9, 152.9),
 		tridiag_evd_dc: r(97.4, 97.4),
+		secular_roots: r(35.2, 35.2),
 		triangular_inverse: r(0.01936, 0.07228),
 		// median over spmm_{f64,c64}_n{2000,4000,8000,20000}_d{4,6,8,12,16,40}
 		sparse_matmul: r(4.1315, 5.2342),
@@ -416,6 +427,8 @@ impl Rates {
 		matvec: r(0.1, 0.34),
 		bidiag_svd_dc: r(53.0, 53.0),
 		tridiag_evd_dc: r(31.0, 31.0),
+		// derived, not measured: 35.2 * 31.0 / 97.4 (see the field)
+		secular_roots: r(11.2, 11.2),
 		triangular_inverse: r(0.0096, 0.0344),
 		sparse_matmul: r(1.5, 1.8),
 		householder_rank_one: r(0.212, 0.725),
@@ -465,6 +478,7 @@ pub mod rate {
 		matvec,
 		bidiag_svd_dc,
 		tridiag_evd_dc,
+		secular_roots,
 		triangular_inverse,
 		sparse_matmul,
 		householder_rank_one,
@@ -1044,7 +1058,7 @@ mod tests {
 	const M5: &Rates = &Rates::AARCH64_APPLE;
 
 	/// Every entry of a row, as `(name, Rate)`.
-	fn entries(rt: &Rates) -> [(&'static str, Rate); 16] {
+	fn entries(rt: &Rates) -> [(&'static str, Rate); 17] {
 		[
 			("gemm_mac", rt.gemm_mac),
 			("gemm_single", rt.gemm_single),
@@ -1058,6 +1072,7 @@ mod tests {
 			("matvec", rt.matvec),
 			("bidiag_svd_dc", rt.bidiag_svd_dc),
 			("tridiag_evd_dc", rt.tridiag_evd_dc),
+			("secular_roots", rt.secular_roots),
 			("triangular_inverse", rt.triangular_inverse),
 			("sparse_matmul", rt.sparse_matmul),
 			("householder_rank_one", rt.householder_rank_one),
