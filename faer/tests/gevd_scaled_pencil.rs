@@ -521,6 +521,46 @@ fn scaled_pencil_overflow_keeps_the_ratio() {
 	}
 }
 
+/// Review of #378: a one-by-one pencil whose `A` and `B` are prescaled in
+/// opposite directions. `A = [[2^-1074]]` (the smallest subnormal) is scaled
+/// up and `B = [[1e300]]` down, so the two inverse factors are `2^-616` and
+/// `2^538`; their ratio, `2^-1154`, is not representable. a fallback that formed
+/// it returned `alpha = 0` for the nonzero `alpha`. the pencil's own pair
+/// `(2^-1074, 1e300)` is representable, so `(alpha, beta)` must be a nonzero
+/// multiple of it (`beta >= 0`, as the QZ normalizes it, makes the multiple
+/// negative for a negative `B`): `alpha / a = beta / b`, nonzero and finite. the mirrored
+/// pencil (an eigenvalue of order `1e300 / 2^-1074`, not representable as a
+/// number) is checked the same way.
+#[test]
+fn scaled_pencil_opposite_scales_keep_the_pair() {
+	let tiny = f64::from_bits(1);
+	for (a, b) in [(tiny, 1e300), (1e300, tiny), (-tiny, 1e300), (1e300, -tiny)]
+	{
+		let am = Mat::<f64>::from_fn(1, 1, |_, _| a);
+		let bm = Mat::<f64>::from_fn(1, 1, |_, _| b);
+		for vectors in [false, true] {
+			let v = gevd_values(&am, &bm, 1.0, vectors);
+			let what = format!("A = {a:e}, B = {b:e}, vectors = {vectors}");
+			assert!(v.ok, "{what}: Err");
+			let (alpha, beta) = (v.alpha[0], v.beta[0]);
+			assert!(
+				alpha.im == 0.0 && alpha.re.is_finite() && beta.is_finite(),
+				"{what}: ({alpha:?}, {beta:e})"
+			);
+			assert!(
+				alpha.re != 0.0 && beta != 0.0,
+				"{what}: a nonzero component came back as zero: ({alpha:?}, {beta:e})"
+			);
+			// both quotients are the common factor, `+-` a power of two of moderate size
+			let (qa, qb) = (alpha.re / a, beta / b);
+			assert!(
+				qa != 0.0 && (qa - qb).abs() <= TOL * qa.abs(),
+				"{what}: ({alpha:?}, {beta:e}) is not a nonzero multiple of (a, b): {qa:e} against {qb:e}"
+			);
+		}
+	}
+}
+
 /// `gevd_cplx` (`c64`) and `gevd_real` (`f32`) share the prescaling; their
 /// eigenvalues at a tiny `s` must agree with `s = 1`.
 #[test]
