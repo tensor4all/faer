@@ -759,14 +759,15 @@ fn entry_floor<T: ComplexField>(A: MatRef<'_, T>, subdiag: usize) -> T::Real {
 	}
 	m
 }
-/// A Schur form whose largest entry is far from one (outside `[2^-20, 2^20]`), scaled by a power
-/// of two so that its largest entry is in `[1, 2)`; `None` when it is already in range. The
-/// eigenvectors do not change. The back substitution's clamp ([`entry_floor`]) is relative to the
-/// entries, so without this a Schur form near the top of the range overflowed in the products
-/// with the back-substituted entries (about `1 / eps`) before the solvers' rescaling ran, and one
-/// near the bottom had a clamp whose complex reciprocal overflows (#112). `?GEEV` scales its
-/// input for `?TREVC` the same way. The power is applied as two factors, so neither overflows.
-fn scaled_into_range<T: ComplexField>(A: MatRef<'_, T>, subdiag: usize) -> Option<Mat<T>> {
+/// For a Schur form whose largest entry is far from one (outside `[2^-20,
+/// 2^20]`), the two factors whose product is the power of two that brings its
+/// largest entry into `[1, 2)`; `None` when it is already in range.
+/// [`scaled_into_range`] applies them. The power is split in two so that
+/// neither factor overflows.
+fn range_scaling<T: ComplexField>(
+	A: MatRef<'_, T>,
+	subdiag: usize,
+) -> Option<(T::Real, T::Real)> {
 	let n = A.nrows();
 	let rows = |j: usize| Ord::min(j + 1 + subdiag, n);
 	let mut m = zero::<T::Real>();
@@ -804,16 +805,72 @@ fn scaled_into_range<T: ComplexField>(A: MatRef<'_, T>, subdiag: usize) -> Optio
 		}
 		f
 	};
-	let (fa, fb) = (pow(k / 2), pow(k - k / 2));
-	Some(Mat::from_fn(n, n, |i, j| {
-		if i < rows(j) {
-			A[(i, j)].mul_real(&fa).mul_real(&fb)
-		} else {
-			zero::<T>()
-		}
-	}))
+	Some((pow(k / 2), pow(k - k / 2)))
 }
+/// Writes the Schur form `A` scaled by the factors of [`range_scaling`] into
+/// the column-major `out`, with zeros below its `subdiag` subdiagonals. The
+/// eigenvectors do not change. The back substitution's clamp ([`entry_floor`])
+/// is relative to the entries, so without this a Schur form near the top of the
+/// range overflowed in the products with the back-substituted entries (about `1
+/// / eps`) before the solvers' rescaling ran, and one near the bottom had a
+/// clamp whose complex reciprocal overflows (#112). `?GEEV` scales its input
+/// for `?TREVC` the same way.
+///
+/// The copy is borrowed from the caller's stack
+/// ([`scaled_into_range_scratch`]): it was an owned `Mat`, which a caller that
+/// preallocates the declared workspace could not cover (#270).
+fn scaled_into_range<T: ComplexField>(
+	A: MatRef<'_, T>,
+	subdiag: usize,
+	(fa, fb): &(T::Real, T::Real),
+	out: MatMut<'_, T>,
+) {
+	let n = A.nrows();
+	let mut out = out;
+	for j in 0..n {
+		let rows = Ord::min(j + 1 + subdiag, n);
+		for i in 0..n {
+			out[(i, j)] = if i < rows {
+				A[(i, j)].mul_real(fa).mul_real(fb)
+			} else {
+				zero::<T>()
+			};
+		}
+	}
+}
+/// Workspace of the range-scaled copy of a `dim` by `dim` Schur form that
+/// [`evd_from_real_schur_imp`] and [`evd_from_cplx_schur_imp`] take from their
+/// stack when the entries are out of range. A caller reserves it alongside the
+/// eigenvector matrix those functions write, since both are live at once.
+pub(crate) fn scaled_into_range_scratch<T: ComplexField>(
+	dim: usize,
+) -> StackReq {
+	temp_mat_scratch::<T>(dim, dim)
+}
+/// Right eigenvectors of the real Schur form `A` into `V`, back-substituted on
+/// a copy of `A` scaled into range when its entries are far from one
+/// ([`scaled_into_range`]); the copy comes from `stack`, which needs
+/// [`scaled_into_range_scratch`]. Callers normalize and classify the
+/// result against their own, unscaled `A`.
 pub(crate) fn evd_from_real_schur_imp<T: RealField>(
+	A: MatRef<'_, T>,
+	V: MatMut<'_, T>,
+	par: Par,
+	stack: &mut MemStack,
+	params: EvdFromSchurParams,
+) {
+	let n = A.nrows();
+	match range_scaling(A, 1) {
+		None => evd_from_real_schur_in_range(A, V, par, params),
+		Some(f) => {
+			let (mut S, _) = unsafe { temp_mat_uninit::<T, _, _>(n, n, stack) };
+			let mut S = S.as_mat_mut();
+			scaled_into_range(A, 1, &f, S.rb_mut());
+			evd_from_real_schur_in_range(S.rb(), V, par, params)
+		},
+	}
+}
+fn evd_from_real_schur_in_range<T: RealField>(
 	A: MatRef<'_, T>,
 	V: MatMut<'_, T>,
 	mut par: Par,
@@ -823,8 +880,6 @@ pub(crate) fn evd_from_real_schur_imp<T: RealField>(
 	let zero = zero::<T>;
 	let mut V = V;
 	let n = A.nrows();
-	let scaled = scaled_into_range(A, 1);
-	let A = scaled.as_ref().map_or(A, |s| s.as_ref());
 	let floor = entry_floor(A, 1);
 	let mut k = n;
 	loop {
@@ -881,7 +936,29 @@ pub(crate) fn evd_from_real_schur_imp<T: RealField>(
 		}
 	}
 }
+/// Complex counterpart of [`evd_from_real_schur_imp`] for the upper triangular
+/// `A` (conjugated when `conj_A` is [`Conj::Yes`]), with the same `stack`
+/// requirement.
 pub(crate) fn evd_from_cplx_schur_imp<T: ComplexField>(
+	A: MatRef<'_, T>,
+	conj_A: Conj,
+	V: MatMut<'_, T>,
+	par: Par,
+	stack: &mut MemStack,
+	params: EvdFromSchurParams,
+) {
+	let n = A.nrows();
+	match range_scaling(A, 0) {
+		None => evd_from_cplx_schur_in_range(A, conj_A, V, par, params),
+		Some(f) => {
+			let (mut S, _) = unsafe { temp_mat_uninit::<T, _, _>(n, n, stack) };
+			let mut S = S.as_mat_mut();
+			scaled_into_range(A, 0, &f, S.rb_mut());
+			evd_from_cplx_schur_in_range(S.rb(), conj_A, V, par, params)
+		},
+	}
+}
+fn evd_from_cplx_schur_in_range<T: ComplexField>(
 	A: MatRef<'_, T>,
 	conj_A: Conj,
 	V: MatMut<'_, T>,
@@ -891,8 +968,6 @@ pub(crate) fn evd_from_cplx_schur_imp<T: ComplexField>(
 	let one = one::<T>;
 	let mut V = V;
 	let n = A.nrows();
-	let scaled = scaled_into_range(A, 0);
-	let A = scaled.as_ref().map_or(A, |s| s.as_ref());
 	let floor = entry_floor(A, 0);
 	let mut k = n;
 	loop {
@@ -1399,7 +1474,9 @@ pub fn evd_scratch<T: ComplexField>(
 		n - 1,
 	);
 	let H = temp_mat_scratch::<T>(n, n);
-	let X = H;
+	// the eigenvectors of the Schur form and its range-scaled copy, live at
+	// once
+	let X = temp_mat_scratch::<T>(n, n).and(scaled_into_range_scratch::<T>(n));
 	let Z = temp_mat_scratch::<T>(n, if compute_eigen { n } else { 0 });
 	let householder = temp_mat_scratch::<T>(bs, n);
 	let apply = linalg::householder::apply_block_householder_sequence_on_the_right_in_place_scratch::<T>(n - 1, bs, n - 1);
@@ -1845,7 +1922,9 @@ pub fn reorder_schur_cplx<T: ComplexField>(
 pub fn eigenvectors_from_schur_scratch<T: ComplexField>(
 	dim: usize,
 ) -> StackReq {
-	temp_mat_scratch::<T>(dim, dim)
+	// the eigenvectors of `t` and, when its entries are far from one, a copy of
+	// `t` scaled into range, which are live at once
+	temp_mat_scratch::<T>(dim, dim).and(scaled_into_range_scratch::<T>(dim))
 }
 /// Computes all right eigenvectors of standardized real Schur `t` in diagonal
 /// order. If `q` is supplied, returns eigenvectors of `q * t * q.transpose()`.
@@ -1895,9 +1974,9 @@ pub fn eigenvectors_from_schur_real<T: RealField>(
 	if !t.is_all_finite() {
 		return Err(EvdError::NoConvergence);
 	}
-	let (mut v, _) = temp_mat_zeroed::<T, _, _>(n, n, stack);
+	let (mut v, stack) = temp_mat_zeroed::<T, _, _>(n, n, stack);
 	let mut v = v.as_mat_mut();
-	evd_from_real_schur_imp(t, v.rb_mut(), par.reborrow(), *params);
+	evd_from_real_schur_imp(t, v.rb_mut(), par.reborrow(), stack, *params);
 	if let Some(q) = q {
 		linalg::matmul::matmul(
 			x.rb_mut(),
@@ -1964,9 +2043,16 @@ pub fn eigenvectors_from_schur_cplx<T: ComplexField>(
 	if !t.is_all_finite() {
 		return Err(EvdError::NoConvergence);
 	}
-	let (mut v, _) = temp_mat_zeroed::<T, _, _>(n, n, stack);
+	let (mut v, stack) = temp_mat_zeroed::<T, _, _>(n, n, stack);
 	let mut v = v.as_mat_mut();
-	evd_from_cplx_schur_imp(t, Conj::No, v.rb_mut(), par.reborrow(), *params);
+	evd_from_cplx_schur_imp(
+		t,
+		Conj::No,
+		v.rb_mut(),
+		par.reborrow(),
+		stack,
+		*params,
+	);
 	if let Some(q) = q {
 		linalg::matmul::matmul(
 			x.rb_mut(),
@@ -2142,13 +2228,14 @@ fn evd_imp<T: ComplexField>(
 	}
 	let H = H.rb();
 	if let (Some(mut u), Some(Z)) = (u_right, Z.rb()) {
-		let (mut X, _) = unsafe { temp_mat_uninit::<T, _, _>(n, n, stack) };
+		let (mut X, stack) = unsafe { temp_mat_uninit::<T, _, _>(n, n, stack) };
 		let mut X = X.as_mat_mut();
 		if const { T::IS_REAL } {
 			evd_from_real_schur_imp::<T::Real>(
 				unsafe { core::mem::transmute(H) },
 				unsafe { core::mem::transmute(X.rb_mut()) },
 				par.reborrow(),
+				stack,
 				params.evd_from_schur,
 			);
 		} else {
@@ -2157,6 +2244,7 @@ fn evd_imp<T: ComplexField>(
 				Conj::No,
 				X.rb_mut(),
 				par.reborrow(),
+				stack,
 				params.evd_from_schur,
 			);
 		}
@@ -2177,7 +2265,7 @@ fn evd_imp<T: ComplexField>(
 		}
 	}
 	if let (Some(mut u), Some(Z)) = (u_left, Z.rb()) {
-		let (mut X, _) = unsafe { temp_mat_uninit::<T, _, _>(n, n, stack) };
+		let (mut X, stack) = unsafe { temp_mat_uninit::<T, _, _>(n, n, stack) };
 		let mut X = X.as_mat_mut().reverse_rows_mut();
 		if const { T::IS_REAL } {
 			evd_from_real_schur_imp::<T::Real>(
@@ -2186,6 +2274,7 @@ fn evd_imp<T: ComplexField>(
 				},
 				unsafe { core::mem::transmute(X.rb_mut()) },
 				par.reborrow(),
+				stack,
 				params.evd_from_schur,
 			);
 		} else {
@@ -2194,6 +2283,7 @@ fn evd_imp<T: ComplexField>(
 				Conj::Yes,
 				X.rb_mut(),
 				par.reborrow(),
+				stack,
 				params.evd_from_schur,
 			);
 		}

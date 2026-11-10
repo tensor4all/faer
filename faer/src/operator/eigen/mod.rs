@@ -442,6 +442,7 @@ fn partial_schur_real_imp<T: RealField>(
 				H_slice.rb(),
 				X.as_mut(),
 				par.reborrow(),
+				stack,
 				auto!(T),
 			);
 			let mut vecs = vecs.rb_mut().get_mut(..n, ..n);
@@ -646,6 +647,7 @@ fn partial_schur_real_imp<T: RealField>(
 		H,
 		X.as_mut(),
 		par.reborrow(),
+		stack,
 		auto!(T),
 	);
 	let mut vecs = tmp.rb_mut().get_mut(.., ..n);
@@ -885,6 +887,7 @@ fn partial_schur_cplx_imp<T: ComplexField>(
 				Conj::No,
 				X.as_mut(),
 				par.reborrow(),
+				stack,
 				auto!(T),
 			);
 			let mut vecs = vecs.rb_mut().get_mut(..n, ..n);
@@ -1065,6 +1068,7 @@ fn partial_schur_cplx_imp<T: ComplexField>(
 		Conj::No,
 		X.as_mut(),
 		par.reborrow(),
+		stack,
 		auto!(T),
 	);
 	let mut vecs = tmp.rb_mut().get_mut(.., ..n);
@@ -1147,6 +1151,9 @@ pub fn partial_eigen_scratch<T: ComplexField>(
 		par,
 		auto!(T),
 	);
+	// the range-scaled copy of the Schur form, taken while `X` holds its
+	// eigenvectors
+	let scaled = linalg::evd::scaled_into_range_scratch::<T>(max_dim);
 	StackReq::all_of(&[
 		w,
 		residual,
@@ -1157,7 +1164,7 @@ pub fn partial_eigen_scratch<T: ComplexField>(
 		vecs,
 		tmp,
 		householder,
-		StackReq::any_of(&[hess, apply_house, schur, arnoldi]),
+		StackReq::any_of(&[hess, apply_house, schur, arnoldi, scaled]),
 	])
 }
 
