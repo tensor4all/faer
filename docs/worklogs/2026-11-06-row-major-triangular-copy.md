@@ -15,7 +15,10 @@
 ## Verification conclusions and constraints
 - Copy at 1024 f64, one thread: 4.16 -> 0.65 ms row-major; 0.30 ms column-major, unchanged.
 - Campaign cell (fbench, pinned, three processes per arm, MKL in process): row-major 5.445 -> 2.236 ms, column-major
-  1.674 -> 1.649. LU is not on this path and did not move.
+  1.674 -> 1.649. LU is not on this path and did not move. **That slide cell, and the copy timings above, are
+  supporting evidence, not the acceptance measurement**: one size, one dtype, one order, boost on, no control. The
+  protocol run is [2026-11-07-tiled-triangular-copy-acceptance.md](2026-11-07-tiled-triangular-copy-acceptance.md),
+  which reproduces the cell and finds the loss below the cache boundary that #323/#330 gated on.
 - Not done: `copy_from` (full matrix, 8.6 ms row-major) and a parallel copy for `Llt::new`, which has a `par`.
   The remaining row-major gap, about 0.4-0.6 ms, is the tiled copy itself plus its `zeros` pass.
 - Harness observation, not about this change: the `lu` cell's row-major time depends on what ran earlier in the
