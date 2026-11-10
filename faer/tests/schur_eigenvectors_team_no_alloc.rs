@@ -12,8 +12,9 @@
 //! Apple M5 only from about `n = 512`. `n = 1024` dispatches for all four on both, so it is the
 //! size that catches the defect for f32 and on aarch64.
 //!
-//! The allocator counts every allocation of the process while the call runs; the inputs, the
-//! output, the scratch and the residual checks are outside the counted interval.
+//! The allocator counts every allocation of the process while the call runs, except those of
+//! libtest's harness thread (see `count`); the inputs, the output, the scratch and the residual
+//! checks are outside the counted interval.
 //!
 //! The back-transform by `q` is a full `matmul`, which off x86_64 (and on x86_64 without AVX2 and
 //! FMA) falls back to the `gemm` crate, whose packing buffer is allocated per call above its
@@ -34,21 +35,55 @@ static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 /// Sizes of the first counted allocations, so a failure says what allocated.
 static SIZES: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
 
-fn note(size: usize) {
-	if COUNTING.load(Ordering::Relaxed) {
-		let i = ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		if i < SIZES.len() {
-			SIZES[i].store(size, Ordering::Relaxed);
-		}
-	}
+std::thread_local! {
+	/// Set while `count` itself runs on this thread, so its own allocations are not counted.
+	static IN_COUNT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
+
+/// Counts one allocation of `size` bytes and records its size, unless it comes from libtest's
+/// harness thread.
+///
+/// libtest runs each test on a thread of its own, named after the test. The process's `main`
+/// thread is the harness: it waits for results and works as a watchdog, and once a test has run
+/// for 60 s it prints `test ... has been running for over 60 seconds`. That warning allocates
+/// three times: `Vec<TestDesc>::push` in `get_timed_out_tests` (`library/test/src/lib.rs`) and
+/// the `format!` in `PrettyFormatter::write_timeout` (`library/test/src/formatters/pretty.rs`),
+/// which allocates once and grows once. Under `cargo llvm-cov` this test runs for minutes. The
+/// warning then lands inside whichever warm call is being counted, and the count reports
+/// libtest's three allocations as faer's (#362: f64 n = 1024 F on the CI runner, f32 on a Zen 2
+/// host). The harness thread is therefore excluded. The test body and the team's workers never
+/// run on `main` (`check_all` asserts this for the body), so no allocation of the measured call
+/// is dropped.
+///
+/// `thread::current()` can allocate the first time a thread calls it, and that allocation comes
+/// back into this allocator. `IN_COUNT` makes the nested call return without counting, so the
+/// filter neither recurses nor counts its own allocation. The thread is only inspected while
+/// `COUNTING` is set.
+fn count(size: usize) {
+	if !COUNTING.load(Ordering::Relaxed) {
+		return;
+	}
+	let _ = IN_COUNT.try_with(|in_count| {
+		if in_count.replace(true) {
+			return;
+		}
+		if std::thread::current().name() != Some("main") {
+			let i = ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+			if i < SIZES.len() {
+				SIZES[i].store(size, Ordering::Relaxed);
+			}
+		}
+		in_count.set(false);
+	});
+}
+
 unsafe impl GlobalAlloc for Counting {
 	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		note(layout.size());
+		count(layout.size());
 		unsafe { System.alloc(layout) }
 	}
 	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		note(layout.size());
+		count(layout.size());
 		unsafe { System.alloc_zeroed(layout) }
 	}
 	unsafe fn realloc(
@@ -57,7 +92,7 @@ unsafe impl GlobalAlloc for Counting {
 		layout: Layout,
 		new_size: usize,
 	) -> *mut u8 {
-		note(new_size);
+		count(new_size);
 		unsafe { System.realloc(ptr, layout, new_size) }
 	}
 	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -186,11 +221,11 @@ fn warm_allocations<T: Scalar>(
 			MemStack::new(&mut mem),
 		);
 	};
-	// Two identical calls before the counted one: the first creates the team workers and the
-	// per-thread working buffers; on a loaded runner a worker can still be created on the second
-	// (tensor4all/faer#362: one run reported 3 allocations for f64 at n = 1024 F, while the run
-	// four minutes earlier reported 0 on a test file that differed only in a comment). The
-	// steady state is the third call.
+	// Two identical calls before the counted one: the first grows the per-thread working
+	// buffers. The 3 allocations that tensor4all/faer#362 once reported for f64 at n = 1024 F
+	// were not a late setup on the second call: they were libtest's 60 s warning on the harness
+	// thread, which `count` now leaves out. The second warm-up is kept as a margin; it costs one
+	// call per cell.
 	call(&mut x, par);
 	call(&mut x, par);
 	ALLOCATIONS.store(0, Ordering::SeqCst);
@@ -234,6 +269,13 @@ fn warm_allocations<T: Scalar>(
 
 fn check_all(with_q: bool) {
 	let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+	// `count` leaves out the thread named `main` (libtest's harness); a body running there would
+	// have its own allocations dropped and the test would pass without measuring anything
+	assert_ne!(
+		std::thread::current().name(),
+		Some("main"),
+		"the test body runs on the harness thread, whose allocations are not counted"
+	);
 	faer::team::with_team(2, |mut par| {
 		let mut failures = Vec::new();
 		for n in [64, 257, 1024] {
