@@ -1828,6 +1828,27 @@ pub fn gevd_scratch<T: ComplexField>(
 /// \beta = 0$ is returned with `Ok` only when the QZ itself finds it, i.e. for
 /// a pencil that is singular within the QZ's backward error, the same at every
 /// scale.
+///
+/// in short, for `f64`:
+///
+/// - **guaranteed range** (for a well-conditioned pencil): every entry of
+///   $(sA, sB)$ normal and finite. for the pencils of `tests/gevd_scaled_pencil.rs` (entries of order $s$) that
+///   is $10^{-305} \le s \le 10^{307}$; the ends are asserted
+///   (`documented_range_ends_f64`, eigenvalues and eigenvectors within
+///   $10^{-13}$ of $s = 1$), and a scan over every $s = 10^k$ in between
+///   measured at most $3 \cdot 10^{-15}$.
+///   this includes the scales of tensor4all/faer#370
+///   ($10^{-150}, 10^{-146}, 10^{154}, 10^{160}$, asserted by
+///   `issue_scales_f64`), where a complex pair's eigenvectors came out NaN
+///   before tensor4all/faer#374.
+/// - **subnormal entries**: `Ok` with finite results whose accuracy follows
+///   the precision the input has lost (measured against $s = 1$: $3.7 \cdot
+///   10^{-13}$ at $s = 10^{-311}$, $3.3 \cdot 10^{-7}$ at $10^{-317}$, and
+///   eigenvalues off by up to $5 \cdot 10^{-4}$ relative at $10^{-320}$).
+/// - **non-finite entries** (for example $s \ge 10^{308}$, where $sA$
+///   overflows): [`GevdError::NoConvergence`]. NaN eigenvectors are never
+///   returned with `Ok`: requested eigenvectors that come out non-finite also
+///   give [`GevdError::NoConvergence`].
 #[track_caller]
 pub fn gevd_real<T: RealField>(
 	A: MatMut<'_, T>,
@@ -1863,8 +1884,27 @@ pub fn gevd_real<T: RealField>(
 ///
 /// the values in $A$ and $B$ after this function is called are unspecified.
 ///
+/// # range of scales
+///
 /// $A$ and $B$ are prescaled, and $\alpha$, $\beta$ scaled back, as in
-/// [`gevd_real`] (see its range of scales).
+/// [`gevd_real`], and the eigenvector back substitution divides with a scaled
+/// complex reciprocal, so the range is that of [`gevd_real`]. for `c64`,
+/// measured on the same three real pencils of `tests/gevd_scaled_pencil.rs`
+/// taken as complex:
+///
+/// - **guaranteed range** (for a well-conditioned pencil): every entry of
+///   $(sA, sB)$ normal and finite, which
+///   for these pencils is $10^{-305} \le s \le 10^{307}$. the ends
+///   (`documented_range_ends_c64`) and the tensor4all/faer#370 scales
+///   $10^{-150}, 10^{-146}, 1, 10^{154}, 10^{160}$ (`issue_scales_c64`) are
+///   asserted within $10^{-13}$ of $s = 1$; a scan over every $s = 10^k$ in
+///   between measured at most $3 \cdot 10^{-15}$.
+/// - **subnormal entries**: `Ok` with finite results whose accuracy follows
+///   the precision the input has lost (measured: $3.7 \cdot 10^{-13}$ at
+///   $s = 10^{-311}$, $3.3 \cdot 10^{-7}$ at $10^{-317}$).
+/// - **non-finite entries** (for example $s \ge 10^{308}$):
+///   [`GevdError::NoConvergence`]; requested eigenvectors that come out
+///   non-finite also give [`GevdError::NoConvergence`] rather than `Ok`.
 #[track_caller]
 pub fn gevd_cplx<T: ComplexField>(
 	A: MatMut<'_, T>,

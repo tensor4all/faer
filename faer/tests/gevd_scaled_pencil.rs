@@ -972,12 +972,13 @@ fn nan_count<T: Copy>(m: &Mat<T>, is_nan: impl Fn(T) -> bool) -> usize {
 		.sum()
 }
 
-/// Runs every pencil at every `ISSUE_SCALES` entry through `run`, prints one
+/// Runs every pencil at every entry of `scales` through `run`, prints one
 /// row per case (finite, NaN count of left + right, differences against
 /// `s = 1`), and only then asserts, so a failing run still prints the whole
 /// table.
 fn check_issue_scales<U>(
 	kind: &str,
+	scales: &[f64],
 	run: impl Fn(&Mat<f64>, &Mat<f64>, f64) -> Result<(Gevd, U, U), GevdError>,
 	nans: impl Fn(&U) -> usize,
 ) {
@@ -988,7 +989,7 @@ fn check_issue_scales<U>(
 	for (name, make) in PENCILS {
 		let (a, b) = make();
 		let (reference, ..) = run(&a, &b, 1.0).unwrap();
-		for s in ISSUE_SCALES {
+		for &s in scales {
 			let row = match run(&a, &b, s) {
 				Err(e) => {
 					failures.push(format!("{name}, s = {s:e}: {e:?}"));
@@ -1027,7 +1028,9 @@ fn check_issue_scales<U>(
 /// changed.
 #[test]
 fn issue_scales_f64() {
-	check_issue_scales("f64", gevd, |u: &Mat<f64>| nan_count(u, f64::is_nan));
+	check_issue_scales("f64", &ISSUE_SCALES, gevd, |u: &Mat<f64>| {
+		nan_count(u, f64::is_nan)
+	});
 }
 
 /// tensor4all/faer#370 at the issue's scales, `c64` (`gevd_cplx` on the same
@@ -1035,7 +1038,47 @@ fn issue_scales_f64() {
 /// this asserts what #374 only measured.
 #[test]
 fn issue_scales_c64() {
-	check_issue_scales("c64", gevd_c64, |u: &Mat<c64>| {
+	check_issue_scales("c64", &ISSUE_SCALES, gevd_c64, |u: &Mat<c64>| {
 		nan_count(u, |z: c64| z.re.is_nan() || z.im.is_nan())
 	});
+}
+
+/// The ends of the range the `gevd_real` and `gevd_cplx` rustdoc guarantees
+/// (every entry of `(s A, s B)` normal and finite): `1e-305`, the smallest
+/// power of ten at which all three pencils are normal, and `1e307`, the
+/// largest at which none overflows.
+const RANGE_ENDS: [f64; 2] = [1e-305, 1e307];
+
+/// Past the upper end the entries overflow to infinity and both functions
+/// return `Err(NoConvergence)`, the documented outcome, never `Ok`.
+const OVERFLOWING: f64 = 1e308;
+
+#[test]
+fn documented_range_ends_f64() {
+	check_issue_scales("f64", &RANGE_ENDS, gevd, |u: &Mat<f64>| {
+		nan_count(u, f64::is_nan)
+	});
+	for (name, make) in PENCILS {
+		let (a, b) = make();
+		let r = gevd(&a, &b, OVERFLOWING);
+		assert!(
+			matches!(r, Err(GevdError::NoConvergence)),
+			"f64 {name}, s = {OVERFLOWING:e}: expected Err(NoConvergence), got Ok"
+		);
+	}
+}
+
+#[test]
+fn documented_range_ends_c64() {
+	check_issue_scales("c64", &RANGE_ENDS, gevd_c64, |u: &Mat<c64>| {
+		nan_count(u, |z: c64| z.re.is_nan() || z.im.is_nan())
+	});
+	for (name, make) in PENCILS {
+		let (a, b) = make();
+		let r = gevd_c64(&a, &b, OVERFLOWING);
+		assert!(
+			matches!(r, Err(GevdError::NoConvergence)),
+			"c64 {name}, s = {OVERFLOWING:e}: expected Err(NoConvergence), got Ok"
+		);
+	}
 }
