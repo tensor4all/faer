@@ -9,9 +9,10 @@
   the same cell, where main was 1.13x slower than MKL. The rebased branch is
   `perf/tall-skinny-column-slab-rebased` (head `ffc4c89f`), offered as a draft PR off this one.
 - The issue's predeclared target (3x in both orders and both dtypes) is **still not met**: 2.70x
-  (c) and 2.00x (f) for f64, 1.27x and 1.54x for c64. A slab of a row-major operand still misses the
-  kernel's fused path, which is why the f-order gain is smaller than the c-order one at 8T and why
-  c64 gains least.
+  (c) and 2.00x (f) for f64, 1.27x and 1.54x for c64. We think a slab of a row-major operand still
+  misses the kernel's fused path, and that this is why the f-order gain is smaller than the c-order
+  one at 8T and why c64 gains least, but there is no comparison that isolates the fused path (no
+  otherwise-identical run with and without it), so this is a hypothesis, not a measured cause.
 - 0.25.0 moved this cell little. Measured against `main` (`5c2f4b70`, the baseline; `0e15729`, the
   0.25.0 tag, is its ancestor 246 commits back), 0.25.0 is slower in all eight cells of the table
   below: 0.3-1.9% in the four 4T cells and 1.9-2.0% in order c at 8T, but 6.7% in f64 order f
@@ -87,9 +88,12 @@ orders:
 | `gemm` 64x64x64 (inside the cap, below the flop floor at 64^3 f64) | c | 0.0039 | 0.0039 | 0.0047 |
 | | f | 0.0039 | 0.0039 | 0.0049 |
 
-The write-back leg's f-order column is bimodal on this host in every condition
-(0.147-0.168 ms, one set high and two low in a different order per condition), so it shows no
-effect of the change; the 64x64x64 cell is identical to main's.
+This measurement cannot isolate the write-back leg. Its order c is unchanged (slab 0.1379 against
+main 0.1381), but in order f the slab median is 12.5% slower than main's (0.1665 against 0.1480),
+while it is within 0.2% of 0.25.0's (0.1662). The f-order column is bimodal on this host in every
+condition (0.147-0.168 ms, one set high and two low in a different order per condition), so three
+process sets cannot tell a slowdown from the bimodality; resolving it needs more sets or a
+pinned-frequency run. The 64x64x64 cell is identical to main's.
 
 The three process-set medians of one condition are within 1.8% of each other (largest: c64 8T
 order c on the slab, 0.2165/0.2199/0.2204), so the branch/main gap is far outside this machine's
@@ -124,6 +128,7 @@ What remains unverified, and what a merge would still need:
 - The gate keeps the branch's own work floor beside main's `utils::cost` rule (see "Not chosen"
   above): the fork carries two rules for one question until that is settled and measured.
 - Order c is still 1.36x slower than order f on the slab at 8T (0.0674 against 0.0495), the deficit
-  the original ledger row named: a slab whose operands are row-major misses the fused kernel.
+  the original ledger row named. The ledger row attributes it to a slab whose operands are row-major
+  missing the fused kernel; that is the working hypothesis, not isolated by any comparison here.
 - Nothing here says the branch is correct beyond the two added tests, the crate's own suite and
   `fbench verify` on this cell.
