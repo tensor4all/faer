@@ -62,15 +62,18 @@ commit):
 | c64 | 256 | 1.001 | 0.959 | 0.993 | 0.931 |
 | c64 | 512 | 0.999 | 0.995 | 0.995 | 0.985 |
 
-Worst cell against the base: **+0.32%** (8T c64 128). Worst effect of the clause over the arm without
-it: **+0.37%** (same cell); the clause's win at 256 is 9.2-12.3% (f64), 4.1-6.9% (c64) and 1.6-3.2% (c32).
+Worst cell against the base: **+0.32%** (8T c64 128), as the run's own aggregation over the five
+interleaved process sets gives it (the per-process observations are in the raw CSVs, not in the
+repository). Worst effect of the clause over the arm without it: **+0.37%** (same cell); the clause's win at 256 is 9.2-12.3% (f64), 4.1-6.9% (c64) and 1.6-3.2% (c32).
 
-Guard cells, because the clause also flips the QR/LQ routes whose packed destination has a
-power-of-two stride (`copy_r` / `copy_l`, f64, order c, five sets): `qr_factor 2048x256` 1T 0.990,
-8T 1.001; `qr_factor 64x2048` 1T 1.006, 8T 0.997; `lq 2048x64` 1T 1.010, 8T **1.025**; `lq 256x2048`
-1T 0.998, 8T 0.996, all against the base. The 2.5% is the largest measured cost of tiling a 2 MiB
-factor that has no aliasing problem; it is inside the 3% bound the issue set, and those four cells are
-newly tiled, so they are the cells to look at if a later run disagrees.
+Guard cells — the QR/LQ routes whose packed destination has a power-of-two stride (`copy_r` /
+`copy_l`, f64, order c, five sets): `qr_factor 2048x256` 1T 0.990, 8T 1.001; `qr_factor 64x2048` 1T
+1.006, 8T 0.997; `lq 2048x64` 1T 1.010, 8T **1.025**; `lq 256x2048` 1T 0.998, 8T 0.996, all against
+the base. Their working sets are above `TILE_COPY_CACHE_BYTES`, so **both arms tile them** and the
+clause does not change the path there: 1.0-2.5% is the run-to-run spread of that pair of binaries, not
+a measured cost of the clause. The clause's own overhead in the dispatch cells it does flip is the
+acceptance row above, worst **+0.37%** against the #330 arm. The #330 arm for these four guard cells
+was not measured.
 
 Not measured, and therefore not claimed: f32; n = 1024 (tiled by the byte gate in both arms); tall and
 wide factors at other powers-of-two strides (`1024 x 64` etc.); whether 1024 bytes of stride aliases

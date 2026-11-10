@@ -123,9 +123,10 @@ pub(crate) fn tiled_copies() -> usize {
 /// before it. Measured on `tensor4all/faer#352` (evo, Zen5, `Llt::new` on a
 /// row-major f64 matrix, n swept 240..272): `256` is the only one of those n
 /// whose destination column stride is a power of two (2048 bytes), and it is
-/// the only one where the elementwise walk loses to the tiles -- 1.136x at 1T
-/// and 1.157x at 8T against the walk, while 248/252/260/264 (1984-2112 bytes)
-/// keep 0.89-0.96x for the walk. Those inputs are square, so the sweep moves the
+/// the only one where the elementwise walk loses to the tiles: the walk takes
+/// 1.136x the tiles' time at 1T and 1.157x at 8T (tiles/walk 0.88 / 0.86),
+/// while at 248/252/260/264 (1984-2112 bytes) the walk keeps 0.89-0.96x of the
+/// tiles' time. Those inputs are square, so the sweep moves the
 /// row-major source's row stride and the destination's column stride together;
 /// the gate is on the destination stride because that is the one the walk steps
 /// by a column at a time, and a sweep holding one stride fixed was not run.
