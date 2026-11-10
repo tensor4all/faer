@@ -884,7 +884,23 @@ mod tests {
 			let cm_info = run(&mut cm, &mut p_cm, &mut pi_cm, (0, 1, m as isize));
 			let rm_info =
 				run(&mut rm, &mut p_rm, &mut pi_rm, rm_strides(m, n, flipped));
-			compare_row_major(m, n, flipped, "partial pivoting lu", &cm, &rm);
+			// bit for bit where the copy is taken; a row-major view (`|col_stride|
+			// = 1`) is otherwise factored in place (tensor4all/faer#314): its leaf is
+			// the column-major leaf on a copy of the panel, but the trailing
+			// solves and products take the row-major operands as they are and need
+			// not round the same way (observed: `f64` bit for bit, `c64` not)
+			compare_row_major_exact_if(
+				m,
+				n,
+				flipped,
+				"partial pivoting lu",
+				&cm,
+				&rm,
+				{
+					let (_, rs, cs) = rm_strides(m, n, flipped);
+					plu::takes_the_copy(m, n, rs, cs, par.degree())
+				},
+			);
 			same_index("partial pivoting lu perm", &p_cm, &p_rm);
 			same_index("partial pivoting lu perm inv", &pi_cm, &pi_rm);
 			same_index(

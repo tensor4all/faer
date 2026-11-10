@@ -76,3 +76,78 @@
 - This is a correctness change. Normalizing between blocks adds bounded
   vector passes to the existing substitution; no timing or performance claim
   is made.
+
+## Conformance follow-up (tensor4all/faer#234)
+
+### Decisions
+
+- The working numerical code is unchanged; the deviations from `dlaln2`
+  are documented next to the code instead. The `smin` clamp on the
+  factorized second pivot is not a reordering of `dlaln2`: Reference LAPACK
+  v3.12.1 also forms the multiplier and the eliminated pivot first and then
+  clamps the pivot, so for a 2x2 the two perturb the same entry.
+- The 2x2 overflow scale (`shifted_2x2_scale`) bounds the unreduced right
+  hand side against the smaller pivot. `dlaln2` bounds the eliminated one and
+  rescales again after the solve; here the caller's per-block normalization
+  takes that second role. The scale only changes the working vector by a
+  positive factor, so the vectors are close to `dtgevc`'s but not
+  bit-identical.
+- The differential test uses fixtures generated once, offline, from the LAPACK
+  that Julia 1.12.5 loads (OpenBLAS 0.3.29, LAPACK 3.12.0). The SciPy wheel
+  reachable on the generating host links Apple Accelerate rather than
+  Reference LAPACK, so it was not used. The fixtures hold `dggev`'s eigenpairs,
+  `dtgsna`-style eigenvalue condition numbers, and per-cluster deflating
+  subspaces from `dgges` + `dtgsen` with the exact `Difu`/`Difl`. The test
+  compares against first-order bounds with the threshold of LAPACK's
+  `TESTING/dgg.in` (20), so a repeated or nearly repeated cluster is compared
+  by its subspace, not by its individual vectors.
+- Whether a cluster is semisimple comes from how the pencil was built, not
+  from the computed vectors: rounding splits a transformed Jordan pair by
+  about `sqrt(eps)`, and its reference basis then sits at any `sqrt(eps)`
+  rank threshold.
+
+### Verification conclusions and constraints
+
+- All seven fixtures agree with the reference within their conditioning, with
+  every ratio at most 1.98 against the threshold of 20. The transformed
+  near-defective pencil (eigenvalue `RCONDE` 6.0e-6) and the transformed
+  defective one (1.6e-7) are the hard cases. On the defective one, the
+  vectors' angle to LAPACK's own vectors is 2.9e-8, about `sqrt(eps)`, as
+  expected for a split Jordan pair. On the three fixtures already in Schur
+  form, the subspace checks are trivial, since the subspaces are coordinate
+  subspaces, and the vectors match LAPACK's directions exactly. A
+  `1e-12` perturbation of one entry of the pencil fails all seven.
+- The left- and right-vector calls do use different windows of the working
+  vector (left: from `je`, offset `j - je`; right: from row 0, offset `j`; the
+  issue had the two sides the other way round). The two forms are equivalent
+  because the left vector is zero above `je`, and the offset is read only
+  when the 2x2 solve returns a scale other than one. Under `dtgevc`'s
+  coefficient normalization, that happens only for pencils whose norm is near
+  `max_positive`. No GEVD test, no fixture, uniform scalings `1e-320 ..
+  1e308` of the faer#220 pencils, and 4000 graded random quasi-triangular
+  pencils reached it. Changing the left call to the right call's form,
+  changing only its offset, or changing only its window leaves every GEVD
+  test green. The new direct left-vector test pins the values that path
+  produces. It fails when the sign of the `bcoefi` term in the left right hand
+  side is flipped (sine 0.38).
+- Out of scope and unchanged: the complex 2x2 solve divides with
+  `num_complex`'s unscaled `|d|^2`, not with a `DLADIV` equivalent, and
+  `gevd_real` does not prescale the pencil as `dggev` does. In f64 the
+  faer#220 pencils scaled by `s` give non-finite vectors for `s` outside
+  `[1e-146, 1e154]`, measured at powers of ten. The inputs to the 2x2 solve
+  and its LU are finite there, and the quotient by a pivot near `smin` is not.
+  `1e-200` already failed before the #220 fix.
+- Cost of the per-block rescale and norm pass: about 6% of the eigenvector
+  stage. The measurement timed `qz_to_gevd_real` alone, left and right vectors,
+  `Par::Seq`, on a pencil already in Schur form, so that stage is all of the
+  measured time. It is a local scan on an unpinned laptop, not an acceptance
+  run: at n = 1000 the median is 606.6 ms with the pass and 572.0 ms without
+  it, and seven interleaved pairs fall between 4.8% and 6.4%. At n = 300 it is
+  6.5% (5.2% to 10.9%). Both builds produce the same checksum, since the
+  normalization never engages on that pencil. On a dense pencil the QZ stage
+  dominates, so the share of the whole `gevd` is smaller; it was not measured.
+
+  Not reproducible from this tree: the timing entry point and the two
+  measured binaries were scratch files and were never committed, so the
+  percentages above record an ordering measured once, not a benchmark
+  that `cargo test` here can re-run.
