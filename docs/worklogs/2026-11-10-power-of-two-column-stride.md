@@ -3,8 +3,9 @@
 ## Decisions
 
 - `copy_lower_across_layouts` tiled on the working set alone since `#330`, and `Llt::new` on a row-major
-  f64 matrix was the one losing cell: at n = 256 the tiles are 13.6% faster than the elementwise walk
-  (1T) and 15.7% (8T), while at n = 240, 244, 248, 252, 260, 264, 272 the walk wins by 2-8%.
+  f64 matrix was the one losing cell: at n = 256 the elementwise walk takes 13.6% more time than the
+  tiles (1T) and 15.7% more (8T) -- the tiles are 12.0% / 13.6% faster in time -- while at n = 240,
+  244, 248, 252, 260, 264, 272 the walk wins by 3.5-7.3% (1T) and 9.6-11.1% (8T).
 - The n that loses is the only one of those eight whose **destination column stride** is a power of two:
   2048 bytes. 248/252/260/264 are 1984-2112 bytes; 256 is 2048. The walk writes the destination a
   column at a time, and a power-of-two stride lands every column on the same cache sets as the one
@@ -13,6 +14,11 @@
   destination's column stride **in bytes** (so it follows `size_of::<T>()` exactly as the working-set
   gate does; nothing branches on the scalar). Below the byte threshold, the copy tiles when the stride
   is a power of two at or above 2048 bytes.
+- What the sweep cannot separate: those inputs are square, so the 2048-byte stride is at once the
+  row-major source's row stride and the destination's column stride. The clause is written on the
+  destination stride -- the one the elementwise walk steps by a column at a time -- but a sweep that
+  holds one stride fixed while moving the other (padded views) was not run, so that attribution is
+  the mechanism the code reads, not a measurement that rules the source stride out.
 - Not chosen: a shape test (square only) or an f64-only clause. The stride is what the measurement
   separates, and the same 2048 bytes of stride is a `256 x 256` f64, a `128 x 128` c64 or a
   `512 x 512` f32 destination.
@@ -57,7 +63,7 @@ commit):
 | c64 | 512 | 0.999 | 0.995 | 0.995 | 0.985 |
 
 Worst cell against the base: **+0.32%** (8T c64 128). Worst effect of the clause over the arm without
-it: **+0.37%** (same cell); the clause's win at 256 is 9-12% (f64) and 3-7% (c32/c64).
+it: **+0.37%** (same cell); the clause's win at 256 is 9.2-12.3% (f64), 4.1-6.9% (c64) and 1.6-3.2% (c32).
 
 Guard cells, because the clause also flips the QR/LQ routes whose packed destination has a
 power-of-two stride (`copy_r` / `copy_l`, f64, order c, five sets): `qr_factor 2048x256` 1T 0.990,

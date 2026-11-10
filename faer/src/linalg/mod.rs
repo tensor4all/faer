@@ -125,8 +125,12 @@ pub(crate) fn tiled_copies() -> usize {
 /// whose destination column stride is a power of two (2048 bytes), and it is
 /// the only one where the elementwise walk loses to the tiles -- 1.136x at 1T
 /// and 1.157x at 8T against the walk, while 248/252/260/264 (1984-2112 bytes)
-/// keep 1.02-1.08x for the walk. 1024 bytes (`128 x 128` f64) was not measured,
-/// so the clause starts at the one stride that was.
+/// keep 0.89-0.96x for the walk. Those inputs are square, so the sweep moves the
+/// row-major source's row stride and the destination's column stride together;
+/// the gate is on the destination stride because that is the one the walk steps
+/// by a column at a time, and a sweep holding one stride fixed was not run.
+/// 1024 bytes (`128 x 128` f64) was not measured either, so the clause starts at
+/// the one stride that was.
 const TILE_COPY_POWER_OF_TWO_STRIDE_BYTES: usize = 2048;
 /// Whether staging a `nrows x ncols` layout copy in [`COPY_TILE`] tiles pays,
 /// for a source and a destination of `size_of::<T>()` bytes per element and a
