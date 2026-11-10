@@ -393,6 +393,48 @@ fn solve_complex_shifted_1x1<T: RealField>(
 }
 // Reserve room for the two elimination/substitution steps, including complex
 // products. The caller protects both pivots before using this bound.
+//
+// What it guarantees: with `limit = min(pivot_min, 1) / (16 * min_positive)`
+// and the right hand side scaled to `|b|_max <= limit`, no intermediate of
+// `solve_scaled_2x2` overflows. Complete pivoting gives `|L10| <= 1` and
+// `|U01 / U00| <= 1`, so `|b1 - L10 b0| <= 2 |b|_max`, `|x1| <= 2 |b|_max /
+// pivot_min` and `|x0| <= 3 |b|_max / pivot_min`, all below `3 / (16 *
+// min_positive)`; the factor 16 covers this and the growth of complex
+// products. `pivot_min` is capped at 1 because only a pivot below 1 can
+// enlarge the solution (`dlaln2` likewise scales only when `|U11| < 1`).
+//
+// How it differs from `dlaln2`: Reference LAPACK bounds the eliminated
+// right hand side, `BBND = max(|b0 U11 / U00|, |b1 - L10 b0|)`, against
+// `BIGNUM * |U11|` with `BIGNUM = 1 / (2 * min_positive)`, after the `SMIN`
+// clamp, and rescales a second time when `|x| > BIGNUM / max|C|` so that the
+// caller's next update `C x` cannot overflow. Here the bound is taken on the
+// unreduced `b` against the smaller pivot, which is sufficient but can scale
+// where `dlaln2` would not; the second rescale is left to the caller, which
+// normalizes the whole working vector after every block
+// (`rescale_gevd_rhs`). A different scale only changes the working vector by
+// a positive factor, which the final normalization removes; the vector is
+// not bit-identical to `dtgevc`'s.
+//
+// Out of scope: this is an overflow guard for the 2x2 solve, nothing more.
+// - Underflow: scaling down may flush small components to subnormals or zero
+//   earlier than `dlaln2` would.
+// - The complex divisions in `solve_scaled_2x2` (and the complex reciprocal
+//   in `solve_complex_shifted_1x1`) form `|d|^2` without scaling, unlike
+//   `dlaln2`'s `DLADIV`, so they lose the result for `|d|` outside about
+//   `[sqrt(min_positive), sqrt(max_positive)]` (`1e-154 .. 1e154` in f64,
+//   `1e-19 .. 1e19` in f32), whatever this scale is. A complex pair's
+//   vectors are therefore only finite for pencils within that range: in f64,
+//   `(s A, s B)` for the faer#220 pencils gives non-finite vectors for `s`
+//   outside `[1e-146, 1e154]`, measured at powers of ten (faer#234). Reference LAPACK's `dggev` avoids this
+//   range by scaling the pencil into `[sqrt(min_positive) / eps, eps /
+//   sqrt(min_positive)]` before the QZ; `gevd_real` does not.
+// - With `dtgevc`'s coefficient normalization the right hand side is about
+//   `|coef| |(A, B)| xmax` and `smin >= eps |coef| |(A, B)|`, so `|b|_max /
+//   pivot_min` stays below about `2 / eps`: this scale can only engage when
+//   `pivot_min > 1` and `|b|_max > 1 / (16 min_positive)`, that is for
+//   `|(A, B)|` near `max_positive`, beyond the range where the complex
+//   divisions above already fail. No GEVD test, reference fixture or graded
+//   random pencil (entries up to `1e+-300`) reaches it (faer#234).
 fn shifted_2x2_scale<T: RealField>(bnorm: T, pivot_min: T) -> T {
 	let limit = (min_positive::<T>() * from_f64::<T>(16.0)).recip()
 		* pivot_min.fmin(one::<T>());
@@ -480,6 +522,21 @@ fn solve_complex_shifted_2x2<T: RealField>(
 		// `C` is exactly singular when the block holds a copy of the
 		// eigenvalue being computed, and the zero pivot would divide the right
 		// hand side into `inf`/`NaN` (faer#220)
+		//
+		// The clamp is applied to the factorized `U11`, after `lu_in_place`
+		// has formed `L10 = C10 / U00`, and `L10` is not recomputed. For a 2x2
+		// this is the same perturbation as `dlaln2`'s, not an approximation of
+		// it: `dlaln2` also forms `LR21 = CR21 / UR11` and `UR22 = CR22 - UR12 *
+		// LR21` first and then clamps `UR22` (v3.12.1, SRC/dlaln2.f, real 2x2
+		// and complex 2x2 branches). The multiplier depends only on the first
+		// pivot, which complete pivoting makes the largest entry, `>= cmax >=
+		// smin`, so it never needs protection; the clamp replaces the solved
+		// system by `L (U + (smin - U11) e1 e1^T)`, which perturbs only the
+		// pivoted (1, 1) entry of `C`, by less than `2 smin`. What can differ
+		// from `dlaln2` is the first pivot itself: faer's LU may rank complex
+		// entries by another magnitude than `dlaln2`'s `|re| + |im|` and break
+		// ties differently. Any largest entry gives `|L10| <= 1` and the same
+		// argument.
 		if C[(1, 1)].abs() < *smin {
 			C[(1, 1)] = smin.copy();
 		}
@@ -530,7 +587,9 @@ fn solve_complex_shifted_2x2<T: RealField>(
 				Default::default(),
 			);
 		// the second pivot is protected as in the real branch, measured by
-		// `|re| + |im|` (LAPACK `dlaln2`)
+		// `|re| + |im|` (LAPACK `dlaln2`), and for the same reason it is
+		// equivalent to `dlaln2`'s clamp after elimination (see the real
+		// branch above)
 		if C[(1, 1)].re.abs() + C[(1, 1)].im.abs() < *smin {
 			C[(1, 1)] = Complex {
 				re: smin.copy(),
@@ -851,6 +910,12 @@ fn qz_to_gevd_real<T: RealField>(
 					);
 					one()
 				};
+				// the left vector is zero above `je`, so this window (from `je`,
+				// offset `j - je`) and the right vectors' form (from row 0, offset
+				// `j`) give the same result; the offset only matters when the 2x2
+				// solve returned `scale != 1`, which `shifted_2x2_scale` explains
+				// is out of reach today.
+				// `left_vectors_of_schur_pencil_*` pins this path
 				xmax = rescale_gevd_rhs(
 					rhs.rb_mut().get_mut(je..j + na, ..),
 					j - je,
@@ -1978,6 +2043,164 @@ mod tests {
 				}
 			}
 		}
+	}
+	/// faer#234: the left-vector substitution of `qz_to_gevd_real`, checked
+	/// directly on a pencil already in generalized Schur form (so `Q = I` and
+	/// no QZ runs) against a plain complex forward substitution, rather than
+	/// through a residual. The pencil has a real eigenvalue first, so the
+	/// complex pairs start at `je > 0` and their substitution runs on the
+	/// `rhs` window that begins at `je` (offset `j - je`; the right vectors use
+	/// a window from row 0, offset `j`). Its three pairs `2 + 0.05 k +- i` are
+	/// coupled, so the working vector grows between blocks.
+	///
+	/// The window/offset pair itself is not observable here or anywhere else:
+	/// it is read only when the 2x2 solve returns `scale != 1`, which
+	/// `shifted_2x2_scale` explains is out of reach today.
+	/// Replacing it by the right vectors' form, or changing only the offset or
+	/// only the window, leaves every GEVD test green (faer#234). This test pins
+	/// the values the path produces, so a refactor that changes them fails.
+	///
+	/// Each column pair must equal, up to one complex factor, the vector `y`
+	/// with `y^T A = lambda y^T B` for the eigenvalue with positive imaginary
+	/// part (the convention `gevd_real` documents).
+	fn check_left_vectors_of_schur_pencil<T: RealField + Copy + Into<f64>>(
+		tol: f64,
+	) {
+		use crate::mat::Mat;
+		use num_complex::Complex as C;
+		let n = 9;
+		let delta = 0.05;
+		// blocks: [0], [1, 2], [3, 4], [5, 6], [7], [8]
+		let starts = [0usize, 1, 3, 5, 7, 8];
+		let mut a = Mat::<f64>::zeros(n, n);
+		let mut b = Mat::<f64>::zeros(n, n);
+		a[(0, 0)] = 0.5;
+		for (k, &o) in [1usize, 3, 5].iter().enumerate() {
+			let x = 2.0 + k as f64 * delta;
+			a[(o, o)] = x;
+			a[(o, o + 1)] = 1.0;
+			a[(o + 1, o)] = -1.0;
+			a[(o + 1, o + 1)] = x;
+			if o + 2 < 7 {
+				a[(o + 1, o + 3)] = 0.75;
+			}
+		}
+		a[(7, 7)] = 3.0;
+		a[(8, 8)] = -1.0;
+		// the 2x2 blocks of B are multiples of I (diagonal, as the Schur form
+		// requires, and equal so that the block's eigenvalue is `(x +- i) / b`)
+		for (bi, &i) in starts.iter().enumerate() {
+			let ie = starts.get(bi + 1).copied().unwrap_or(n);
+			for r in i..ie {
+				b[(r, r)] = 1.0 + 0.125 * bi as f64;
+			}
+			for j in ie..n {
+				for r in i..ie {
+					if a[(r, j)] == 0.0 {
+						a[(r, j)] = 0.1 * ((r + 2 * j) % 5) as f64 - 0.2;
+					}
+					b[(r, j)] = 0.05 * ((3 * r + j) % 7) as f64 - 0.15;
+				}
+			}
+		}
+		let a_t = Mat::<T>::from_fn(n, n, |i, j| from_f64::<T>(a[(i, j)]));
+		let b_t = Mat::<T>::from_fn(n, n, |i, j| from_f64::<T>(b[(i, j)]));
+		let mut u = Mat::<T>::identity(n, n);
+		let mut mem =
+			MemBuffer::new(qz_to_gevd_real_scratch::<T>(n, ParShape::Seq));
+		qz_to_gevd_real(
+			a_t.as_ref(),
+			b_t.as_ref(),
+			Some(u.as_mut()),
+			None,
+			Par::Seq,
+			MemStack::new(&mut mem),
+		);
+		let u = Mat::<f64>::from_fn(n, n, |i, j| u[(i, j)].into());
+		assert!(u.is_all_finite());
+
+		let block = |i: usize| {
+			let bi = starts.iter().rposition(|&s| s <= i).unwrap();
+			let ie = starts.get(bi + 1).copied().unwrap_or(n);
+			(starts[bi], ie - starts[bi])
+		};
+		let mut je = 0;
+		while je < n {
+			let (_, nw) = block(je);
+			// the eigenvalue with positive imaginary part, from the block
+			let lambda = if nw == 1 {
+				C::new(a[(je, je)] / b[(je, je)], 0.0)
+			} else {
+				C::new(a[(je, je)], a[(je, je + 1)].abs()) / b[(je, je)]
+			};
+			let m = |i: usize, j: usize| {
+				C::new(a[(i, j)], 0.0) - lambda * b[(i, j)]
+			};
+			// y^T M = 0, y zero above the block
+			let mut y = vec![C::new(0.0, 0.0); n];
+			if nw == 1 {
+				y[je] = C::new(1.0, 0.0);
+			} else {
+				// left null vector of the singular 2x2 block
+				y[je] = C::new(1.0, 0.0);
+				y[je + 1] = -m(je, je) / m(je + 1, je);
+			}
+			let mut j = je + nw;
+			while j < n {
+				let (_, na) = block(j);
+				// y_blk^T M_blk = -sum_{i < j} y_i M_{i, blk}
+				let rhs: Vec<C<f64>> = (0..na)
+					.map(|c| {
+						-(0..j).map(|i| y[i] * m(i, j + c)).sum::<C<f64>>()
+					})
+					.collect();
+				if na == 1 {
+					y[j] = rhs[0] / m(j, j);
+				} else {
+					// solve [y0 y1] [[m00 m01] [m10 m11]] = [r0 r1]
+					let (m00, m01, m10, m11) =
+						(m(j, j), m(j, j + 1), m(j + 1, j), m(j + 1, j + 1));
+					let det = m00 * m11 - m01 * m10;
+					y[j] = (rhs[0] * m11 - rhs[1] * m10) / det;
+					y[j + 1] = (rhs[1] * m00 - rhs[0] * m01) / det;
+				}
+				j += na;
+			}
+			let got: Vec<C<f64>> = (0..n)
+				.map(|i| {
+					C::new(
+						u[(i, je)],
+						if nw == 2 { u[(i, je + 1)] } else { 0.0 },
+					)
+				})
+				.collect();
+			// sine of the complex angle between `got` and `y`, from the part of
+			// `got` orthogonal to `y` (not `1 - cos^2`, which cancels below
+			// `sqrt(eps)`)
+			let ny: f64 = y.iter().map(|z| z.norm_sqr()).sum::<f64>();
+			let ng: f64 = got.iter().map(|z| z.norm_sqr()).sum::<f64>();
+			let c = (0..n).map(|i| y[i].conj() * got[i]).sum::<C<f64>>() / ny;
+			let sin =
+				((0..n).map(|i| (got[i] - y[i] * c).norm_sqr()).sum::<f64>()
+					/ ng)
+					.sqrt();
+			assert!(sin < tol, "left vector at {je}: sin = {sin:e}");
+			// zero above the block
+			for (i, z) in got.iter().enumerate().take(je) {
+				assert!(*z == C::new(0.0, 0.0), "left vector at {je}: row {i}");
+			}
+			je += nw;
+		}
+	}
+
+	#[test]
+	fn left_vectors_of_schur_pencil_f32() {
+		check_left_vectors_of_schur_pencil::<f32>(1e-5);
+	}
+
+	#[test]
+	fn left_vectors_of_schur_pencil_f64() {
+		check_left_vectors_of_schur_pencil::<f64>(1e-13);
 	}
 }
 
