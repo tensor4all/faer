@@ -527,11 +527,33 @@ pub fn qr_in_place<T: ComplexField>(
 	// save a few per cent of the panel and measurably loses (256x4096 f64 at one
 	// thread: 16.9 -> 20.7 ms). A single row is the limit case of the same thing:
 	// `qr_in_place` eliminates at most one column of it.
+	//
+	// Within those conditions, a sequential call on a square matrix below 192
+	// whose rows are contiguous (`|col_stride| == 1`) takes the transpose dual
+	// instead of the copy (tensor4all/faer#314): `A^T` is column-major, its LQ
+	// factorization is `A`'s QR in the same storage and with the same
+	// coefficient blocks, and `lq_in_place` stages each panel through the
+	// buffers `qr_in_place_scratch` reserves, so no `m x n` buffer is allocated.
+	// The bound is the measured one (Zen 5, f64, paired against the column-major
+	// call): square 64-176 at 0.98-1.04x, 192 at 1.04-1.06x, 256 at 1.11x, and
+	// tall shapes at 1.18-1.46x (`256 x 64` to `4096 x 256`), where the copy is
+	// at 1.22-1.56x; at eight threads the dual was 1.17-1.41x the copy on every
+	// shape measured (64 to `4096 x 256`). Those keep the copy, as do a view
+	// with neither stride 1 and a stack smaller than the query.
 	if A.row_stride().unsigned_abs() != 1
 		&& A.ncols() > 1
 		&& A.nrows() >= A.ncols()
 		&& linalg::row_major_copy_pays(A.nrows(), A.ncols())
 	{
+		if A.col_stride().unsigned_abs() == 1
+			&& A.nrows() == A.ncols()
+			&& A.nrows() < 192
+			&& crate::utils::thread::parallelism_degree(&par) == 1
+			&& stack.can_hold(qr_in_place_scratch::<T>(A.nrows(), A.ncols(), block_size, par.shape(), params))
+		{
+			let info = linalg::lq::no_pivoting::factor::lq_in_place(A.transpose_mut(), Q_coeff, par, stack, params);
+			return QrInfo { rank: info.rank };
+		}
 		return qr_in_place_adapted(A, Q_coeff, par, stack, params);
 	}
 	qr_in_place_packed(A, Q_coeff, par, stack, params, false)
@@ -623,9 +645,19 @@ pub fn qr_in_place_scratch<T: ComplexField>(
 	params: Spec<QrParams, T>,
 ) -> StackReq {
 	let _ = par;
-	let _ = nrows;
 	let _ = &params;
-	temp_mat_scratch::<T>(block_size, ncols)
+	// the staged panels (`factor_panel_staged`), used by a row-major `qr_in_place`
+	// (through the transpose dual) and by every `lq_in_place`: two column-major
+	// buffers of `nrows x min(block_size, nrows, ncols)`, the panel's own block
+	// applies, and a trailing apply with either temporary. The query cannot see the
+	// layout, so a column-major caller reserves them too: `(2 * nrows + ncols +
+	// block_size) * block_size` elements against the `m x n` copy they replace.
+	let panel = Ord::min(block_size, Ord::min(nrows, ncols));
+	StackReq::all_of(&[
+		temp_mat_scratch::<T>(nrows, 2 * panel),
+		temp_mat_scratch::<T>(panel, panel),
+		temp_mat_scratch::<T>(block_size, ncols).or(temp_mat_scratch::<T>(ncols, panel)),
+	])
 }
 #[cfg(test)]
 mod tests {
@@ -970,6 +1002,14 @@ mod tests {
 			exact: bool,
 			mut par: Par,
 		) {
+			// A sequential call on a square matrix below 192 takes the transpose
+			// dual instead of the copy (tensor4all/faer#314): the factorization
+			// of the same matrix through the staged LQ kernel, so the same
+			// reflectors, `tau` and rank up to rounding, not bit for bit.
+			let exact = exact
+				&& !(crate::utils::thread::parallelism_degree(&par) == 1
+					&& m == n
+					&& m < 192);
 			// An empty matrix has no row to start a backwards view from.
 			let flipped = flipped && m > 0 && n > 0;
 			let size = Ord::min(m, n);
@@ -1064,7 +1104,8 @@ mod tests {
 		}
 		// Shapes the adaptation applies to: a tall or square matrix with more
 		// than one column, and at least `64 * 64` elements so the copy floor
-		// lets it through. These must match the column-major factor exactly.
+		// lets it through. These must match the column-major factor exactly
+		// where the copy is taken, and up to rounding where the dual is (`check`).
 		for (m, n) in [(64, 64), (128, 128), (256, 64), (300, 64), (512, 64)] {
 			let run = |mut par: Par<'_>| {
 				check::<f64>(m, n, false, false, true, par.reborrow());

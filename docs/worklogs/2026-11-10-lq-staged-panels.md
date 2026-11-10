@@ -1,4 +1,4 @@
-# LQ on a column-major matrix: the panel is staged, the trailing update stays in place (tensor4all/faer#314, slice 3, step A)
+# Staged LQ panels, and row-major QR through the transpose dual (tensor4all/faer#314, slice 3)
 
 ## Decisions
 
@@ -115,6 +115,54 @@
   `Q` agree within the first-order perturbation bound of the `Q` factor, built from the runs' own
   backward errors and `sigma_min` of the first `k` rows (derivation in the test's comment). Both
   pass at this branch and at `c7470bd`.
+
+## Step B: row-major `qr_in_place` through the dual
+
+- A row-major `A` is `A^T` column-major, and the LQ of `A^T` in that storage is exactly `A`'s
+  packed QR with the same coefficient blocks, so the dual is `lq_in_place(A.transpose_mut())` with
+  no post-processing at all, and with the staged panels no `m x n` buffer.
+- It replaces the copy only where it reaches the column-major call: a **sequential** call on a
+  **square** matrix **below 192** with contiguous rows. Everything else that met the copy's four
+  conditions keeps the copy: the dual was measured and lost there. Paired in one process (dual,
+  copy, column-major; Zen 5, f64, CPU 4, 11 samples, median), dual / column-major at one thread:
+  square 64 / 96 / 128 / 160 / 176 / 192 / 224 / 256 / 384 / 512 / 2048 at 0.99 / 0.95 / 1.00 /
+  1.00-1.01 / 1.03-1.04 / 1.04-1.06 / 1.07-1.09 / 1.11 / 1.15 / 1.20 / 1.14; `128 x 96` 0.98,
+  `96 x 64` 1.00-1.01, `160 x 128` 1.05-1.06, `192 x 160` 1.08-1.09; tall `256 x 64` to
+  `4096 x 256` 1.18-1.46. The copy is at 1.22-1.56 on the same rows, so at one thread the dual is
+  never slower than the copy (0.76-1.00x); it is kept off those shapes because it does not reach
+  1.05x, not because it loses. At eight threads the dual was 1.17-1.41x the copy on every shape
+  measured (64 to `4096 x 256`): the team paths of the transposed products and of the staged
+  copies cost more than the copy saves, and running the copies sequentially moved `64 x 64` from
+  1.29x to 1.04x the copy but `4096 x 256` from 1.17x to 1.69x.
+- The cells of the slice, at the final dispatch (`qr_in_place` on a row-major input against the
+  column-major call; the copy route alone in brackets):
+
+  | cell | 1T | 8T |
+  |---|---|---|
+  | `64 x 64` | **1.004** (copy 1.226) | 1.248 (copy) |
+  | `128 x 128` | **1.002** (copy 1.281) | 1.108 (copy) |
+  | `512 x 512` | 1.240 (copy) | 1.196 (copy) |
+  | `2048 x 2048` | 1.227 (copy) | 1.393 (copy) |
+  | `4096 x 256` | 1.335 (copy) | 1.217 (copy) |
+  | `256 x 4096` | 1.365 (never adapted) | 2.588 (never adapted) |
+
+  The two bold cells pass; the others keep the copy and its numbers.
+- **The copy is still bit for bit; the dual is not.** On the dual shapes the row-major factor is
+  the column-major one up to rounding (`test_row_major_factor_is_the_column_major_one` now
+  compares those up to rounding and every other adapted case bit for bit).
+- `qr_in_place_scratch` now reserves the staged panels for every caller (the query cannot see the
+  layout): `(2 m + n + block) * block` elements against the `m x n` copy they replace; with a
+  smaller stack the copy is taken.
+- Lead, not taken (outside the slice): the wide row-major class that the guard never adapts
+  (`256 x 4096`) is 2.59x the column-major call at eight threads, and the copy route forced on it
+  is 1.42x. The guard's comment records the copy losing on that shape at one thread (also seen
+  here: 1.41x against 1.37x); at eight threads it would win.
+- Test: `faer/tests/qr_row_major_no_copy.rs`, the largest single allocation of the calling thread
+  during `qr_in_place` (second of two calls) below `m * n * 8` on square 64 / 96 / 128 / 176, with
+  contiguous and padded rows; the copy is still seen on `256 x 64`, `256 x 256`, a team call, a
+  stack of the old query size, and a view with neither stride 1. It fails before the change
+  (`64x64, strides (64, 1): an allocation of 32768 bytes, the whole matrix is 32768`) and passes
+  after. `cargo test -p t4a-faer`: 1035 passed, 162 ignored.
 
 ## Upstream
 

@@ -71,23 +71,14 @@ pub fn lq_in_place_scratch<T: ComplexField>(
 	par: ParShape,
 	params: Spec<LqParams, T>,
 ) -> StackReq {
-	// the staged panels (`qr::no_pivoting::factor::factor_panel_staged`): two
-	// column-major buffers of `ncols x min(block_size, nrows, ncols)` (the
-	// panels are rows of `A`, transposed), the panel's own block applies, and
-	// the trailing apply with its temporary transposed
-	let panel = Ord::min(block_size, Ord::min(nrows, ncols));
-	StackReq::all_of(&[
-		temp_mat_scratch::<T>(ncols, 2 * panel),
-		temp_mat_scratch::<T>(panel, panel),
-		linalg::qr::no_pivoting::factor::qr_in_place_scratch::<T>(
-			ncols,
-			nrows,
-			block_size,
-			par,
-			params,
-		)
-		.or(temp_mat_scratch::<T>(nrows, panel)),
-	])
+	// the QR query of the transposed view, which includes the staged panels
+	linalg::qr::no_pivoting::factor::qr_in_place_scratch::<T>(
+		ncols,
+		nrows,
+		block_size,
+		par,
+		params,
+	)
 }
 /// copies the triangular factor $L$ out of the packed factorization in `packed`,
 /// leaving the householder vectors intact.
