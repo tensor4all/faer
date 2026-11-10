@@ -70,12 +70,15 @@ directories give it, per cell and summarised, with:
 python3 -c 'import csv,glob,sys,statistics as st,itertools as it; L=lambda d:{(r[0],r[1],r[2],r[3]):st.median([x[4] for x in g]) for r,g in it.groupby(sorted([(r["family"],r["order"],r["dtype"],r["threads"],float(r["total_ms"])) for f in glob.glob(d+"/run*-linalg-small-*t.csv") for r in csv.DictReader(open(f)) if r["row"]=="faer-upstream" and r["m"]=="64" and r["family"] in ("qr_factor","solve")]),key=lambda x:x[:4])}; a,b=L(sys.argv[1]),L(sys.argv[2]); R=[(b[k]/a[k],k) for k in a]; print("\n".join("%s %s %s %sT %.4f"%(k[0],k[1],k[2],k[3],x) for x,k in sorted(R,key=lambda y:y[1]))); print("cells %d median %.4f min %.4f max %.4f"%(len(R),st.median([x for x,_ in R]),min(x for x,_ in R),max(x for x,_ in R)))' <baseline dir> <candidate dir>
 ```
 
-**This statistic is the one claim in this record that cannot be checked from a repository.** The
-two directories are uncommitted, so neither the summary nor the 24 per-cell ratios behind it can
-be recomputed from anything in the tree: the command above reproduces them on a machine that
-still has the checkout, and publishing the two directories to `faer-benchmark-provenance` is what
-would make them evidence for a reader. Every other number below comes with the command and the
-pinned revisions it was taken from.
+**The statistics in this section and the `regions` column below are the claims in this record that
+cannot be checked from a repository.** The two directories are uncommitted, so neither the summary
+nor the 24 per-cell ratios behind it can be recomputed from anything in the tree: the command
+above reproduces them on a machine that still has the checkout, and publishing the two
+directories to `faer-benchmark-provenance` is what would make them evidence for a reader. The
+`probe` crate and the one-counter `spindle` patch that produce the `regions` column are likewise
+outside every repository and are not published here, so those counts cannot be re-run from this
+tree either. The remaining numbers in the comparison table come with the command and the pinned
+revisions they were taken from.
 
 | family | order | T | 0.24.10 ms | 0.25.0 ms | ratio | issue ratio | reproduced |
 | --- | --- | --- | --- | --- | --- | --- | --- |
