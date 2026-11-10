@@ -28,13 +28,21 @@
 //! reason 12 (f32, 7895040 and 8781824 B buffers), 17 (c64) and 17 (c32) — measured
 //! on an aarch64 macOS host, identical at `620b96a` and at head. The same test passes
 //! on `x86_64`, which does not dispatch to that kernel.
+//!
+//! tensor4all/faer#365 attributed every one of those allocations by backtrace to
+//! `PackBuffer::take` (`src/gemm.rs:92`), none to faer, and `gemm::gemm` takes no
+//! caller buffer that `lq_scratch` could size. The harness therefore splits each
+//! count into the `gemm` pack buffer's and faer's own, and the `60 x 300` cell
+//! asserts only faer's own on an Apple aarch64 host (see the cell); every other
+//! cell, and that one on every other target, still asserts the whole count.
 #![cfg(feature = "std")]
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::lq::no_pivoting::{factor, reconstruct, unitary};
 use faer::traits::ComplexField;
 use faer::{Auto, Mat, Par, ParShape, c32, c64};
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
+use std::backtrace::Backtrace;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Counting;
@@ -46,22 +54,55 @@ thread_local! {
 }
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
+// Every counted allocation also records its size and the backtrace of the
+// allocating call site (tensor4all/faer#365), so that an allocation can be
+// attributed to the `gemm` pack buffer or to faer after the window closes. The
+// capture itself allocates, so counting is switched off on this thread while it
+// runs. `LQ_ALLOC_TRACE=1` prints every record.
+thread_local! {
+	static TRACE: RefCell<Vec<(&'static str, usize, Backtrace)>> =
+		const { RefCell::new(Vec::new()) };
+}
+
+#[inline]
+fn record(kind: &'static str, size: usize) {
+	if !counting() {
+		return;
+	}
+	ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+	COUNTING.with(|c| c.set(false));
+	let bt = Backtrace::force_capture();
+	TRACE.with(|t| t.borrow_mut().push((kind, size, bt)));
+	COUNTING.with(|c| c.set(true));
+}
+
+/// The frame of `t4a-gemm-common`'s per-thread pack buffer (`PackBuffer::take`,
+/// `src/gemm.rs:84-97` in 0.20.4). An allocation whose backtrace does not name
+/// it, including one whose backtrace could not be symbolized, is counted as
+/// faer's own.
+const GEMM_PACK_FRAME: &str = "gemm_common::gemm::PackBuffer::take";
+
+/// Allocations counted in one window, split by owner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Allocations {
+	/// Allocations made outside the `gemm` pack buffer: faer's own.
+	faer: usize,
+	/// Allocations of the `gemm` crate's per-thread pack buffer.
+	gemm_pack: usize,
+}
+
 #[inline]
 fn counting() -> bool {
 	COUNTING.with(Cell::get)
 }
 unsafe impl GlobalAlloc for Counting {
 	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		if counting() {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
+		record("alloc", layout.size());
 		unsafe { System.alloc(layout) }
 	}
 
 	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		if counting() {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
+		record("alloc_zeroed", layout.size());
 		unsafe { System.alloc_zeroed(layout) }
 	}
 
@@ -71,9 +112,7 @@ unsafe impl GlobalAlloc for Counting {
 		layout: Layout,
 		new_size: usize,
 	) -> *mut u8 {
-		if counting() {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
+		record("realloc", new_size);
 		unsafe { System.realloc(ptr, layout, new_size) }
 	}
 
@@ -85,7 +124,7 @@ unsafe impl GlobalAlloc for Counting {
 static GLOBAL: Counting = Counting;
 
 /// Allocations of one complete LQ pipeline on `a`, after a warm-up call.
-fn lq_allocations<T: ComplexField>(a: &Mat<T>) -> usize {
+fn lq_allocations<T: ComplexField>(a: &Mat<T>) -> Allocations {
 	let (m, n) = a.shape();
 	let k = Ord::min(m, n);
 	let params = <factor::LqParams as Auto<T>>::auto().into();
@@ -174,11 +213,35 @@ fn lq_allocations<T: ComplexField>(a: &Mat<T>) -> usize {
 		);
 	};
 	run(); // warm-up: first-use allocations (lazy statics, feature detection) are not the call's
+	TRACE.with(|t| t.borrow_mut().clear());
 	ALLOCATIONS.store(0, Ordering::SeqCst);
 	COUNTING.with(|c| c.set(true));
 	run();
 	COUNTING.with(|c| c.set(false));
-	ALLOCATIONS.load(Ordering::SeqCst)
+	let count = ALLOCATIONS.load(Ordering::SeqCst);
+	let records = TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()));
+	assert_eq!(
+		records.len(),
+		count,
+		"every counted allocation has a record"
+	);
+	let print = std::env::var_os("LQ_ALLOC_TRACE").is_some();
+	let name = std::any::type_name::<T>();
+	let mut out = Allocations::default();
+	for (i, (kind, size, bt)) in records.iter().enumerate() {
+		let bt = bt.to_string();
+		if bt.contains(GEMM_PACK_FRAME) {
+			out.gemm_pack += 1;
+		} else {
+			out.faer += 1;
+		}
+		if print {
+			eprintln!(
+				"=== LQ_ALLOC_TRACE {m}x{n} {name} #{i} {kind} {size} B\n{bt}"
+			);
+		}
+	}
+	out
 }
 
 fn sample(m: usize, n: usize, seed: u64) -> Mat<f64> {
@@ -197,9 +260,20 @@ fn sample(m: usize, n: usize, seed: u64) -> Mat<f64> {
 /// test of this binary may allocate while one counts.
 static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Which allocations a cell asserts to be none.
+#[derive(Clone, Copy)]
+enum Contract {
+	/// Every allocation of the pipeline.
+	All,
+	/// faer's own allocations everywhere, and the `gemm` pack buffer's as well
+	/// except on an Apple aarch64 host, where `gemm` can dispatch to its SME
+	/// kernel; see the cell that uses it.
+	FaerOnlyOnAppleAarch64,
+}
+
 /// Allocations of the four scalar types on an `m x n` matrix, asserted to be
-/// none.
-fn check_cell(m: usize, n: usize) {
+/// none under `contract`.
+fn check_cell(m: usize, n: usize, contract: Contract) {
 	let _turn = GATE.lock().unwrap_or_else(|e| e.into_inner());
 	let re = sample(m, n, 130);
 	let im = sample(m, n, 131);
@@ -215,21 +289,39 @@ fn check_cell(m: usize, n: usize) {
 		lq_allocations(&c64s),
 		lq_allocations(&c32s),
 	];
-	assert_eq!(counts, [0; 4], "{m} x {n}: allocations (f64, f32, c64, c32)");
+	let faer = counts.map(|c| c.faer);
+	let gemm_pack = counts.map(|c| c.gemm_pack);
+	let pack_exempt = matches!(contract, Contract::FaerOnlyOnAppleAarch64)
+		&& cfg!(all(target_arch = "aarch64", target_vendor = "apple"));
+	if pack_exempt {
+		// Reported, not asserted: the count is the `gemm` crate's (see the cell).
+		eprintln!(
+			"{m} x {n}: gemm pack-buffer allocations (f64, f32, c64, c32): {gemm_pack:?}"
+		);
+		assert_eq!(
+			faer, [0; 4],
+			"{m} x {n}: allocations outside the gemm pack buffer (f64, f32, c64, c32)"
+		);
+	} else {
+		let all = counts.map(|c| c.faer + c.gemm_pack);
+		assert_eq!(all, [0; 4], "{m} x {n}: allocations (f64, f32, c64, c32)");
+	}
 }
 
 // One test per shape, because the harness reports a test that runs for over 60
 // seconds from inside the test process, and its watchdog thread allocates while
 // the counting window is open.
 macro_rules! cells {
-	($($name:ident: ($m:expr, $n:expr);)*) => {
+	($($name:ident: ($m:expr, $n:expr) $(, $contract:ident)?;)*) => {
 		$(
 			#[test]
 			fn $name() {
-				check_cell($m, $n);
+				check_cell($m, $n, cells!(@contract $($contract)?));
 			}
 		)*
 	};
+	(@contract) => { Contract::All };
+	(@contract $contract:ident) => { Contract::$contract };
 }
 // 1 x 1, small, square past the recursion threshold, tall and wide enough for
 // the blocked panel to have a trailing update, and a shape that is a multiple of
@@ -242,5 +334,16 @@ cells! {
 	lq_allocates_nothing_33x40: (33, 40);
 	lq_allocates_nothing_128x128: (128, 128);
 	lq_allocates_nothing_300x60: (300, 60);
-	lq_allocates_nothing_60x300: (60, 300);
+	// Narrowed on Apple aarch64, not dropped (tensor4all/faer#365). On an SME
+	// host every allocation this cell counts there is the `gemm` crate's
+	// per-thread pack buffer (`t4a-gemm-common 0.20.4`, `src/gemm.rs:92`): the
+	// SME products of the `60 x 300` pipeline (from
+	// `apply_block_householder_on_the_left_in_place_generic`, in `unitary` with
+	// `k = n` and in `null`) need a 3993600 / 4390912 B buffer (f64), above the
+	// size the slot keeps, so each one allocates and leaves the slot empty, and
+	// the smaller NEON products after it allocate again. `gemm::gemm` takes no
+	// caller buffer, so `lq_scratch` cannot size this; the cell still asserts
+	// that faer itself allocates nothing, and the whole count stays asserted on
+	// every other target.
+	lq_allocates_nothing_60x300: (60, 300), FaerOnlyOnAppleAarch64;
 }
