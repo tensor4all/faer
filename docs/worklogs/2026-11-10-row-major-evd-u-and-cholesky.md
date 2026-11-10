@@ -85,7 +85,11 @@ triangular-solve base case for a column-major right-hand side. Neither is tried 
   three sessions, Zen 5 (Ryzen AI MAX+ 395), boost on: f64 1T 1.43 / 3.74 / 8.24 / 5.72
   -> 1.027 / 1.022 / 1.024 / 1.006, 8T 1.44 / 4.00 / 6.57 / 3.68 -> 1.020 / 1.011 /
   1.012 / 1.015; c64 1T 1.03-1.06 -> 1.009-1.019, 8T 1.04-1.14 -> 1.012-1.017
-  (n = 64 / 128 / 256 / 512). Every cell is within 1.05x after the change.
+  (n = 64 / 128 / 256 / 512). These ratios come from a local `fbench` at
+  `faer-benchmark` `3b58258` patched so that `U` follows the case layout; neither that
+  patch nor the raw samples are part of this PR, so a reader cannot rerun the comparison
+  from the repository, and the claim the repository carries is the correctness one, that a
+  row-major `u` is the column-major result bit for bit (the tests below).
 - Boost could not be switched off on the host (no sudo); the ratios are within one
   process with the layouts interleaved, which is what the 1.05x criterion compares.
 - Only n = 64-512 square, f64 and c64, 1T and 8T were timed. f32/c32 are checked for
