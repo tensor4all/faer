@@ -90,10 +90,12 @@ orders:
 
 This measurement cannot isolate the write-back leg. Its order c is unchanged (slab 0.1379 against
 main 0.1381), but in order f the slab median is 12.5% slower than main's (0.1665 against 0.1480),
-while it is within 0.2% of 0.25.0's (0.1662). The f-order column is bimodal on this host in every
-condition (0.147-0.168 ms, one set high and two low in a different order per condition), so three
-process sets cannot tell a slowdown from the bimodality; resolving it needs more sets or a
-pinned-frequency run. The 64x64x64 cell is identical to main's.
+while it is within 0.2% of 0.25.0's (0.1662). The f-order column was bimodal on this host in every
+condition, with process-set medians at two levels between 0.147 and 0.168 ms. The per-set values
+were not kept with this worklog, so how many sets fell on each level, and why the median of three
+lands near the upper level for the slab and 0.25.0 and near the lower one for main, is not stated
+here. With three sets per condition a slowdown cannot be told from that bimodality; resolving it
+needs more sets, kept per set, or a pinned-frequency run. The 64x64x64 cell is identical to main's.
 
 The three process-set medians of one condition are within 1.8% of each other (largest: c64 8T
 order c on the slab, 0.2165/0.2199/0.2204), so the branch/main gap is far outside this machine's
