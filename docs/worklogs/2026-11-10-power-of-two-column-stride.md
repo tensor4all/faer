@@ -7,9 +7,13 @@
   tiles (1T) and 15.7% more (8T) -- the tiles are 12.0% / 13.6% faster in time -- while at n = 240,
   244, 248, 252, 260, 264, 272 the walk wins by 3.5-7.3% (1T) and 9.6-11.1% (8T).
 - The n that loses is the only one of those eight whose **destination column stride** is a power of two:
-  2048 bytes. 248/252/260/264 are 1984-2112 bytes; 256 is 2048. The walk writes the destination a
-  column at a time, and a power-of-two stride lands every column on the same cache sets as the one
-  before it.
+  2048 bytes. 248/252/260/264 are 1984-2112 bytes; 256 is 2048. The walk writes the destination a column
+  at a time, and a power-of-two stride is what makes those column writes pay for the tiles' blocking
+  although the working set is small. **That is a hypothesis about the mechanism, not a measurement**:
+  a 2048-byte stride does not by itself put successive columns in the same cache sets (with 64-byte
+  lines it advances 32 lines, so the starting set alternates between two sets), and the sweep moves the
+  source's row stride together with the destination's. What the sweep establishes is the association
+  between the 2048-byte destination stride and the loss.
 - Chosen: a second gate in `tile_copy_pays`, `TILE_COPY_POWER_OF_TWO_STRIDE_BYTES = 2048`, on the
   destination's column stride **in bytes** (so it follows `size_of::<T>()` exactly as the working-set
   gate does; nothing branches on the scalar). Below the byte threshold, the copy tiles when the stride

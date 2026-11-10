@@ -118,9 +118,13 @@ pub(crate) fn tiled_copies() -> usize {
 /// The destination column stride, in bytes, from which a power-of-two stride
 /// makes the tiles pay below [`TILE_COPY_CACHE_BYTES`] as well.
 ///
-/// The elementwise walk writes the destination a column at a time, so a stride
-/// that is a power of two lands each column on the same cache sets as the one
-/// before it. Measured on `tensor4all/faer#352` (evo, Zen5, `Llt::new` on a
+/// The elementwise walk writes the destination a column at a time, and a
+/// power-of-two stride is what makes those column writes pay for the tiles'
+/// blocking even though the working set is small. The collision itself is a
+/// hypothesis, not something these measurements show: the sweep changes the
+/// source's row stride together with the destination's, so what it establishes
+/// is the association of the 2048-byte stride with the loss, and the tiles win
+/// on the same shape. Measured on `tensor4all/faer#352` (evo, Zen5, `Llt::new` on a
 /// row-major f64 matrix, n swept 240..272): `256` is the only one of those n
 /// whose destination column stride is a power of two (2048 bytes), and it is
 /// the only one where the elementwise walk loses to the tiles: the walk takes
