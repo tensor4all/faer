@@ -61,11 +61,17 @@ Cell: `gemm` f64/c64, m = 16, n = 240, k = 4096 -- the issue's `16x240x4096`, wh
 `--n 16x4096x240`. Values are the median of three process-set medians, ms, three complete process
 sets per condition, per condition 3000 ms priming and 30 calls per row, rows rotated by set.
 Host: EVO-X2, AMD Ryzen AI MAX+ 395, 32 logical CPUs, two L3 domains (0-7 with SMT siblings 16-23,
-8-15 with 24-31), measured set 0-3 (4T) and 0-7 (8T), observer pinned to CPU 27, 4-7 and 16-31 left
-free for a parallel lane. **Boost was on** (`cpufreq_boost=1`): this host has no passwordless sudo,
-so the protocol's boost-off requirement could not be met. Every condition was measured under the
-same boost-on state, so the ratios stand, but these absolute numbers are not comparable with the
-published boost-off pages.
+8-15 with 24-31), measured set 0-3 (4T) and 0-7 (8T), observer pinned to CPU 27. The run left 4-7
+and 16-31 to a parallel lane, and which of those CPUs were actually idle during the measurement was
+not recorded. 4-7 overlap the measured set, so the 8T runs are not isolated from that lane, and
+16-23 are the SMT siblings of the measured 0-7 in the same L3 domain, so neither the 4T nor the 8T
+runs are isolated from load there; only 8-15 and 24-31 (the other L3 domain, minus the observer's
+27) are off the measured cores and their cache. **Boost was on** (`cpufreq_boost=1`): this host
+has no passwordless sudo, so the protocol's boost-off requirement could not be met. Every
+condition was measured with boost on, and the ratios below are the ratios observed under that
+disclosed condition; boost-on is not a fixed frequency, so if the conditions ran at different
+clock frequencies, that frequency difference is part of each elapsed-time ratio. These absolute
+numbers are not comparable with the published boost-off pages.
 
 | cell | order | 4T slab | 4T main | 4T 0.25.0 | 8T slab | 8T main | 8T 0.25.0 | 8T slab/main |
 |---|---|---|---|---|---|---|---|---|
