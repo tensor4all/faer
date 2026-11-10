@@ -10,9 +10,9 @@ path and MKL in one process.
 Every number below is recomputed from
 [`evidence/2026-11-10-eigh-raw-samples.csv`](evidence/2026-11-10-eigh-raw-samples.csv) - 420
 cell rows, each with its `samples_ms` column - by the script at the end of this record
-(reproduction A/B/C/layout). Tables A and D are the **pooled median of all 15 samples** of a
-cell (3 sessions x 5 reps); tables B and C are the median of the 5 samples of one session, in
-which that cell ran in its own process.
+(reproduction A/B/C/layout). Table A is the **pooled median of all 15 samples** of a cell (3
+sessions x 5 reps); tables B and C are the median of the 5 samples of one session, in which that
+cell ran in its own process.
 
 ## Decisions
 
@@ -63,7 +63,7 @@ which that cell ran in its own process.
   (`trid.copy_from_triangular_lower(A)`) before any kernel sees it, so the caller's order never
   reaches a kernel.
 - **Not implemented.** The knob is worth 13-32% at 8T, but after it faer is still 1.3-1.5x behind
-  MKL on the f64 cells at 8T and 1.2x at 1T, so a threshold change alone does not reach parity
+  MKL on the f64 cells at 8T (table C, thr=16 column), so a threshold change alone does not reach parity
   and the remaining question is a design one (a parallel QR leaf, a threaded D&C merge, or MKL's
   two-stage reduction), not a tuning one. The options, their risk and their expected effect are
   below for the maintainer's decision.
@@ -80,7 +80,7 @@ which that cell ran in its own process.
   6.649 ms), where no extra work can explain a negative remainder: that difference is unexplained,
   and each stage row takes its own timestamps;
   (C) the threshold
-  knob; (D) the raw samples of the cells under test.
+  knob; the samples behind them are in the CSV.
 - **Hypothesis (1) is half right** — the branch is already there and unreachable at n <= 128; see the
   gate argument above, which this paragraph does not repeat.
 - **What remains unverified.**
@@ -112,9 +112,8 @@ which that cell ran in its own process.
     address (an offset Vec reads the same). The library's own allocation closes the sum, so table
     B is Mat-backed. Unexplained, and left as a lead: if it is not the allocation but something
     about a caller-owned `Vec`, every in-place kernel in the library has the same cliff.
-- The tree measured is the tree this record travels in: `cargo test --lib` on it gives 523
-  passed, 0 failed, 138 ignored (661 library tests) and 1 doc test passed. The change is a record
-  only, so no measured path moves.
+- The tree measured is the tree this record travels in. The change is a record only, so no
+  measured path moves and no test count is claimed here.
 - Host: AMD Ryzen AI 9 HX 470 (Zen5 mobile APU), 24 logical / 12 physical, SMT on, CPU boost
   off, governor `performance`, kernel 7.0.0-38-generic, rustc 1.99.0. Measured CPUs `0` (1T) and
   `0-3,12-15` (8T, the 16 MiB L3 domain and its SMT siblings); the observing side pinned to
@@ -161,7 +160,7 @@ each cell for 250 ms and takes 5 samples, and restores every input outside the c
 
 Pooled median of the 15 samples (3 sessions x 5 reps) of each cell, prime 250 ms per cell,
 CPU boost off; `docs/worklogs/evidence/2026-11-10-eigh-raw-samples.csv` filtered to the cell
-(reproduction A). Table D is the same statistic cell by cell, so A and D agree exactly.
+(reproduction A).
 
 | dtype | order | n | faer 1T | MKL 1T | faer/MKL | faer 8T | MKL 8T | faer/MKL | faer 1T->8T | MKL 1T->8T |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
