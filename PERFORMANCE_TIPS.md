@@ -20,8 +20,11 @@ destination (`faer/src/linalg/matmul/mod.rs:1236`), and the two kernels accept d
 and a `rhs` of any stride, while `matvec_rowmajor` takes a contiguous `rhs` and accepts a strided
 destination (`:762-770`). Which one a call reaches depends on the leading transposition in
 `matmul_imp` (`:1226-1310`), so the layout that costs a gather is the *rhs* in one kernel and the
-*destination* in the other; nothing here says a strided operand alone reaches the general kernel. A
-reflector's norm becomes a strided reduction in any case. Gather the row into a contiguous buffer
+*destination* in the other; nothing here says a strided operand alone reaches the general kernel.
+The matrix has its own requirement: the column-major kernel needs a column-major `lhs`
+(`:1238-1239`) and the row-major one a row-major `lhs` (`:1253-1254`), so an `lhs` strided in both
+directions runs neither, and gathering a vector does not change that. A reflector's norm becomes a
+strided reduction in any case. Gather the row into a contiguous buffer
 once, update it, reflect it and use it as the products' vector there, scatter once
 (`bidiag_blocked_panel`'s `w`). The row-side steps of the panel went from 15 ms to 6 ms at n = 512.
 
@@ -128,5 +131,7 @@ one row when AVX-512F, or AVX2 plus FMA, is detected (`:1692-1709`), fills and r
 when the `std` feature is off (`:1786-1793`), and computes each element in place for other scalars
 (`:1795-1810`). The original claim — that the replace entry's dispatch is kept — was wrong in both
 directions, so an overwrite-only entry has to restore the dispatch by hand, and only where the fill
-it was avoiding is smaller than the kernel it lands on (tensor4all/faer#200,
-`docs/worklogs/2026-11-03-matmul-uninit-thin.md`).
+it was avoiding is smaller than the kernel it lands on (tensor4all/faer#200). That last condition is
+guidance, not a rule the dispatch applies: the worklog measured it for `m = 1` on a few shapes and
+found `m = 2/8/16` unchanged (`docs/worklogs/2026-11-03-matmul-uninit-thin.md`), so measure before
+relying on it elsewhere.
