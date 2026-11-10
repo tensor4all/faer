@@ -14,17 +14,17 @@ you are changing, at 1T and 8T, before choosing where to work; remove them befor
 
 ## Rows of a column-major matrix are strided operands
 
-A row of `A` has stride `m`. `matmul`'s vector paths need a contiguous destination column and an
-`lhs` that is contiguous in one direction (`faer/src/linalg/matmul/mod.rs:1236-1254`), so a doubly
-strided `lhs`, or a strided destination under a column-major `lhs`, falls to the general kernel, but
-a strided destination on its own does not. Inside that branch the two kernels differ: the
-column-major one writes a `ColMut<'_, T, Dim<'M>, ContiguousFwd>`, so it needs a contiguous destination
-column but takes a `rhs` of any stride (`:891-899`); the row-major one (`:1253-1266`) needs a
-row-major-contiguous `lhs` and a contiguous `rhs` (`:762-770`), while its destination is a plain
-`ColMut` of any stride. A reflector's norm becomes a strided reduction in any case. Gather the
-row into a contiguous buffer once, update it, reflect it and use it as the products' vector there,
-scatter once (`bidiag_blocked_panel`'s `w`). The row-side steps of the panel went from 15 ms to 6 ms
-at n = 512.
+A row of `A` has stride `m`. `matmul` reaches a `matvec` kernel only when the destination is one
+column or one row (`faer/src/linalg/matmul/mod.rs:1236`); whether the destination must then be
+contiguous depends on which kernel takes it. The column-major one writes a
+`ColMut<'_, T, Dim<'M>, ContiguousFwd>`, so it needs a contiguous destination column but takes a
+`rhs` of any stride (`:891-899`). The row-major one (`:1253-1266`) needs a row-major-contiguous `lhs`
+and a contiguous `rhs` (`:762-770`), while its destination is a plain `ColMut` of any stride. So a
+doubly strided `lhs`, or a strided destination under a column-major `lhs`, falls to the general
+kernel; a strided destination on its own does not. A reflector's norm becomes a strided reduction in
+any case. Gather the row into a contiguous buffer once, update it, reflect it and use it as the
+products' vector there, scatter once (`bidiag_blocked_panel`'s `w`). The row-side steps of the panel
+went from 15 ms to 6 ms at n = 512.
 
 ## A leading dimension that is a multiple of 1 KiB aliases L1 sets
 
@@ -120,7 +120,7 @@ changed it by 1 ms; overlapping it with the previous block's trailing apply on a
 (look-ahead) is the lever (`docs/worklogs/2026-10-30-qr-lookahead.md`, faer#160). Before threading a
 stage further, time it at block widths that differ by 4x: if it does not follow the arithmetic, hide it.
 
-## An overwrite-only entry inherits the replace entry's one-row forwarding, and fills everywhere else
+## An overwrite-only entry inherits the replace entry's one-row forwarding on x86_64 only
 
 `matmul_with_conj_uninit` writes a fresh destination and so skipped the replace entry's one-row
 (`m == 1`) `matvec` branch, landing on the full GEMM kernel: 2.2x slower and different last bits on
@@ -129,8 +129,8 @@ destination and calls `matmul_with_conj` (`faer/src/linalg/matmul/mod.rs:1680-16
 row the native types take their own route, `t4a-private-gemm-x86` with `Accum::Replace`
 (`:1692-1785`). Everywhere else there is no separate kernel to miss: on targets without it —
 aarch64, and any native type without the kernel — every product, at any number of rows, fills the
-O(m*n) destination and calls `matmul_with_conj` (`:1786-1794`), and the other scalars run a
-per-element dot-product loop (`:1795`). So an overwrite-only entry does not keep the dispatch for
-free: on x86_64 every path it skips has to be restored by hand, and only where the fill it was
-avoiding is smaller than the kernel it lands on (tensor4all/faer#200,
+O(m*n) destination and calls `matmul_with_conj` (`:1786-1794`); a non-native scalar has no fill at
+all and computes each destination element in place (`:1795-1810`). So an overwrite-only entry does
+not keep the dispatch for free: on x86_64 every path it skips has to be restored by hand, and only
+where the fill it was avoiding is smaller than the kernel it lands on (tensor4all/faer#200,
 `docs/worklogs/2026-11-03-matmul-uninit-thin.md`).
