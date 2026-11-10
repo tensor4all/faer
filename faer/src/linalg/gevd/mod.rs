@@ -1826,8 +1826,11 @@ pub fn gevd_scratch<T: ComplexField>(
 /// zero (an eigenvalue $0$ or infinite). the factors are applied by exact
 /// power-of-two steps, never formed as one out-of-range number. $\alpha =
 /// \beta = 0$ is returned with `Ok` only when the QZ itself finds it, i.e. for
-/// a pencil that is singular within the QZ's backward error, the same at every
-/// scale.
+/// a pencil that is singular within the QZ's backward error. Whether such a
+/// `0 / 0` depends on the input's scale is not established: on the three pencils
+/// of `tests/gevd_scaled_pencil.rs` under a common scale $s$, the only ones
+/// measured systematically, no $\alpha = \beta = 0$ occurs for any $s > 0$,
+/// and the scaling back never turns a nonzero pair into one.
 ///
 /// in short, for `f64`:
 ///

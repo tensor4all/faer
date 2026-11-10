@@ -358,6 +358,77 @@ fn scaled_pencil_extremes() {
 	check(1e300);
 }
 
+/// The largest relative distance `|l - r| / |r|` between matched eigenvalues,
+/// minimized over all one-to-one matchings of `computed` with `reference`
+/// (a bottleneck assignment, by exhaustive search: the pencils here have at
+/// most five eigenvalues). unlike matching each computed eigenvalue with its
+/// nearest reference, this counts multiplicities: a spectrum that repeats one
+/// eigenvalue in place of another, or misses one, is far from the reference.
+/// infinite when the lengths differ or a distance is NaN.
+fn spectrum_distance(computed: &[c64], reference: &[c64]) -> f64 {
+	fn go(
+		computed: &[c64],
+		reference: &[c64],
+		used: &mut Vec<bool>,
+		worst: f64,
+		best: &mut f64,
+	) {
+		let Some((l, rest)) = computed.split_first() else {
+			*best = best.min(worst);
+			return;
+		};
+		for (k, r) in reference.iter().enumerate() {
+			if used[k] {
+				continue;
+			}
+			let d = (l - r).norm() / r.norm();
+			let d = if d.is_nan() { f64::INFINITY } else { d };
+			let w = worst.max(d);
+			if w >= *best {
+				continue;
+			}
+			used[k] = true;
+			go(rest, reference, used, w, best);
+			used[k] = false;
+		}
+	}
+	if computed.len() != reference.len() {
+		return f64::INFINITY;
+	}
+	let mut best = f64::INFINITY;
+	go(
+		computed,
+		reference,
+		&mut vec![false; reference.len()],
+		0.0,
+		&mut best,
+	);
+	best
+}
+
+/// [`spectrum_distance`] itself: a permutation of the reference matches, and
+/// replacing one eigenvalue by another (computed or reference side) does not,
+/// although every eigenvalue still has an exact nearest neighbour.
+#[test]
+fn spectrum_distance_counts_multiplicities() {
+	let (a, b) = one_pair();
+	let v = gevd_values(&a, &b, 1.0, false);
+	let lambda: Vec<c64> =
+		v.alpha.iter().zip(&v.beta).map(|(a, &b)| a / b).collect();
+	let mut permuted = lambda.clone();
+	permuted.reverse();
+	assert!(spectrum_distance(&permuted, &lambda) == 0.0);
+	let mut repeated = lambda.clone();
+	repeated[0] = lambda[lambda.len() - 1];
+	for (computed, reference) in [(&repeated, &lambda), (&lambda, &repeated)] {
+		let d = spectrum_distance(computed, reference);
+		assert!(
+			d > 1e-2,
+			"{computed:?} matched {reference:?} to {d:e}, one eigenvalue is missing"
+		);
+	}
+}
+
 /// tensor4all/faer#375: below about `1e-280` (`one_pair`) and `1.3e-293`
 /// (`two_pairs`) the QZ underflowed and returned `alpha = beta = 0` for every
 /// eigenvalue, with `Ok` when no eigenvectors were requested. the pencil is now
@@ -370,14 +441,21 @@ fn scaled_pencil_tiny() {
 }
 
 /// The eigenvalue-only call of [`scaled_pencil_tiny`], where the defect
-/// returned `Ok`: no `alpha = beta = 0`, every eigenvalue finite and within
-/// `TOL` (relative) of an eigenvalue at `s = 1`.
+/// returned `Ok`: no `alpha = beta = 0`, every eigenvalue finite, and the
+/// spectrum within `TOL` (relative) of the one at `s = 1`, matched one to one
+/// with multiplicities ([`spectrum_distance`]).
 #[test]
 fn scaled_pencil_tiny_eigenvalues_only() {
 	for (name, make) in PENCILS {
 		let (a, b) = make();
 		let reference = gevd_values(&a, &b, 1.0, false);
 		assert!(reference.ok);
+		let lambda_ref: Vec<c64> = reference
+			.alpha
+			.iter()
+			.zip(&reference.beta)
+			.map(|(a, &b)| a / b)
+			.collect();
 		for s in [1e-290, 1e-301, 1e-305] {
 			let v = gevd_values(&a, &b, s, false);
 			assert!(v.ok, "{name}, s = {s:e}: Err");
@@ -387,19 +465,19 @@ fn scaled_pencil_tiny_eigenvalues_only() {
 				v.alpha,
 				v.beta
 			);
-			for (al, &be) in v.alpha.iter().zip(&v.beta) {
-				let l = al / be;
-				let err = reference
-					.alpha
-					.iter()
-					.zip(&reference.beta)
-					.map(|(r, &rb)| (r / rb - l).norm() / (r / rb).norm())
-					.fold(f64::INFINITY, f64::min);
+			let lambda: Vec<c64> =
+				v.alpha.iter().zip(&v.beta).map(|(a, &b)| a / b).collect();
+			for l in &lambda {
 				assert!(
-					l.re.is_finite() && l.im.is_finite() && err <= TOL,
-					"{name}, s = {s:e}: eigenvalue {l:?}, relative error {err:e} > {TOL:e}"
+					l.re.is_finite() && l.im.is_finite(),
+					"{name}, s = {s:e}: eigenvalue {l:?}"
 				);
 			}
+			let err = spectrum_distance(&lambda, &lambda_ref);
+			assert!(
+				err <= TOL,
+				"{name}, s = {s:e}: spectrum {lambda:?} against {lambda_ref:?}, relative error {err:e} > {TOL:e}"
+			);
 		}
 	}
 }
@@ -658,19 +736,16 @@ fn scaled_pencil_tiny_c64_f32() {
 				!(*al == c64::new(0.0, 0.0) && *be == c64::new(0.0, 0.0)),
 				"{name}, s = {s:e}: alpha = beta = 0 returned with Ok"
 			);
-			let l = ratio(al, be);
-			let err =
-				r.1.iter()
-					.zip(&r.2)
-					.map(|(ra, rb)| {
-						(ratio(ra, rb) - l).norm() / ratio(ra, rb).norm()
-					})
-					.fold(f64::INFINITY, f64::min);
-			assert!(
-				err <= tol,
-				"{name}, s = {s:e}: eigenvalue {l:?}, relative error {err:e} > {tol:e}"
-			);
 		}
+		let lambda: Vec<c64> =
+			v.1.iter().zip(&v.2).map(|(a, b)| ratio(a, b)).collect();
+		let lambda_ref: Vec<c64> =
+			r.1.iter().zip(&r.2).map(|(a, b)| ratio(a, b)).collect();
+		let err = spectrum_distance(&lambda, &lambda_ref);
+		assert!(
+			err <= tol,
+			"{name}, s = {s:e}: spectrum {lambda:?} against {lambda_ref:?}, relative error {err:e} > {tol:e}"
+		);
 	};
 	for s in [1e-290, 1e-305] {
 		compare("c64", s, TOL, lambda_c64(1.0), lambda_c64(s));
