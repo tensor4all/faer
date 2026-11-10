@@ -122,10 +122,10 @@ stage further, time it at block widths that differ by 4x: if it does not follow 
 ## An overwrite-only entry does not keep the replace entry's dispatch for free
 
 `matmul_with_conj_uninit` writes a fresh destination, and the routes it takes are not the replace
-entry's: it fills and re-enters `matmul_with_conj` for an empty `k` (`:1675-1679`) and for a one-row
+entry's: it fills and returns for an empty `k` (`:1675-1679`), fills and re-enters for a one-row
 product (`:1680-1691`), takes `t4a-private-gemm-x86` with `Accum::Replace` for a native scalar above
-one row when AVX2 or AVX-512 is available (`:1692-1785`), fills and re-enters elsewhere or when the
-`std` feature is off (`:1786-1793`), and computes each element in place for other scalars
+one row when AVX-512F, or AVX2 plus FMA, is detected (`:1692-1709`), fills and re-enters elsewhere or
+when the `std` feature is off (`:1786-1793`), and computes each element in place for other scalars
 (`:1795-1810`). The original claim — that the replace entry's dispatch is kept — was wrong in both
 directions, so an overwrite-only entry has to restore the dispatch by hand, and only where the fill
 it was avoiding is smaller than the kernel it lands on (tensor4all/faer#200,
