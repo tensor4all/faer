@@ -155,9 +155,13 @@ the SMT twin helps)**
   to −6 %: +3.9 % at n = 64 Seq and slower in seven of the eight Team cells
   (0.989 at 128 Team8, 0.976 at 128 Team16, 0.997 at 256 Team8, 0.959 at 256
   Team16, 0.943 at 512 Team16, 0.968 at 1024 Team8, 0.951 at 1024 Team16).
-  Doubling the register width does not move the factorization much because the n = 1024 cells are out of cache (8 MiB domain) and the small cells
-  are bound by the serial panel and the dispatch, not the vector ALU. This is the
-  execution evidence that `2026-10-31-pfaffian.md` recorded as unperformed.
+  Doubling the register width does not move the factorization much. **The reason
+  is a hypothesis, not a measurement**: the tables below record elapsed times
+  only, and no performance counters or DRAM-bandwidth measurements were taken
+  (see the limits), so they do not separate cache capacity from dependency
+  latency, instruction throughput or dispatch. What is measured is the effect
+  itself — the direction and size in each cell. This is the execution evidence
+  that `2026-10-31-pfaffian.md` recorded as unperformed.
 - **The Team path scales to the width the host has.** Team8 over Seq is
   4.05 / 4.11 (`f64`/`c64`) at n = 512 and 5.98 / 5.77 at n = 1024 (default), so
   51 % and 72–75 % parallel efficiency on 8 threads. Team4 alone is 2.2x at
