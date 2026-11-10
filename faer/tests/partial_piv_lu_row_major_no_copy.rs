@@ -76,6 +76,17 @@ fn value(k: usize) -> f64 {
 	(z >> 11) as f64 / (1u64 << 53) as f64 - 0.5
 }
 
+/// Panics unless the positive strides `(rs, cs)` give an `m x n` view whose
+/// entries address distinct elements: the rows are laid out one after another
+/// (`rs >= n * cs`) or the columns are (`cs >= m * rs`).
+fn assert_non_overlapping(m: usize, n: usize, (rs, cs): (usize, usize)) {
+	assert!(
+		rs >= n * cs || cs >= m * rs,
+		"{m}x{n} strides ({rs}, {cs}) overlap: neither {rs} >= {n} * {cs} nor \
+		 {cs} >= {m} * {rs}"
+	);
+}
+
 /// The largest single allocation, in bytes, the calling thread makes while an
 /// `m x n` f64 matrix with element strides `(rs, cs)` (both positive) is
 /// factored (permutations and scratch are allocated before).
@@ -95,9 +106,9 @@ fn largest_allocation_strided(
 		par.shape(),
 		Default::default(),
 	));
+	assert_non_overlapping(m, n, (rs, cs));
 	// SAFETY: `a` holds `(m - 1) * rs + (n - 1) * cs + 1` elements, and the
-	// strides address distinct elements (`rs >= n * cs` or `cs >= m * rs` in
-	// every caller)
+	// strides address distinct elements (`assert_non_overlapping` above)
 	let view = |a: &mut Vec<f64>| unsafe {
 		MatMut::from_raw_parts_mut(
 			a.as_mut_ptr(),
@@ -176,7 +187,9 @@ fn row_major_partial_piv_lu_does_not_copy_the_matrix() {
 		}
 		// the control: a generic-stride view keeps the copy, and the counter
 		// sees it
-		for (rs, cs) in [(2, 192), (128 * 2, 2)] {
+		// (neither stride 1, the entries distinct: `cs = 128 * rs` and
+		// `rs = 128 * cs`)
+		for (rs, cs) in [(2, 128 * 2), (128 * 2, 2)] {
 			let whole = 128 * 128 * size_of::<f64>();
 			let largest =
 				largest_allocation_strided(128, 128, (rs, cs), par.reborrow());
@@ -285,14 +298,10 @@ fn reconstruction_error<T: Entry>(a: MatRef<'_, T>, f: &Factor<T>) -> f64 {
 		},
 	);
 	let lu = &l * &u;
-	let mut err: f64 = 0.0;
-	for j in 0..n {
-		for i in 0..m {
-			// row `i` of `L U` is row `perm[i]` of `A`
-			err = err.max((lu[(i, j)] - a[(f.perm[i], j)]).modulus());
-		}
-	}
-	err
+	// row `i` of `L U` is row `perm[i]` of `A`
+	finite_max("|P^-1 L U - A|", m, n, |i, j| {
+		(lu[(i, j)] - a[(f.perm[i], j)]).modulus()
+	})
 }
 
 /// The solution of `A x = b` from the factor, through the same solve for both
@@ -319,24 +328,43 @@ fn solve<T: Entry>(f: &Factor<T>, b: MatRef<'_, T>) -> Mat<T> {
 	x
 }
 
-fn max_abs<T: Entry>(a: MatRef<'_, T>) -> f64 {
-	let mut m: f64 = 0.0;
-	for j in 0..a.ncols() {
-		for i in 0..a.nrows() {
-			m = m.max(a[(i, j)].modulus());
+/// The largest of `entry(i, j)` over an `m x n` index range, panicking on the
+/// first value that is not finite.
+///
+/// `f64::max` returns the other operand when one is NaN, so a fold with it
+/// reduces an all-NaN factor or solution to `0` and every `<= tol` check
+/// passes; each value is checked before it is compared.
+fn finite_max(
+	what: &str,
+	m: usize,
+	n: usize,
+	mut entry: impl FnMut(usize, usize) -> f64,
+) -> f64 {
+	let mut max = 0.0f64;
+	for j in 0..n {
+		for i in 0..m {
+			let v = entry(i, j);
+			assert!(
+				v.is_finite(),
+				"{what}: non-finite value {v} at ({i}, {j})"
+			);
+			if v > max {
+				max = v;
+			}
 		}
 	}
-	m
+	max
+}
+
+fn max_abs<T: Entry>(a: MatRef<'_, T>) -> f64 {
+	finite_max("|a|", a.nrows(), a.ncols(), |i, j| a[(i, j)].modulus())
 }
 
 fn max_diff<T: Entry>(a: MatRef<'_, T>, b: MatRef<'_, T>) -> f64 {
-	let mut m: f64 = 0.0;
-	for j in 0..a.ncols() {
-		for i in 0..a.nrows() {
-			m = m.max((a[(i, j)] - b[(i, j)]).modulus());
-		}
-	}
-	m
+	assert_eq!(a.shape(), b.shape());
+	finite_max("|a - b|", a.nrows(), a.ncols(), |i, j| {
+		(a[(i, j)] - b[(i, j)]).modulus()
+	})
 }
 
 /// The column-major and the row-major factorization of `a` agree.
@@ -429,6 +457,7 @@ fn check_agreement<T: Entry>(
 		d_factor / norm_a,
 		cm.lu == rm.lu,
 	);
+	// both are finite (`finite_max`), so `f64::max` drops no NaN here
 	(d_factor, e_cm.max(e_rm), d_solve)
 }
 
@@ -529,4 +558,22 @@ fn row_major_partial_piv_lu_tie_goes_to_the_first_row() {
 		let f = factor(a.as_ref(), row_major, Par::Seq);
 		assert_eq!(f.perm[0], 2, "row_major = {row_major}");
 	}
+}
+
+/// The `128 x 128` control with strides `(2, 192)` overlapped: entries
+/// `(96, 0)` and `(0, 1)` both address element `192`. The check rejects it.
+#[test]
+#[should_panic(expected = "overlap")]
+fn overlapping_strides_are_rejected() {
+	assert_non_overlapping(128, 128, (2, 192));
+}
+
+/// An all-NaN factor fails the agreement checks instead of reducing to a zero
+/// difference.
+#[test]
+#[should_panic(expected = "non-finite")]
+fn nan_factor_is_rejected() {
+	let a = random::<f64>(4, 4, 3);
+	let nan = Mat::<f64>::from_fn(4, 4, |_, _| f64::NAN);
+	max_diff(a.as_ref(), nan.as_ref());
 }
