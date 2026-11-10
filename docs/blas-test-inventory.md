@@ -74,7 +74,7 @@ exposes them.
 
 | OpenBLAS file/check | faer counterpart | Port? | Reason |
 | --- | --- | --- | --- |
-| `DCHK1` `GEMV`/`GBMV` | `matmul::matmul` with one destination column (the `matvec` route) | ported (`blas_gemm.rs`), `GBMV` no | the source's `N`/`T` sweep becomes the two matvec routes (a `1`-column destination and a `1`-row one), `m`/`n` = 0 are real cases in the Fortran driver's `test/dblat2.dat` (`0 1 2 3 7 31 63`), and `alpha`/`beta` are in its `ALF`/`BET` lists. `GBMV`'s banded storage has no counterpart |
+| `DCHK1` `GEMV`/`GBMV` | `matmul::matmul` with one destination column (the `matvec` route) | ported (`blas_gemm.rs`), `GBMV` no | the source's `N`/`T` sweep becomes the two matvec routes (a `1`-column destination and a `1`-row one), `m`/`n` = 0 are real cases in both level-2 drivers (`test/dblat2.dat` `0 1 2 3 7 31 63`, CBLAS `ctest/din2` `0 1 2 3 5 9 63`), and `alpha`/`beta` are in their `ALF`/`BET` lists. `GBMV`'s banded storage has no counterpart |
 | `DCHK2` `SYMV`/`SBMV`/`SPMV` | none | no | faer's structured matmul carries triangular block structures only; a symmetric operand is materialized dense, and banded/packed storage has no API |
 | `DCHK3` `TRMV`/`TBMV`/`TPMV` | `matmul::triangular::matmul_with_conj` with a `Rectangular` destination | ported (`blas_trmm.rs`) | the TRMM shapes carry it; the `Rectangular` case with a triangular operand is the level-2 multiply. Banded/packed variants have no counterpart |
 | `DCHK3` `TRSV`/`TBSV`/`TPSV` | `triangular_solve::solve_{,unit_}{lower,upper}_triangular_in_place_with_conj` | ported (`blas_trsm.rs`) | the `nrhs = 1` cases are TRSV. Banded/packed variants have no counterpart |
@@ -127,9 +127,9 @@ The four `GEMM`/`GEMV` ones:
 
 | Test | Property |
 | --- | --- |
-| `matmul::blas::*::gemm_matches_the_source_dimension_sweep` | `C = alpha*op(A)*op(B) + beta*C` equals an independently accumulated product for `'N'`/`'T'`/`'C'` on either operand, both `Accum` values and `alpha` 0/1/-2/0.5, over `(m, n, k)` including `m`, `n` and `k` = 0; each operand still equals an independently built copy of the same values (a persistent mutation is caught, one that also rewrites the copy is not) |
+| `matmul::blas::*::gemm_matches_the_source_dimension_sweep` | `C = alpha*op(A)*op(B) + beta*C` equals an independently accumulated product for `'N'`/`'T'`/`'C'` on either operand, both `Accum` values and `alpha` 0/1/-2/0.5, over `(m, n, k)` including `m`, `n` and `k` = 0; each of the four operand storages (the `m x k` and `k x m` forms of `A` and of `B`) still equals a copy taken before the call, so a write to any of them is caught after the call that made it |
 | `matmul::blas::*::gemm_reads_the_destination_only_when_it_accumulates` | `Accum::Replace` produces the product from a NaN-filled destination (the source's `beta = 0` "`C` need not be set on entry"), and `Accum::Add` brings the NaN back, so the two arms are distinguishable rather than both silently correct |
-| `matmul::blas::*::gemv_matches_the_source_dimension_sweep` | the same `alpha`/`beta`/empty-direction sweep for `y = alpha*op(A)*x + beta*y`, on both matvec routes (`ncols == 1` and `nrows == 1`) |
+| `matmul::blas::*::gemv_matches_the_source_dimension_sweep` | the same `alpha`/`beta`/empty-direction sweep for `y = alpha*op(A)*x + beta*y`, on both matvec routes (`ncols == 1` and `nrows == 1`); `A` and the operand the route reads (`x`, or the `x^T` storage on the transposed route) still equal a copy taken before the call |
 | `matmul::blas::*::gemv_zeroes_the_destination_of_an_empty_reduction` | with `k = 0`, `Accum::Replace` zeroes the destination and `Accum::Add` returns it unchanged |
 
 Deliberate deviations from the reference routines, asserted rather than
@@ -146,11 +146,14 @@ avoided:
   need not read `C`. faer's `Accum::Replace` implements the second (asserted
   above); the first is not asserted, because faer's kernel multiplies by
   `alpha` and a NaN operand would propagate.
-* the two drivers' sweeps become bounded shape lists: the Fortran
-  `test/dblat2.dat` and `test/dblat3.dat` both list `0 1 2 3 7 31 63` (and
-  `0 1 2 4` for the level-2 `K`), while the CBLAS `ctest/din2`/`ctest/din3`
-  start at 1 and reach 5/9/35; `alpha`/`beta` `0.0/0.7/1.0` become exact
-  binaries so the comparison stays exact.
+* the two drivers' sweeps become bounded shape lists. The empty shapes are in
+  both level-2 drivers: `test/dblat2.dat:10` lists `n = 0 1 2 3 7 31 63` and
+  `ctest/din2:9` lists `n = 0 1 2 3 5 9 63`, each with `m` set to
+  `max(n - n/2 - 1, 0)` and `min(n + n/2 + 1, NMAX)` and with `k = 0 1 2 4`
+  (`dblat2.dat:12`, `din2:11`). At level 3 only the Fortran list has them:
+  `test/dblat3.dat:10` is `0 1 2 3 7 31 63` while `ctest/din3:9` starts at 1
+  (`1 2 3 5 7 9 35`). `alpha`/`beta` `0.0/0.7/1.0` become exact binaries so the
+  comparison stays exact.
 
 ### Inventory totals
 

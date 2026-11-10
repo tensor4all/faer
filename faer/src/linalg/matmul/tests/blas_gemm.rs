@@ -59,6 +59,12 @@ fn gemm_matches_the_source_dimension_sweep() {
 		let b = Mat::<Scalar>::from_fn(k, n, |i, j| integer(i + 2, j));
 		let b_t = b.transpose().to_owned();
 		let c = Mat::<Scalar>::from_fn(m, n, |i, j| integer(i + 4, j + 3));
+		// every storage a route can hand to the kernel, as it was before the
+		// first call: a write is caught after the call that made it, which a
+		// comparison between two live copies cannot do (it also passes when
+		// both are rewritten the same way)
+		let (a_before, a_t_before) = (a.to_owned(), a_t.to_owned());
+		let (b_before, b_t_before) = (b.to_owned(), b_t.to_owned());
 		// 0 = 'N', 1 = 'T', 2 = 'C' (the source's ICH = 'NTC')
 		for (ta, tb) in [
 			(0, 0),
@@ -104,14 +110,16 @@ fn gemm_matches_the_source_dimension_sweep() {
 						beta,
 						alpha,
 					);
+					crate::assert!(
+						exact(a.as_ref(), a_before.as_ref())
+							&& exact(a_t.as_ref(), a_t_before.as_ref())
+							&& exact(b.as_ref(), b_before.as_ref())
+							&& exact(b_t.as_ref(), b_t_before.as_ref()),
+						"gemm modified an operand: m={m} n={n} k={k}"
+					);
 				}
 			}
 		}
-		crate::assert!(
-			exact(a.as_ref(), a_t.transpose())
-				&& exact(b.as_ref(), b_t.transpose()),
-			"gemm modified an operand: m={m} n={n} k={k}"
-		);
 	}
 }
 
@@ -176,14 +184,18 @@ fn gemm_reads_the_destination_only_when_it_accumulates() {
 fn gemv_matches_the_source_dimension_sweep() {
 	// DCHK1 GEMV: `y = alpha * op(A) * x + beta * y`, through `matmul`'s
 	// `ncols == 1` route, and its transpose (`nrows == 1`) sibling.
-	// `test/dblat2.dat` sweeps `n = 0, 1, 2, 3, 5, 9, 63` with `m` just below
-	// and just above `n`, so the two empty directions are real cases there.
-	// The CBLAS `ctest/din2` starts at 1 and does not reach them.
+	// Both drivers sweep `n = 0, 1, 2, 3, ...` with `m = max(n - n/2 - 1, 0)` and
+	// `m = min(n + n/2 + 1, NMAX)`, so the empty `n` (and the `m = 0` that the
+	// first of the two gives for it) are real cases in both: `test/dblat2.dat:10`
+	// lists `0 1 2 3 7 31 63`, and the CBLAS `ctest/din2:9` lists
+	// `0 1 2 3 5 9 63` (`c_cblat2.f:572` sets its `NULL` flag for it). Only the
+	// level-3 CBLAS list (`ctest/din3:9`) starts at 1.
 	for (m, k) in [(0, 0), (0, 3), (3, 0), (1, 1), (3, 2), (2, 3), (5, 4)] {
 		let a = Mat::<Scalar>::from_fn(m, k, |i, j| integer(i, j + 1));
-		let a_before = a.clone();
+		let a_before = a.to_owned();
 		// y (m x 1) = A (m x k) * x (k x 1)
 		let x = Mat::<Scalar>::from_fn(k, 1, |i, _| integer(i + 2, 5));
+		let x_before = x.to_owned();
 		let y = Mat::<Scalar>::from_fn(m, 1, |i, _| integer(i + 4, 3));
 		for beta in [Accum::Replace, Accum::Add] {
 			for alpha in [z(0.0), z(1.0), z(-2.0), z(0.5)] {
@@ -203,11 +215,18 @@ fn gemv_matches_the_source_dimension_sweep() {
 					beta,
 					alpha,
 				);
+				// the operand storages as they were before the call
+				crate::assert!(
+					exact(a.as_ref(), a_before.as_ref())
+						&& exact(x.as_ref(), x_before.as_ref()),
+					"gemv modified an operand: m={m} k={k}"
+				);
 			}
 		}
 		// y^T (1 x k) = x^T (1 x m) * A (m x k): the other matvec route, whose
 		// left operand is a transposed column (`try_as_row_major` succeeds)
 		let xt = Mat::<Scalar>::from_fn(m, 1, |i, _| integer(i + 1, 2));
+		let xt_before = xt.to_owned();
 		let yt = Mat::<Scalar>::from_fn(1, k, |_, j| integer(j + 3, 4));
 		for beta in [Accum::Replace, Accum::Add] {
 			for alpha in [z(0.0), z(1.0), z(-2.0), z(0.5)] {
@@ -234,12 +253,13 @@ fn gemv_matches_the_source_dimension_sweep() {
 					beta,
 					alpha,
 				);
+				crate::assert!(
+					exact(a.as_ref(), a_before.as_ref())
+						&& exact(xt.as_ref(), xt_before.as_ref()),
+					"gemv modified an operand: transposed route, m={m} k={k}"
+				);
 			}
 		}
-		crate::assert!(
-			exact(a.as_ref(), a_before.as_ref()),
-			"gemv modified its matrix: m={m} k={k}"
-		);
 	}
 }
 
