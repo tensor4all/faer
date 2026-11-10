@@ -18,7 +18,7 @@ A row of `A` has stride `m`. `matmul`'s vector paths need a contiguous destinati
 `lhs` that is contiguous in one direction (`faer/src/linalg/matmul/mod.rs:1236-1254`), so a doubly
 strided `lhs`, or a strided destination under a column-major `lhs`, falls to the general kernel, but
 a strided destination on its own does not. Inside that branch the two kernels differ: the
-column-major one writes a `ColMut<_, _, _, ContiguousFwd>`, so it needs a contiguous destination
+column-major one writes a `ColMut<'_, T, Dim<'M>, ContiguousFwd>`, so it needs a contiguous destination
 column but takes a `rhs` of any stride (`:891-899`); the row-major one (`:1253-1266`) needs a
 row-major-contiguous `lhs` and a contiguous `rhs` (`:762-770`), while its destination is a plain
 `ColMut` of any stride. A reflector's norm becomes a strided reduction in any case. Gather the
