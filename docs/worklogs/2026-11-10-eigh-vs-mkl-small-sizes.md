@@ -293,7 +293,7 @@ def med(v, d, o, n, t):
         if (r['variant'], r['dtype'], r['order'], r['n'], r['threads']) == (v, d, o, str(n), str(t))
         for x in r['samples_ms'].split(';')])
 N = (64, 96, 128, 256, 512)
-print('A')                                    # tables A and D
+print('A')                                    # table A and its samples
 for d in ('f64', 'c64'):
     for o in 'cf':
         for n in N:
