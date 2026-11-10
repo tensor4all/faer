@@ -37,7 +37,7 @@ pub use schur_eigenvalues::{SchurEigenvalueError,schur_eigenvalues_real};
 pub enum GevdError {
 	/// reached max iterations, the input was not finite, or the requested
 	/// eigenvectors came out non-finite (see [`gevd_real`] for the range of
-	/// scales where that happens)
+	/// scales)
 	NoConvergence,
 }
 /// eigendecomposition error
@@ -140,6 +140,97 @@ pub mod gen_hessenberg;
 pub mod qz_cplx;
 /// $QZ$ decomposition for real matrices
 pub mod qz_real;
+/// `2^32` and `2^-32`, the step of [`exponent_of`] and [`mul_pow2`]
+fn pow2_32<T: RealField>() -> (T, T) {
+	let mut p = one::<T>() + one::<T>();
+	for _ in 0..5 {
+		p = &p * &p;
+	}
+	let q = p.recip();
+	(p, q)
+}
+
+/// `floor(log2(x))` for a finite `x > 0`, computed by exact power-of-two
+/// steps (`T` has no `frexp`)
+fn exponent_of<T: RealField>(x: &T) -> isize {
+	let two = one::<T>() + one::<T>();
+	let half = two.recip();
+	let (p32, q32) = pow2_32::<T>();
+	let mut m = x.copy();
+	let mut e = 0isize;
+	while m >= p32 {
+		m = &m * &q32;
+		e += 32;
+	}
+	while m >= two {
+		m = &m * &half;
+		e += 1;
+	}
+	while m < q32 {
+		m = &m * &p32;
+		e -= 32;
+	}
+	while m < one::<T>() {
+		m = &m * &two;
+		e -= 1;
+	}
+	e
+}
+
+/// `x * 2^e`, applied in steps that are each a representable power of two, so
+/// no out-of-range factor is ever formed, and rounded once. upwards every step
+/// is exact until the result overflows. downwards the steps are taken while
+/// the value stays normal (exact), and what is left is one multiplication by
+/// `2^e'`, a normal number, so a result in the subnormal range is rounded once
+/// rather than once per step (repeated halving of a subnormal can round a
+/// nonzero result to zero)
+fn mul_pow2<T: ComplexField>(x: &T, e: isize) -> T {
+	let two = one::<T::Real>() + one::<T::Real>();
+	let half = two.recip();
+	let (p32, q32) = pow2_32::<T::Real>();
+	let safmin = min_positive::<T::Real>();
+	let emin = exponent_of(&safmin);
+	let mut x = x.copy();
+	let mut e = e;
+	while e >= 32 {
+		x = x.mul_real(&p32);
+		e -= 32;
+	}
+	while e > 0 {
+		x = x.mul_real(&two);
+		e -= 1;
+	}
+	if e == 0 {
+		return x;
+	}
+	// `|re| + |im|`: a complex value's parts are moved together, so only its
+	// larger part is guaranteed one rounding
+	let m = |x: &T| x.abs1();
+	if m(&x) == zero::<T::Real>() {
+		return x;
+	}
+	while e <= -32 && m(&x) * &q32 >= safmin {
+		x = x.mul_real(&q32);
+		e += 32;
+	}
+	while e < 0 && m(&x) * &half >= safmin {
+		x = x.mul_real(&half);
+		e += 1;
+	}
+	if e == 0 {
+		return x;
+	}
+	// `|x|` is now below `2 safmin`, so the rest takes it to the subnormal range
+	// or to zero; `2^e` is normal for `e >= emin`, and below that the result is
+	// zero whichever way it is formed
+	let e = e.max(emin);
+	let mut f = one::<T::Real>();
+	for _ in 0..(-e) {
+		f = &f * &half;
+	}
+	x.mul_real(&f)
+}
+
 #[track_caller]
 fn compute_gevd_generic<T: ComplexField>(
 	A: MatMut<'_, T>,
@@ -250,6 +341,49 @@ fn compute_gevd_generic<T: ComplexField>(
 	let need_qz = u_left.is_some() || u_right.is_some();
 	let mut A = A;
 	let mut B = B;
+	// tensor4all/faer#375: like LAPACK `dggev`, scale `A` and `B` separately
+	// before the reduction and the QZ, which otherwise underflow for tiny pencils
+	// and return `alpha = beta = 0`. a matrix whose largest entry is below
+	// `smlnum = sqrt(safmin) / eps` is scaled to a largest entry in
+	// `[smlnum, 2 smlnum)`, one above `bignum = 1 / smlnum` to `(bignum / 2,
+	// bignum]`. unlike `dggev` (`dlascl` by `smlnum / norm`) the factor is a power
+	// of two, so the scaling and the scaling back are exact (except where an
+	// entry is or becomes subnormal) and `(2^k A, 2^k B)` gets exactly `2^k`
+	// times the `alpha` and `beta` of `(A, B)` when both are scaled. in `f32`
+	// and `f64` the factor and its inverse are normal numbers.
+	//
+	// `alpha` is scaled back by `A`'s factor and `beta` by `B`'s after the QZ.
+	// The eigenvectors are not scaled back: `(a A, b B)` has the eigenvalues
+	// `(a alpha, b beta)` and the same eigenvectors, the orthogonal `Q`, `Z` do
+	// not depend on `a`, `b`, and the eigenvector stage normalizes its output.
+	let smlnum = sqrt_min_positive::<T::Real>() / eps::<T::Real>();
+	let bignum = smlnum.recip();
+	// the inverse `2^e` of the factor `2^-e` applied to `M`, as `(2^e, e)`, if
+	// `M` was scaled
+	let prescale = |M: MatMut<'_, T>| -> Option<(T::Real, isize)> {
+		let norm = M.rb().norm_max();
+		let two = one::<T::Real>() + one::<T::Real>();
+		let half = two.recip();
+		let mut factor = one::<T::Real>();
+		let mut e = 0isize;
+		if norm > zero::<T::Real>() && norm < smlnum {
+			while &norm * &factor < smlnum {
+				factor = &factor * &two;
+				e -= 1;
+			}
+		} else if norm > bignum {
+			while &norm * &factor > bignum {
+				factor = &factor * &half;
+				e += 1;
+			}
+		} else {
+			return None;
+		}
+		zip!(M).for_each(|unzip!(x)| *x = x.mul_real(&factor));
+		Some((factor.recip(), e))
+	};
+	let a_unscale = prescale(A.rb_mut());
+	let b_unscale = prescale(B.rb_mut());
 	let mut u_left = u_left;
 	let mut u_right = u_right;
 	let mut alpha_re = alpha_re;
@@ -326,6 +460,81 @@ fn compute_gevd_generic<T: ComplexField>(
 		params.schur,
 		stack,
 	);
+	// undo the prescaling of `A` and `B` on `alpha` and `beta`. the pair of an
+	// eigenvalue is `(alpha 2^ea, beta 2^eb)`, `2^ea` and `2^eb` being `A`'s and
+	// `B`'s inverse factors, and any common power of two `2^d` times it is the
+	// same eigenvalue. `d = 0` (the input's scale) is kept when both components
+	// come out finite and, if nonzero, normal. otherwise `d` is chosen from the
+	// components' binary exponents, as integers, so no factor outside the range
+	// (such as `2^(ea - eb)` for a pencil prescaled in opposite directions) is
+	// formed (review of #378):
+	// - `d` is at most `hi`, the largest `d` that keeps the larger component
+	//   finite,
+	// - within that, the `d` nearest zero that makes both normal,
+	// - else the `d` nearest zero that keeps it nonzero (subnormal),
+	// - else the largest `d`, where the smaller one is below the smallest
+	//   subnormal even next to a larger one at the top of the range (the
+	//   eigenvalue itself is beyond the range: `0` or infinite).
+	// a pair the QZ returned as `0 / 0` is left so
+	if a_unscale.is_some() || b_unscale.is_some() {
+		let (fa, ea) = a_unscale.unwrap_or((one::<T::Real>(), 0));
+		let (fb, eb) = b_unscale.unwrap_or((one::<T::Real>(), 0));
+		let safmin = min_positive::<T::Real>();
+		let emax = exponent_of(&max_positive::<T::Real>());
+		let emin = exponent_of(&safmin);
+		// `p - 1`, `p` the number of significand bits
+		let digits = -exponent_of(&eps::<T::Real>());
+		// `|x| * f` is finite, and zero or normal
+		let representable = |m: &T::Real, f: &T::Real| {
+			let x = m * f;
+			x.is_finite() && (*m == zero::<T::Real>() || x >= safmin)
+		};
+		for j in 0..n {
+			let amag = if const { T::IS_REAL } {
+				alpha_re[j].abs1().fmax(alpha_im[j].abs1())
+			} else {
+				alpha_re[j].abs1()
+			};
+			let bmag = beta[j].abs1();
+			if representable(&amag, &fa) && representable(&bmag, &fb) {
+				alpha_re[j] = alpha_re[j].mul_real(&fa);
+				if const { T::IS_REAL } {
+					alpha_im[j] = alpha_im[j].mul_real(&fa);
+				}
+				beta[j] = beta[j].mul_real(&fb);
+				continue;
+			}
+			// binary exponents of the nonzero components at the input's scale
+			let mut exps = [None, None];
+			if amag != zero::<T::Real>() {
+				exps[0] = Some(exponent_of(&amag) + ea);
+			}
+			if bmag != zero::<T::Real>() {
+				exps[1] = Some(exponent_of(&bmag) + eb);
+			}
+			let (large, small) = match exps {
+				[Some(x), Some(y)] => (x.max(y), x.min(y)),
+				[Some(x), None] | [None, Some(x)] => (x, x),
+				// `0 / 0` from the QZ
+				[None, None] => continue,
+			};
+			let hi = emax - large;
+			let lo = emin - small;
+			let lo_nonzero = lo - digits;
+			let d = if lo <= hi {
+				0isize.clamp(lo, hi)
+			} else if lo_nonzero <= hi {
+				0isize.clamp(lo_nonzero, hi)
+			} else {
+				hi
+			};
+			alpha_re[j] = mul_pow2(&alpha_re[j], ea + d);
+			if const { T::IS_REAL } {
+				alpha_im[j] = mul_pow2(&alpha_im[j], ea + d);
+			}
+			beta[j] = mul_pow2(&beta[j], eb + d);
+		}
+	}
 	qz_to_gevd(
 		A.rb(),
 		B.rb(),
@@ -334,10 +543,10 @@ fn compute_gevd_generic<T: ComplexField>(
 		par,
 		stack,
 	);
-	// the eigenvector stage cannot recover from a QZ that underflowed: for a
-	// pencil whose entries are all below about `1e-280` (f64) the QZ can return
-	// `alpha = beta = 0`, and the vectors come out NaN. That is reported rather
-	// than returned with `Ok` (tensor4all/faer#370)
+	// non-finite eigenvectors are reported rather than returned with `Ok`
+	// (tensor4all/faer#370). before the prescaling of tensor4all/faer#375 this
+	// is how a QZ that underflowed to `alpha = beta = 0` for a pencil below
+	// about `1e-280` (f64) showed up; it is kept as a safety net
 	for u in [u_left.rb(), u_right.rb()] {
 		if let Some(u) = u {
 			if !u.is_all_finite() {
@@ -1593,31 +1802,32 @@ pub fn gevd_scratch<T: ComplexField>(
 /// # range of scales
 ///
 /// the eigenvalues $\alpha / \beta$ and the eigenvector directions of
-/// $(sA, sB)$ are those of $(A, B)$, but the computation is not exactly scale
-/// invariant, because $(A, B)$ is not prescaled into a safe range as LAPACK's
-/// `dggev` does:
+/// $(sA, sB)$ are those of $(A, B)$. like LAPACK's `dggev`, $A$ and $B$ are
+/// each scaled by a power of two before the reduction when their largest entry
+/// is below $\sqrt{\text{safmin}} / \varepsilon$ or above its inverse, and
+/// $\alpha$, $\beta$ are scaled back afterwards (tensor4all/faer#375; before
+/// that the QZ underflowed and returned $\alpha = \beta = 0$ for every
+/// eigenvalue of a tiny pencil). in `f64`, for the well-conditioned pencils of
+/// `tests/gevd_scaled_pencil.rs`, the eigenvalues and eigenvectors were
+/// measured within $3 \cdot 10^{-15}$ of $s = 1$ for every $s = 10^k$ at which
+/// all entries of $(sA, sB)$ are normal and finite ($10^{-305}$ to $10^{307}$
+/// for the widest-ranged pencil). when entries are subnormal, the input itself
+/// has lost precision, and the results are correspondingly less accurate
+/// (measured: within $10^{-13}$ of $s = 1$ down to $s \approx 2.0 \cdot
+/// 10^{-311}$ to $2.4 \cdot 10^{-311}$, depending on the pencil).
 ///
-/// - the eigenvector back substitution divides complex numbers with LAPACK
-///   `dladiv`'s scaling, and it was not what limited the range in any measured
-///   case. (before tensor4all/faer#370 it formed $|d|^2$, and in `f64` a
-///   complex pair's eigenvectors became NaN for $s$ above about $5 \cdot
-///   10^{153}$ or below about $3 \cdot 10^{-147}$ to $10^{-162}$, depending on
-///   the pencil.)
-/// - the QZ iteration underflows when all entries of $A$ and $B$ are tiny. in
-///   `f64`, for well-conditioned pencils with entries of order $s$, the results
-///   were measured finite and scale invariant to about $10^{-14}$ for every
-///   $s = 10^k$ with $10^{-279} \le s \le 10^{307}$; the lower end depends on
-///   the pencil (one of the tested pencils fails below about $6 \cdot
-///   10^{-280}$, another below about $10^{-293}$).
-/// - below that, the QZ usually returns $\alpha = \beta = 0$ for every
-///   eigenvalue. when eigenvectors are requested this function then returns
-///   [`GevdError::NoConvergence`] instead of NaN eigenvectors; when they are
-///   not, it returns `Ok` with those zero values. at some scales in that range
-///   it instead returns `Ok` with finite but inaccurate results (measured:
-///   errors from $10^{-8}$ to $O(1)$ at $s = 10^{-301}$ and $10^{-305}$). a
-///   caller with such a pencil should scale $A$ and $B$ by a power of two
-///   before the call and scale $\alpha$ and $\beta$ back afterwards (the
-///   eigenvectors need no change).
+/// $\alpha$ and $\beta$ are returned at the scale of the input where both are
+/// finite and, if nonzero, normal there. otherwise (in `f64` this needs entries
+/// near `f64::MAX` or subnormal ones) that eigenvalue's pair is multiplied by
+/// a common power of two $2^d$, which leaves $\alpha / \beta$ unchanged: $d$
+/// is the one nearest zero that keeps both finite and normal, else the one
+/// nearest zero that keeps both finite and nonzero, and only when the
+/// eigenvalue's magnitude is beyond what any pair can hold is the smaller one
+/// zero (an eigenvalue $0$ or infinite). the factors are applied by exact
+/// power-of-two steps, never formed as one out-of-range number. $\alpha =
+/// \beta = 0$ is returned with `Ok` only when the QZ itself finds it, i.e. for
+/// a pencil that is singular within the QZ's backward error, the same at every
+/// scale.
 #[track_caller]
 pub fn gevd_real<T: RealField>(
 	A: MatMut<'_, T>,
@@ -1653,23 +1863,8 @@ pub fn gevd_real<T: RealField>(
 ///
 /// the values in $A$ and $B$ after this function is called are unspecified.
 ///
-/// # range of scales
-///
-/// as for [`gevd_real`], $(A, B)$ is not prescaled into a safe range, so the
-/// result is scale invariant only within a range of scales $s$ of $(sA, sB)$.
-/// the eigenvector back substitution divides with a scaled complex reciprocal
-/// and was not what limited the range in any measured case. in `c64`, for the
-/// three well-conditioned pencils of `faer/tests/gevd_scaled_pencil.rs`
-/// (entries of order $s$), the eigenvalues and eigenvectors were measured
-/// finite and equal to those of $s = 1$ to $10^{-13}$ for every $s = 10^k$ with
-/// $10^{-295} \le s \le 10^{307}$, which contains the range
-/// $[10^{-150}, 10^{160}]$ that tensor4all/faer#370 asked about; the lower end
-/// depends on the pencil ($10^{-297}$ and $10^{-307}$ for the other two). below
-/// it the QZ underflows and this function returns `Ok` with finite but
-/// inaccurate results (measured between $10^{-306}$ and $10^{-296}$: errors
-/// from just above $10^{-13}$ up to eigenvalues that no longer match any of
-/// $s = 1$); scale $A$ and $B$ by a power of two before the
-/// call and $\alpha$, $\beta$ back afterwards.
+/// $A$ and $B$ are prescaled, and $\alpha$, $\beta$ scaled back, as in
+/// [`gevd_real`] (see its range of scales).
 #[track_caller]
 pub fn gevd_cplx<T: ComplexField>(
 	A: MatMut<'_, T>,

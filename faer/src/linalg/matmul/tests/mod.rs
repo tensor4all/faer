@@ -1,6 +1,6 @@
-// Driver for the OpenBLAS BLAS-level matmul ports (TRMM, rank-k update, rank-1
-// update). Provenance and the source revision are recorded in each case file
-// and in docs/blas-test-inventory.md.
+// Driver for the OpenBLAS BLAS-level matmul ports (GEMM, GEMV, TRMM, rank-k
+// update, rank-1 update). Provenance and the source revision are recorded in
+// each case file and in docs/blas-test-inventory.md.
 use crate::internal_prelude::*;
 use crate::linalg::matmul::matmul;
 use crate::linalg::matmul::triangular::{BlockStructure, matmul_with_conj};
@@ -21,6 +21,7 @@ macro_rules! suite {
 			include!("../../tests/blas_support.rs");
 			include!("blas_trmm.rs");
 			include!("blas_rank_update.rs");
+			include!("blas_gemm.rs");
 		}
 	};
 }

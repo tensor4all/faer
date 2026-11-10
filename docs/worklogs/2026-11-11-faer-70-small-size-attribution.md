@@ -49,16 +49,37 @@ scripts/record_run.py zen5-cpu faer-kernels --checkout <checkout> --upstream ext
   --dtypes f64,c64 --threads 1,4,8 --label i70-base     # and --label i70-cand
 ```
 
-Runs (harness checkout `../faer-benchmark-70`, branch `harness/faer-0.25`, kept locally and not
-committed):
+Runs (harness checkout `../faer-benchmark-70`, branch `harness/faer-0.25`). That checkout, and
+with it the two run directories below, is **not committed** to `faer-benchmark` or to this
+repository: they exist only on the machine that measured them.
 
-* baseline `data/results/zen5-cpu/faer-kernels/20261110T171647Z-i70-base`
-* candidate `data/results/zen5-cpu/faer-kernels/20261110T172110Z-i70-cand`
-* control (`faer-upstream` row, unchanged by the diff): median ratio **1.0028** over 24 cells
-  (min 0.9895, max 1.0245), so the machine reproduced between the two runs.
+* baseline `data/results/zen5-cpu/faer-kernels/20261110T171647Z-i70-base/`
+* candidate `data/results/zen5-cpu/faer-kernels/20261110T172110Z-i70-cand/`
+* each directory holds `run{0,1,2}-linalg-small-{1,4,8}t.csv` — three process sets from `--aa 3` —
+  plus the harness's `verify-*.csv`, its `.guard` files and the `run.yaml` that records the pins.
+  The columns this record reads are `family`, `order`, `dtype`, `threads`, `row` (the engine),
+  `m` and `total_ms`.
 
 Statistic as in the issue: median of the three process-set medians of `total_ms`, `faer-fork` row,
-candidate/baseline.
+candidate/baseline. The control is the same statistic on the `faer-upstream` row, which the diff
+does not touch, over the same 24 cells (2 families × 2 orders × 2 dtypes × 3 widths): **median
+ratio 1.0028, min 0.9895, max 1.0245**, so the machine reproduced between the two runs. Those two
+directories give it, per cell and summarised, with:
+
+```
+python3 -c 'import csv,glob,sys,statistics as st,itertools as it; L=lambda d:{(r[0],r[1],r[2],r[3]):st.median([x[4] for x in g]) for r,g in it.groupby(sorted([(r["family"],r["order"],r["dtype"],r["threads"],float(r["total_ms"])) for f in glob.glob(d+"/run*-linalg-small-*t.csv") for r in csv.DictReader(open(f)) if r["row"]=="faer-upstream" and r["m"]=="64" and r["family"] in ("qr_factor","solve")]),key=lambda x:x[:4])}; a,b=L(sys.argv[1]),L(sys.argv[2]); R=[(b[k]/a[k],k) for k in a]; print("\n".join("%s %s %s %sT %.4f"%(k[0],k[1],k[2],k[3],x) for x,k in sorted(R,key=lambda y:y[1]))); print("cells %d median %.4f min %.4f max %.4f"%(len(R),st.median([x for x,_ in R]),min(x for x,_ in R),max(x for x,_ in R)))' <baseline dir> <candidate dir>
+```
+
+**The statistics in this section and every number the probe produces — the `regions` column and the
+probe timings further down — are the claims in this record that cannot be checked from a
+repository.** The two directories are uncommitted, so neither the summary nor the 24 per-cell
+ratios behind it can be recomputed from anything in the tree: the command above reproduces them on
+a machine that still has the checkout, and publishing the two directories to
+`faer-benchmark-provenance` is what would make them evidence for a reader. The `probe` crate and
+the one-counter `spindle` patch that produce the `regions` column and those timings are likewise
+outside every repository and are not published here, so neither the counts nor the timings can be
+re-run from this tree. The remaining numbers in the comparison table come with the command and the
+pinned revisions they were taken from.
 
 | family | order | T | 0.24.10 ms | 0.25.0 ms | ratio | issue ratio | reproduced |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -183,8 +204,65 @@ temporary env-gated override at its three gate entry points (`par_pays`, `join_p
 `par_can_pay_time`): `FAER_GATE=0` answers "no" without computing the estimate, the shape or the
 comparison, `FAER_GATE=1` answers "yes", unset runs the rule. At these sizes the rule already
 answers "no" everywhere, so `unset` and `FAER_GATE=0` produce the same decision and the rest of the
-execution is identical: the difference between them is the gate and nothing else. One binary, one
-width, interleaved:
+execution is identical: the difference between them is the gate and nothing else. The override is
+these additions to `faer/src/utils/cost.rs` at `0e15729` and nothing else — they apply cleanly with
+`git apply` to that tree, and `cargo check --release -p t4a-faer --lib --features std,rayon`
+compiles them (40.6 s; they need `std`, which the harness's `std, rayon` feature set enables):
+
+```diff
+diff --git a/faer/src/utils/cost.rs b/faer/src/utils/cost.rs
+index c751b9a6..082cd8a4 100644
+--- a/faer/src/utils/cost.rs
++++ b/faer/src/utils/cost.rs
+@@ -710,11 +710,25 @@ fn host_costs() -> &'static threadteam::DispatchCosts {
+ 	HOST.get_or_init(threadteam::DispatchCosts::host_default)
+ }
+ 
++/// Gate override for probes: `FAER_GATE=0` answers "no" and `FAER_GATE=1` answers "yes"
++/// without computing the estimate, the shape or the comparison; unset runs the rule.
++fn gate_override() -> Option<bool> {
++	static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
++	*OVERRIDE.get_or_init(|| match std::env::var("FAER_GATE").as_deref() {
++		Ok("0") => Some(false),
++		Ok("1") => Some(true),
++		_ => None,
++	})
++}
++
+ /// Whether a region of serial time `estimate` that opens `sections` sections can pay on `par` at
+ /// *some* width: `estimate >= PAYS * sections * min over widths of the cost` ([`ParShape::min_dispatch_cost`]).
+ /// "Does not pay at the cheapest width" is the rejection that is right for any shape of table (a
+ /// rising one included); it says nothing about the width a region then chooses.
+ pub(crate) fn par_can_pay_time(par: &crate::Par, estimate: Duration, sections: u32) -> bool {
++	if let Some(answer) = gate_override() {
++		return answer;
++	}
+ 	if par.degree() < 2 {
+ 		return false;
+ 	}
+@@ -743,6 +757,9 @@ pub(crate) fn par_pays<T: crate::ComplexField>(
+ 	rate: Rate,
+ 	sections: u32,
+ ) -> bool {
++	if let Some(answer) = gate_override() {
++		return answer;
++	}
+ 	// a sequential token, or one of a single participant (a `Team` of size 1: it behaves exactly
+ 	// like `Par::Seq`), never pays: skip the estimate (a QR 128 asks 500 times)
+ 	if par.degree() < 2 {
+@@ -781,6 +798,9 @@ pub(crate) fn join_pays<T: crate::ComplexField>(
+ 	rate: Rate,
+ 	sections: u32,
+ ) -> bool {
++	if let Some(answer) = gate_override() {
++		return answer;
++	}
+ 	if par.degree() < 2 {
+ 		return false;
+ 	}
+```
+
+One binary, one width, interleaved:
 
 ```
 # qr_factor f64 F 64x64, four interleaved repetitions each, taskset -c 4-7 / 4-11

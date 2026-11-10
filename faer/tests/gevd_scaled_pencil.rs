@@ -13,6 +13,11 @@
 //! - `repeated_pair`: the faer#220 pencil `diag(R, R, 3)`, `B = I`, where the
 //!   shifted 2 by 2 block is exactly singular and its second pivot is replaced
 //!   by `smin` (LAPACK `dlaln2`).
+//!
+//! tensor4all/faer#375 adds the eigenvalue-only call below the range where the
+//! QZ used to underflow to `alpha = beta = 0`, the power-of-two exactness of
+//! the prescaling, the pairs whose scaling back would underflow or overflow,
+//! and `c64` and `f32`.
 use faer::diag::Diag;
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::evd::ComputeEigenvectors;
@@ -346,26 +351,458 @@ fn scaled_pencil_large() {
 	check(1e160);
 }
 
-/// Far beyond the old range on both sides, where the pencil is still computed
-/// correctly by the QZ.
+/// Far beyond the faer#370 range on both sides.
 #[test]
 fn scaled_pencil_extremes() {
 	check(1e-250);
 	check(1e300);
 }
 
-/// Below about `1e-280` (for `one_pair`) the QZ itself underflows and returns
-/// `alpha = beta = 0`, so the eigenvectors cannot be formed. That is reported
-/// as an error rather than as NaN eigenvectors with `Ok`.
+/// tensor4all/faer#375: below about `1e-280` (`one_pair`) and `1.3e-293`
+/// (`two_pairs`) the QZ underflowed and returned `alpha = beta = 0` for every
+/// eigenvalue, with `Ok` when no eigenvectors were requested. the pencil is now
+/// prescaled, so the eigenvectors and the eigenvalues agree with `s = 1`.
 #[test]
-fn scaled_pencil_below_range_is_an_error() {
+fn scaled_pencil_tiny() {
+	check(1e-290);
+	check(1e-301);
+	check(1e-305);
+}
+
+/// The eigenvalue-only call of [`scaled_pencil_tiny`], where the defect
+/// returned `Ok`: no `alpha = beta = 0`, every eigenvalue finite and within
+/// `TOL` (relative) of an eigenvalue at `s = 1`.
+#[test]
+fn scaled_pencil_tiny_eigenvalues_only() {
+	for (name, make) in PENCILS {
+		let (a, b) = make();
+		let reference = gevd_values(&a, &b, 1.0, false);
+		assert!(reference.ok);
+		for s in [1e-290, 1e-301, 1e-305] {
+			let v = gevd_values(&a, &b, s, false);
+			assert!(v.ok, "{name}, s = {s:e}: Err");
+			assert!(
+				!has_zero_pair(&v),
+				"{name}, s = {s:e}: alpha = beta = 0 returned with Ok\nalpha = {:?}\nbeta = {:?}",
+				v.alpha,
+				v.beta
+			);
+			for (al, &be) in v.alpha.iter().zip(&v.beta) {
+				let l = al / be;
+				let err = reference
+					.alpha
+					.iter()
+					.zip(&reference.beta)
+					.map(|(r, &rb)| (r / rb - l).norm() / (r / rb).norm())
+					.fold(f64::INFINITY, f64::min);
+				assert!(
+					l.re.is_finite() && l.im.is_finite() && err <= TOL,
+					"{name}, s = {s:e}: eigenvalue {l:?}, relative error {err:e} > {TOL:e}"
+				);
+			}
+		}
+	}
+}
+
+/// The prescaling factor is a power of two, so two pencils that differ by a
+/// power of two and are both prescaled get `alpha` and `beta` that differ by
+/// exactly that power.
+#[test]
+fn scaled_pencil_power_of_two_is_exact() {
+	let k = 2f64.powi(100);
+	for big in [false, true] {
+		for (name, make) in PENCILS {
+			let (a, b) = make();
+			let s = if big {
+				2f64.powi(800)
+			} else {
+				2f64.powi(-1000)
+			};
+			let lo = gevd_values(&a, &b, s, false);
+			let hi = gevd_values(&a, &b, s * k, false);
+			assert!(lo.ok && hi.ok);
+			for j in 0..lo.beta.len() {
+				assert!(
+					lo.alpha[j] * k == hi.alpha[j]
+						&& lo.beta[j] * k == hi.beta[j],
+					"{name}, s = {s:e}, j = {j}: ({:?}, {:e}) * 2^100 != ({:?}, {:e})",
+					lo.alpha[j],
+					lo.beta[j],
+					hi.alpha[j],
+					hi.beta[j],
+				);
+			}
+		}
+	}
+}
+
+/// Every eigenvalue of `v` as its pair `(alpha, beta)` divided by
+/// `max(|alpha|, |beta|)`; the pair must be finite and not both zero.
+fn finite_pairs(v: &Values, what: &str) -> Vec<(c64, c64)> {
+	v.alpha
+		.iter()
+		.zip(&v.beta)
+		.map(|(a, &b)| {
+			assert!(
+				a.re.is_finite() && a.im.is_finite() && b.is_finite(),
+				"{what}: non-finite pair ({a:?}, {b:e})"
+			);
+			assert!(
+				!(*a == c64::new(0.0, 0.0) && b == 0.0),
+				"{what}: alpha = beta = 0 returned with Ok"
+			);
+			let m = a.norm().max(b.abs());
+			(a / m, c64::new(b / m, 0.0))
+		})
+		.collect()
+}
+
+/// Chordal distance between two eigenvalues given as normalized pairs, which
+/// also compares infinite eigenvalues (`beta = 0`).
+fn chordal(x: (c64, c64), y: (c64, c64)) -> f64 {
+	let n = |p: (c64, c64)| (p.0.norm_sqr() + p.1.norm_sqr()).sqrt();
+	(x.0 * y.1 - y.0 * x.1).norm() / (n(x) * n(y))
+}
+
+/// A pencil with subnormal entries whose second eigenvalue has `alpha` and
+/// `beta` below the smallest subnormal at the input's scale. scaling the QZ's
+/// values back would underflow both to zero (an indeterminate eigenvalue), so
+/// the pair is scaled by a common power of two instead and keeps the ratio of
+/// the same pencil times `2^1000` (exact), which is computed without
+/// prescaling. found by a random search over pencils with entries between
+/// `1e-324` and `1e-300`.
+#[test]
+fn scaled_pencil_underflow_keeps_the_ratio() {
+	let a = Mat::<f64>::from_fn(2, 2, |i, j| {
+		[[0.0, -0.0], [-1e-323, -6.4e-323]][i][j]
+	});
+	let b = Mat::<f64>::from_fn(2, 2, |i, j| {
+		[
+			[1.713968517e-315, 4e-323],
+			[3.4855627839772177e-303, -5.326281543e-314],
+		][i][j]
+	});
+	let normal = gevd_values(&a, &b, 2f64.powi(1000), false);
+	assert!(normal.ok);
+	let reference = finite_pairs(&normal, "s = 2^1000");
+	for vectors in [false, true] {
+		let v = gevd_values(&a, &b, 1.0, vectors);
+		let what = format!("vectors = {vectors}");
+		assert!(v.ok, "{what}: Err");
+		for (l, r) in finite_pairs(&v, &what).into_iter().zip(&reference) {
+			let d = chordal(l, *r);
+			assert!(
+				d <= TOL,
+				"{what}: pair {l:?}, reference {r:?}, chordal distance {d:e}"
+			);
+		}
+	}
+}
+
+/// tensor4all/faer review of #378: `A = B = [[m, m], [-m, m]]`, `m = 1.3e308`,
+/// is finite and regular with the double eigenvalue `1`. it is prescaled down,
+/// and scaling the QZ's `alpha` and `beta` back overflowed both to `inf`, so
+/// `alpha / beta` was NaN with `Ok`. the pair is now scaled by a common power
+/// of two and stays finite.
+#[test]
+fn scaled_pencil_overflow_keeps_the_ratio() {
+	let m = 1.3e308;
+	let a = Mat::<f64>::from_fn(2, 2, |i, j| [[m, m], [-m, m]][i][j]);
+	for vectors in [false, true] {
+		let v = gevd_values(&a, &a, 1.0, vectors);
+		let what = format!("vectors = {vectors}");
+		assert!(v.ok, "{what}: Err");
+		let one = (c64::new(1.0, 0.0), c64::new(1.0, 0.0));
+		for l in finite_pairs(&v, &what) {
+			let d = chordal(l, one);
+			assert!(
+				d <= TOL,
+				"{what}: pair {l:?}, expected eigenvalue 1, chordal distance {d:e}"
+			);
+		}
+	}
+}
+
+/// Review of #378: a one-by-one pencil whose `A` and `B` are prescaled in
+/// opposite directions. `A = [[2^-1074]]` (the smallest subnormal) is scaled
+/// up and `B = [[1e300]]` down, so the two inverse factors are `2^-616` and
+/// `2^538`; their ratio, `2^-1154`, is not representable. a fallback that formed
+/// it returned `alpha = 0` for the nonzero `alpha`. the pencil's own pair
+/// `(2^-1074, 1e300)` is representable, so `(alpha, beta)` must be a nonzero
+/// multiple of it (`beta >= 0`, as the QZ normalizes it, makes the multiple
+/// negative for a negative `B`): `alpha / a = beta / b`, nonzero and finite. the mirrored
+/// pencil (an eigenvalue of order `1e300 / 2^-1074`, not representable as a
+/// number) is checked the same way.
+#[test]
+fn scaled_pencil_opposite_scales_keep_the_pair() {
+	let tiny = f64::from_bits(1);
+	for (a, b) in [(tiny, 1e300), (1e300, tiny), (-tiny, 1e300), (1e300, -tiny)]
+	{
+		let am = Mat::<f64>::from_fn(1, 1, |_, _| a);
+		let bm = Mat::<f64>::from_fn(1, 1, |_, _| b);
+		for vectors in [false, true] {
+			let v = gevd_values(&am, &bm, 1.0, vectors);
+			let what = format!("A = {a:e}, B = {b:e}, vectors = {vectors}");
+			assert!(v.ok, "{what}: Err");
+			let (alpha, beta) = (v.alpha[0], v.beta[0]);
+			assert!(
+				alpha.im == 0.0 && alpha.re.is_finite() && beta.is_finite(),
+				"{what}: ({alpha:?}, {beta:e})"
+			);
+			assert!(
+				alpha.re != 0.0 && beta != 0.0,
+				"{what}: a nonzero component came back as zero: ({alpha:?}, {beta:e})"
+			);
+			// both quotients are the common factor, `+-` a power of two of moderate size
+			let (qa, qb) = (alpha.re / a, beta / b);
+			assert!(
+				qa != 0.0 && (qa - qb).abs() <= TOL * qa.abs(),
+				"{what}: ({alpha:?}, {beta:e}) is not a nonzero multiple of (a, b): {qa:e} against {qb:e}"
+			);
+		}
+	}
+}
+
+/// `gevd_cplx` (`c64`) and `gevd_real` (`f32`) share the prescaling; their
+/// eigenvalues at a tiny `s` must agree with `s = 1`.
+#[test]
+fn scaled_pencil_tiny_c64_f32() {
+	use faer::linalg::gevd::gevd_cplx;
 	let (a, b) = one_pair();
-	let r = gevd(&a, &b, 1e-290);
-	assert!(
-		matches!(r, Err(GevdError::NoConvergence)),
-		"expected Err(NoConvergence), got {:?}",
-		r.map(|(g, ul, ur)| (g.lambda, ul, ur))
-	);
+	let n = a.nrows();
+	let lambda_c64 = |s: f64| -> (bool, Vec<c64>, Vec<c64>) {
+		// a complex pencil: `(A + i A^T, B)` has non-real, unpaired eigenvalues
+		let mut am = Mat::<c64>::from_fn(n, n, |i, j| {
+			c64::new(s * a[(i, j)], s * a[(j, i)])
+		});
+		let mut bm =
+			Mat::<c64>::from_fn(n, n, |i, j| c64::new(s * b[(i, j)], 0.0));
+		let mut al = Diag::<c64>::zeros(n);
+		let mut be = Diag::<c64>::zeros(n);
+		let mut mem = MemBuffer::new(gevd_scratch::<c64>(
+			n,
+			ComputeEigenvectors::No,
+			ComputeEigenvectors::No,
+			ParShape::Seq,
+			Spec::<GevdParams, c64>::default(),
+		));
+		let ok = gevd_cplx(
+			am.as_mut(),
+			bm.as_mut(),
+			al.as_mut(),
+			be.as_mut(),
+			None,
+			None,
+			Par::Seq,
+			MemStack::new(&mut mem),
+			Spec::<GevdParams, c64>::default(),
+		)
+		.is_ok();
+		let al: Vec<c64> = (0..n).map(|j| al.column_vector()[j]).collect();
+		let be: Vec<c64> = (0..n).map(|j| be.column_vector()[j]).collect();
+		(ok, al, be)
+	};
+	let lambda_f32 = |s: f32| -> (bool, Vec<c64>, Vec<c64>) {
+		let mut am = Mat::<f32>::from_fn(n, n, |i, j| s * a[(i, j)] as f32);
+		let mut bm = Mat::<f32>::from_fn(n, n, |i, j| s * b[(i, j)] as f32);
+		let mut re = Diag::<f32>::zeros(n);
+		let mut im = Diag::<f32>::zeros(n);
+		let mut be = Diag::<f32>::zeros(n);
+		let mut mem = MemBuffer::new(gevd_scratch::<f32>(
+			n,
+			ComputeEigenvectors::No,
+			ComputeEigenvectors::No,
+			ParShape::Seq,
+			Spec::<GevdParams, f32>::default(),
+		));
+		let ok = gevd_real(
+			am.as_mut(),
+			bm.as_mut(),
+			re.as_mut(),
+			im.as_mut(),
+			be.as_mut(),
+			None,
+			None,
+			Par::Seq,
+			MemStack::new(&mut mem),
+			Spec::<GevdParams, f32>::default(),
+		)
+		.is_ok();
+		let al: Vec<c64> = (0..n)
+			.map(|j| {
+				c64::new(
+					re.column_vector()[j] as f64,
+					im.column_vector()[j] as f64,
+				)
+			})
+			.collect();
+		let be: Vec<c64> = (0..n)
+			.map(|j| c64::new(be.column_vector()[j] as f64, 0.0))
+			.collect();
+		(ok, al, be)
+	};
+	// `alpha / beta` without squaring a tiny `beta` (num-complex's division
+	// forms `|beta|^2`)
+	let ratio = |al: &c64, be: &c64| {
+		let m = al.norm().max(be.norm());
+		(al / m) / (be / m)
+	};
+	let compare = |name: &str,
+	               s: f64,
+	               tol: f64,
+	               r: (bool, Vec<c64>, Vec<c64>),
+	               v: (bool, Vec<c64>, Vec<c64>)| {
+		assert!(r.0 && v.0, "{name}, s = {s:e}: Err");
+		for (al, be) in v.1.iter().zip(&v.2) {
+			assert!(
+				!(*al == c64::new(0.0, 0.0) && *be == c64::new(0.0, 0.0)),
+				"{name}, s = {s:e}: alpha = beta = 0 returned with Ok"
+			);
+			let l = ratio(al, be);
+			let err =
+				r.1.iter()
+					.zip(&r.2)
+					.map(|(ra, rb)| {
+						(ratio(ra, rb) - l).norm() / ratio(ra, rb).norm()
+					})
+					.fold(f64::INFINITY, f64::min);
+			assert!(
+				err <= tol,
+				"{name}, s = {s:e}: eigenvalue {l:?}, relative error {err:e} > {tol:e}"
+			);
+		}
+	};
+	for s in [1e-290, 1e-305] {
+		compare("c64", s, TOL, lambda_c64(1.0), lambda_c64(s));
+	}
+	// `f32`: `TOL` scaled by the ratio of the epsilons
+	let tol32 = TOL * (f32::EPSILON as f64 / f64::EPSILON);
+	for s in [1e-30f32, 1e-36] {
+		compare("f32", s as f64, tol32, lambda_f32(1.0), lambda_f32(s));
+	}
+}
+
+/// `alpha` (real and imaginary parts) and `beta` of `(s A, s B)`, with or
+/// without the eigenvectors, and whether the call returned `Ok`.
+struct Values {
+	alpha: Vec<c64>,
+	beta: Vec<f64>,
+	ok: bool,
+}
+
+fn gevd_values(a: &Mat<f64>, b: &Mat<f64>, s: f64, vectors: bool) -> Values {
+	let n = a.nrows();
+	let mut a = Mat::<f64>::from_fn(n, n, |i, j| s * a[(i, j)]);
+	let mut b = Mat::<f64>::from_fn(n, n, |i, j| s * b[(i, j)]);
+	let mut s_re = Diag::<f64>::zeros(n);
+	let mut s_im = Diag::<f64>::zeros(n);
+	let mut beta = Diag::<f64>::zeros(n);
+	let mut u_left = Mat::<f64>::zeros(n, n);
+	let mut u_right = Mat::<f64>::zeros(n, n);
+	let ce = if vectors {
+		ComputeEigenvectors::Yes
+	} else {
+		ComputeEigenvectors::No
+	};
+	let mut mem = MemBuffer::new(gevd_scratch::<f64>(
+		n,
+		ce,
+		ce,
+		ParShape::Seq,
+		Spec::<GevdParams, f64>::default(),
+	));
+	let ok = gevd_real(
+		a.as_mut(),
+		b.as_mut(),
+		s_re.as_mut(),
+		s_im.as_mut(),
+		beta.as_mut(),
+		vectors.then(|| u_left.as_mut()),
+		vectors.then(|| u_right.as_mut()),
+		Par::Seq,
+		MemStack::new(&mut mem),
+		Spec::<GevdParams, f64>::default(),
+	)
+	.is_ok();
+	Values {
+		alpha: (0..n)
+			.map(|j| c64::new(s_re.column_vector()[j], s_im.column_vector()[j]))
+			.collect(),
+		beta: (0..n).map(|j| beta.column_vector()[j]).collect(),
+		ok,
+	}
+}
+
+/// `true` when some eigenvalue came out as `alpha = beta = 0`.
+fn has_zero_pair(v: &Values) -> bool {
+	v.alpha
+		.iter()
+		.zip(&v.beta)
+		.any(|(a, &b)| *a == c64::new(0.0, 0.0) && b == 0.0)
+}
+
+/// tensor4all/faer#375: the lower end of the QZ's range. For each pencil and
+/// for the eigenvalue-only and eigenvector calls, scans `s = 10^(k/10)` and
+/// bisects (in `log10 s`) every change of "some `alpha = beta = 0`" and of "the
+/// eigenvalues agree with `s = 1` to `TOL`". Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn scan_zero_eigenvalue_boundary() {
+	for (name, make) in PENCILS {
+		let (a, b) = make();
+		let reference = gevd_values(&a, &b, 1.0, false);
+		let lambda_ref: Vec<c64> = reference
+			.alpha
+			.iter()
+			.zip(&reference.beta)
+			.map(|(a, &b)| a / b)
+			.collect();
+		for vectors in [false, true] {
+			let state = |e: f64| {
+				let v = gevd_values(&a, &b, 10f64.powf(e), vectors);
+				let zero = has_zero_pair(&v);
+				let accurate = v.ok
+					&& v.alpha.iter().zip(&v.beta).all(|(a, &b)| {
+						let l = a / b;
+						lambda_ref
+							.iter()
+							.map(|r| (r - l).norm() / r.norm())
+							.fold(f64::INFINITY, f64::min)
+							<= TOL
+					});
+				(zero, v.ok, accurate)
+			};
+			let mut prev: Option<(f64, (bool, bool, bool))> = None;
+			for k in -3240..=-2500 {
+				let e = k as f64 / 10.0;
+				let st = state(e);
+				if let Some((e0, st0)) = prev {
+					if st != st0 {
+						// bisect the first component that changed
+						let (mut lo, mut hi) = (e0, e);
+						for _ in 0..50 {
+							let mid = 0.5 * (lo + hi);
+							if state(mid) == st0 {
+								lo = mid;
+							} else {
+								hi = mid;
+							}
+						}
+						println!(
+							"{name}, vectors = {vectors}: (zero, ok, accurate) = {st0:?} at s = {:.6e}, {st:?} at s = {:.6e}",
+							10f64.powf(lo),
+							10f64.powf(hi),
+						);
+					}
+				}
+				prev = Some((e, st));
+			}
+			println!(
+				"{name}, vectors = {vectors}: at s = 1e-250 {:?}",
+				state(-250.0)
+			);
+		}
+	}
 }
 
 /// Prints, for each pencil and each `s = 10^k`, whether the eigenvectors are
