@@ -35,10 +35,9 @@ pub use schur_eigenvalues::{SchurEigenvalueError,schur_eigenvalues_real};
 /// eigendecomposition error
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum GevdError {
-	/// reached max iterations, the input was not finite, an eigenvalue's `alpha`
-	/// and `beta` both underflowed to zero when the prescaling was undone, or
-	/// the requested eigenvectors came out non-finite (see [`gevd_real`] for the
-	/// range of scales)
+	/// reached max iterations, the input was not finite, or the requested
+	/// eigenvectors came out non-finite (see [`gevd_real`] for the range of
+	/// scales)
 	NoConvergence,
 }
 /// eigendecomposition error
@@ -366,32 +365,50 @@ fn compute_gevd_generic<T: ComplexField>(
 		params.schur,
 		stack,
 	);
-	// undo the prescaling of `A` and `B` on `alpha` and `beta`. scaling back can
-	// underflow, and an eigenvalue whose `alpha` and `beta` were not both zero
-	// must not come out as `alpha = beta = 0` (an indeterminate eigenvalue) with
-	// `Ok`, so that is reported as an error
+	// undo the prescaling of `A` and `B` on `alpha` and `beta`: each pair
+	// `(alpha, beta)` is scaled back by `(fa, fb)`, `A`'s and `B`'s inverse
+	// factors, so it is at the input's scale. where that would overflow either
+	// of them, or take a nonzero one below the normal range (both zero would be
+	// an indeterminate `0 / 0`, and a subnormal one loses digits), the pair is
+	// scaled by `(fa / g, fb / g)`, `g = max(fa, fb)`, instead: the same ratio
+	// `alpha / beta`, one of the two left at its QZ value and the other scaled
+	// down, so the pair stays finite and not both zero. a pair with a zero
+	// `alpha` (`beta`) keeps the QZ value of `beta` (`alpha`). all the factors
+	// are powers of two
 	if a_unscale.is_some() || b_unscale.is_some() {
-		let mut underflow = false;
+		let fa = a_unscale.unwrap_or(one::<T::Real>());
+		let fb = b_unscale.unwrap_or(one::<T::Real>());
+		let g_inv = fa.fmax(&fb).recip();
+		let ga = &fa * &g_inv;
+		let gb = &fb * &g_inv;
+		let safmin = min_positive::<T::Real>();
+		// `|x| * f` is finite, and zero or normal
+		let representable = |m: &T::Real, f: &T::Real| {
+			let x = m * f;
+			x.is_finite() && (*m == zero::<T::Real>() || x >= safmin)
+		};
 		for j in 0..n {
-			let was_zero = alpha_re[j] == zero()
-				&& (!T::IS_REAL || alpha_im[j] == zero())
-				&& beta[j] == zero();
-			if let Some(f) = &a_unscale {
-				alpha_re[j] = alpha_re[j].mul_real(f);
-				if const { T::IS_REAL } {
-					alpha_im[j] = alpha_im[j].mul_real(f);
-				}
+			let amag = if const { T::IS_REAL } {
+				alpha_re[j].abs1() + alpha_im[j].abs1()
+			} else {
+				alpha_re[j].abs1()
+			};
+			let bmag = beta[j].abs1();
+			let (ca, cb) =
+				if representable(&amag, &fa) && representable(&bmag, &fb) {
+					(&fa, &fb)
+				} else if amag == zero::<T::Real>() {
+					(&fa, &one::<T::Real>())
+				} else if bmag == zero::<T::Real>() {
+					(&one::<T::Real>(), &fb)
+				} else {
+					(&ga, &gb)
+				};
+			alpha_re[j] = alpha_re[j].mul_real(ca);
+			if const { T::IS_REAL } {
+				alpha_im[j] = alpha_im[j].mul_real(ca);
 			}
-			if let Some(f) = &b_unscale {
-				beta[j] = beta[j].mul_real(f);
-			}
-			let is_zero = alpha_re[j] == zero()
-				&& (!T::IS_REAL || alpha_im[j] == zero())
-				&& beta[j] == zero();
-			underflow |= is_zero && !was_zero;
-		}
-		if underflow {
-			return Err(GevdError::NoConvergence);
+			beta[j] = beta[j].mul_real(cb);
 		}
 	}
 	qz_to_gevd(
@@ -1607,17 +1624,18 @@ pub fn gevd_scratch<T: ComplexField>(
 /// all entries of $(sA, sB)$ are normal and finite ($10^{-305}$ to $10^{307}$
 /// for the widest-ranged pencil). when entries are subnormal, the input itself
 /// has lost precision, and the results are correspondingly less accurate
-/// (measured: within $10^{-13}$ of $s = 1$ down to $s \approx 2.4 \cdot
-/// 10^{-311}$ to $3.4 \cdot 10^{-311}$, depending on the pencil).
+/// (measured: within $10^{-13}$ of $s = 1$ down to $s \approx 2.0 \cdot
+/// 10^{-311}$ to $2.4 \cdot 10^{-311}$, depending on the pencil).
 ///
-/// $\alpha$ and $\beta$ are returned at the scale of the input, so they can
-/// underflow when it is tiny. when both $\alpha$ and $\beta$ of an eigenvalue
-/// underflow to zero (in `f64` this needs subnormal entries), this function
-/// returns [`GevdError::NoConvergence`] rather than an indeterminate
-/// $\alpha = \beta = 0$; the outputs are then unspecified. $\alpha = \beta
-/// = 0$ is still returned with `Ok` when the QZ itself finds it, i.e. for a
-/// pencil that is singular within the QZ's backward error, the same at every
-/// scale.
+/// $\alpha$ and $\beta$ are returned at the scale of the input where they are
+/// representable there. where scaling them back would overflow either, or
+/// take a nonzero one below the normal range (in `f64` this needs entries near
+/// `f64::MAX` or subnormal ones), that eigenvalue's pair is returned scaled by
+/// a common power of two instead: $\alpha / \beta$ is unchanged and the pair
+/// is finite and not both zero, but its magnitude is no longer that of the
+/// input. $\alpha = \beta = 0$ is returned with `Ok` only when the QZ itself
+/// finds it, i.e. for a pencil that is singular within the QZ's backward
+/// error, the same at every scale.
 #[track_caller]
 pub fn gevd_real<T: RealField>(
 	A: MatMut<'_, T>,
@@ -1653,9 +1671,8 @@ pub fn gevd_real<T: RealField>(
 ///
 /// the values in $A$ and $B$ after this function is called are unspecified.
 ///
-/// $A$ and $B$ are prescaled as in [`gevd_real`] (see its range of scales),
-/// with the same error when an eigenvalue's $\alpha$ and $\beta$ both
-/// underflow when the scaling is undone.
+/// $A$ and $B$ are prescaled, and $\alpha$, $\beta$ scaled back, as in
+/// [`gevd_real`] (see its range of scales).
 #[track_caller]
 pub fn gevd_cplx<T: ComplexField>(
 	A: MatMut<'_, T>,

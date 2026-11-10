@@ -16,7 +16,8 @@
 //!
 //! tensor4all/faer#375 adds the eigenvalue-only call below the range where the
 //! QZ used to underflow to `alpha = beta = 0`, the power-of-two exactness of
-//! the prescaling, its underflow error, and `c64` and `f32`.
+//! the prescaling, the pairs whose scaling back would underflow or overflow,
+//! and `c64` and `f32`.
 use faer::diag::Diag;
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::evd::ComputeEigenvectors;
@@ -433,14 +434,43 @@ fn scaled_pencil_power_of_two_is_exact() {
 	}
 }
 
+/// Every eigenvalue of `v` as its pair `(alpha, beta)` divided by
+/// `max(|alpha|, |beta|)`; the pair must be finite and not both zero.
+fn finite_pairs(v: &Values, what: &str) -> Vec<(c64, c64)> {
+	v.alpha
+		.iter()
+		.zip(&v.beta)
+		.map(|(a, &b)| {
+			assert!(
+				a.re.is_finite() && a.im.is_finite() && b.is_finite(),
+				"{what}: non-finite pair ({a:?}, {b:e})"
+			);
+			assert!(
+				!(*a == c64::new(0.0, 0.0) && b == 0.0),
+				"{what}: alpha = beta = 0 returned with Ok"
+			);
+			let m = a.norm().max(b.abs());
+			(a / m, c64::new(b / m, 0.0))
+		})
+		.collect()
+}
+
+/// Chordal distance between two eigenvalues given as normalized pairs, which
+/// also compares infinite eigenvalues (`beta = 0`).
+fn chordal(x: (c64, c64), y: (c64, c64)) -> f64 {
+	let n = |p: (c64, c64)| (p.0.norm_sqr() + p.1.norm_sqr()).sqrt();
+	(x.0 * y.1 - y.0 * x.1).norm() / (n(x) * n(y))
+}
+
 /// A pencil with subnormal entries whose second eigenvalue has `alpha` and
-/// `beta` below the smallest subnormal: both underflow to zero when the
-/// prescaling is undone, which is reported as an error rather than as
-/// `alpha = beta = 0` with `Ok`. the same pencil times `2^1000` (exact) is
-/// computed with nonzero `alpha`, `beta`. found by a random search over pencils
-/// with entries between `1e-324` and `1e-300`.
+/// `beta` below the smallest subnormal at the input's scale. scaling the QZ's
+/// values back would underflow both to zero (an indeterminate eigenvalue), so
+/// the pair is scaled by a common power of two instead and keeps the ratio of
+/// the same pencil times `2^1000` (exact), which is computed without
+/// prescaling. found by a random search over pencils with entries between
+/// `1e-324` and `1e-300`.
 #[test]
-fn scaled_pencil_underflow_is_an_error() {
+fn scaled_pencil_underflow_keeps_the_ratio() {
 	let a = Mat::<f64>::from_fn(2, 2, |i, j| {
 		[[0.0, -0.0], [-1e-323, -6.4e-323]][i][j]
 	});
@@ -451,14 +481,43 @@ fn scaled_pencil_underflow_is_an_error() {
 		][i][j]
 	});
 	let normal = gevd_values(&a, &b, 2f64.powi(1000), false);
-	assert!(normal.ok && !has_zero_pair(&normal));
+	assert!(normal.ok);
+	let reference = finite_pairs(&normal, "s = 2^1000");
 	for vectors in [false, true] {
 		let v = gevd_values(&a, &b, 1.0, vectors);
-		assert!(
-			!v.ok,
-			"vectors = {vectors}: expected Err, got Ok with alpha = {:?}, beta = {:?}",
-			v.alpha, v.beta
-		);
+		let what = format!("vectors = {vectors}");
+		assert!(v.ok, "{what}: Err");
+		for (l, r) in finite_pairs(&v, &what).into_iter().zip(&reference) {
+			let d = chordal(l, *r);
+			assert!(
+				d <= TOL,
+				"{what}: pair {l:?}, reference {r:?}, chordal distance {d:e}"
+			);
+		}
+	}
+}
+
+/// tensor4all/faer review of #378: `A = B = [[m, m], [-m, m]]`, `m = 1.3e308`,
+/// is finite and regular with the double eigenvalue `1`. it is prescaled down,
+/// and scaling the QZ's `alpha` and `beta` back overflowed both to `inf`, so
+/// `alpha / beta` was NaN with `Ok`. the pair is now scaled by a common power
+/// of two and stays finite.
+#[test]
+fn scaled_pencil_overflow_keeps_the_ratio() {
+	let m = 1.3e308;
+	let a = Mat::<f64>::from_fn(2, 2, |i, j| [[m, m], [-m, m]][i][j]);
+	for vectors in [false, true] {
+		let v = gevd_values(&a, &a, 1.0, vectors);
+		let what = format!("vectors = {vectors}");
+		assert!(v.ok, "{what}: Err");
+		let one = (c64::new(1.0, 0.0), c64::new(1.0, 0.0));
+		for l in finite_pairs(&v, &what) {
+			let d = chordal(l, one);
+			assert!(
+				d <= TOL,
+				"{what}: pair {l:?}, expected eigenvalue 1, chordal distance {d:e}"
+			);
+		}
 	}
 }
 
