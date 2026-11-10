@@ -103,6 +103,11 @@ pub enum ComputeEigenvectors {
 }
 /// computes the layout of the workspace required to compute a self-adjoint
 /// matrix's eigendecomposition
+///
+/// with eigenvectors, this includes an `n x n` column-major matrix in which
+/// [`self_adjoint_evd`] computes the eigenvectors when the caller's `u` is
+/// row-major (tensor4all/faer#314); the query cannot see the layout of `u`, so
+/// the room is reserved for every caller and only a row-major `u` uses it.
 pub fn self_adjoint_evd_scratch<T: ComplexField>(
 	dim: usize,
 	compute_u: ComputeEigenvectors,
@@ -137,6 +142,8 @@ pub fn self_adjoint_evd_scratch<T: ComplexField>(
 			},
 		)
 		.array(2),
+		// the column-major stand-in for a row-major `u`
+		temp_mat_scratch::<T>(n, n),
 		StackReq::any_of(&[
 			if n < params.recursion_threshold {
 				StackReq::empty()
@@ -336,22 +343,24 @@ pub fn self_adjoint_evd<T: ComplexField>(
 	if n == 0 {
 		return Ok(());
 	}
+	// A row-major `u` would have the eigenvector solver and the back-transformation write it a
+	// column at a time with a stride of `n` (1.4-8.5x a column-major `u` at f64 64-256,
+	// tensor4all/faer#314). They write a column-major `n x n` stand-in instead, which is copied
+	// into `u` once at the end: O(n^2) against the O(n^3) decomposition, and the arithmetic is the
+	// column-major call's, so `u` and `s` come out bit for bit as with a column-major `u`.
+	let stage_u = u.rb().is_some_and(|u| {
+		u.row_stride().unsigned_abs() != 1 && u.col_stride().unsigned_abs() == 1
+	});
 	#[cfg(feature = "perf-warn")]
 	if let Some(matrix) = u.rb() {
 		if matrix.row_stride().unsigned_abs() != 1
+			&& !stage_u
 			&& crate::__perf_warn!(QR_WARN)
 		{
-			if matrix.col_stride().unsigned_abs() == 1 {
-				log::warn!(
-					target : "faer_perf",
-					"EVD prefers column-major eigenvector matrix. Found row-major matrix."
-				);
-			} else {
-				log::warn!(
-					target : "faer_perf",
-					"EVD prefers column-major eigenvector matrix. Found matrix with generic strides."
-				);
-			}
+			log::warn!(
+				target : "faer_perf",
+				"EVD prefers column-major eigenvector matrix. Found matrix with generic strides."
+			);
 		}
 	}
 	let (mut trid, stack) = unsafe { temp_mat_uninit::<T, _, _>(n, n, stack) };
@@ -394,7 +403,7 @@ pub fn self_adjoint_evd<T: ComplexField>(
 		}
 	}
 	let mut s = s;
-	let mut u = match u {
+	let mut caller_u = match u {
 		Some(u) => u,
 		None => {
 			tridiag_evd::qr_algorithm(diag.rb_mut(), offdiag.rb_mut(), None)?;
@@ -412,17 +421,36 @@ pub fn self_adjoint_evd<T: ComplexField>(
 		)
 	};
 	let mut u_real = u_real.as_mat_mut();
+	let (mut staged_u, stack) = unsafe {
+		temp_mat_uninit::<T, _, _>(n, if stage_u { n } else { 0 }, stack)
+	};
+	let mut staged_u = staged_u.as_mat_mut();
+	if stage_u && const { T::IS_REAL } {
+		// a real solve writes `u` itself and, when it fails, leaves the entries it had not reached
+		// as the caller left them; start the stand-in from the caller's `u` so a failed call hands
+		// back the same `u` in both layouts
+		linalg::copy_across_layouts(
+			staged_u.rb_mut(),
+			caller_u.rb(),
+			par.reborrow(),
+		);
+	}
+	let mut u = if stage_u {
+		staged_u.rb_mut()
+	} else {
+		caller_u.rb_mut()
+	};
 	let mut u_evd = if const { T::IS_REAL } {
 		unsafe { core::mem::transmute(u.rb_mut()) }
 	} else {
 		u_real.rb_mut()
 	};
-	if n < params.recursion_threshold {
+	let solved = if n < params.recursion_threshold {
 		tridiag_evd::qr_algorithm(
 			diag.rb_mut(),
 			offdiag.rb_mut(),
 			Some(u_evd.rb_mut()),
-		)?;
+		)
 	} else {
 		tridiag_evd::divide_and_conquer::<T::Real>(
 			diag.rb_mut(),
@@ -431,7 +459,15 @@ pub fn self_adjoint_evd<T: ComplexField>(
 			par.reborrow(),
 			stack,
 			params.recursion_threshold,
-		)?;
+		)
+	};
+	if let Err(e) = solved {
+		// a failed real solve leaves its partial output in a column-major `u`; leave the same in a
+		// row-major one (a complex solve writes `u_real`, and `u` is untouched either way)
+		if stage_u && const { T::IS_REAL } {
+			linalg::copy_across_layouts(caller_u, staged_u.rb(), par);
+		}
+		return Err(e);
 	}
 	if const { !T::IS_REAL } {
 		let normalized = |x: T| {
@@ -466,9 +502,12 @@ pub fn self_adjoint_evd<T: ComplexField>(
 		householder.rb(),
 		Conj::No,
 		u.rb_mut().subrows_mut(1, n - 1),
-		par,
+		par.reborrow(),
 		stack,
 	);
+	if stage_u {
+		linalg::copy_across_layouts(caller_u, staged_u.rb(), par);
+	}
 	for i in 0..n {
 		s[i] = diag[i].to_cplx();
 	}

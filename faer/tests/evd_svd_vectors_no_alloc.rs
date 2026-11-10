@@ -1,5 +1,6 @@
 //! #58: with the scratch sized by the matching `*_scratch` request, the
-//! self-adjoint EVD with eigenvectors and the bidiagonal SVD with vectors
+//! self-adjoint EVD with eigenvectors (into a column-major and, #314, a
+//! row-major `u`) and the bidiagonal SVD with vectors
 //! (divide and conquer from n = 128) allocate nothing on the heap on a warm
 //! call. The allocator counts every allocation of the process while the call
 //! runs; the inputs and the scratch are built outside the counted interval.
@@ -68,7 +69,9 @@ fn warm(mut run: impl FnMut()) -> usize {
 	ALLOCATIONS.load(Ordering::SeqCst)
 }
 
-fn evd_allocations<T: ComplexField>(a: &Mat<T>) -> usize {
+/// `row_major_u`: the eigenvectors go to a row-major `u`, which `self_adjoint_evd` computes in a
+/// column-major stand-in taken from the same scratch (tensor4all/faer#314).
+fn evd_allocations<T: ComplexField>(a: &Mat<T>, row_major_u: bool) -> usize {
 	let n = a.nrows();
 	let params = Default::default();
 	let mut mem = MemBuffer::new(self_adjoint_evd_scratch::<T>(
@@ -80,10 +83,15 @@ fn evd_allocations<T: ComplexField>(a: &Mat<T>) -> usize {
 	let mut s = Diag::<T>::zeros(n);
 	let mut u = Mat::<T>::zeros(n, n);
 	warm(|| {
+		let u = if row_major_u {
+			u.as_mut().transpose_mut()
+		} else {
+			u.as_mut()
+		};
 		self_adjoint_evd(
 			a.as_ref(),
 			s.as_mut(),
-			Some(u.as_mut()),
+			Some(u),
 			Par::Seq,
 			MemStack::new(&mut mem),
 			params,
@@ -147,13 +155,18 @@ fn evd_and_bidiagonal_svd_with_vectors_allocate_nothing() {
 		let r = Mat::<f64>::from_fn(n, n, |i, j| c[(i, j)].re);
 		counts.push((
 			n,
-			evd_allocations(&c),
-			evd_allocations(&r),
+			evd_allocations(&c, false),
+			evd_allocations(&r, false),
+			evd_allocations(&c, true),
+			evd_allocations(&r, true),
 			bidiagonal_svd_allocations(n),
 		));
 	}
 	assert!(
-		counts.iter().all(|&(_, a, b, c)| a + b + c == 0),
-		"(n, evd c64, evd f64, bidiagonal svd f64): {counts:?}"
+		counts
+			.iter()
+			.all(|&(_, a, b, c, d, e)| a + b + c + d + e == 0),
+		"(n, evd c64, evd f64, evd c64 row-major u, evd f64 row-major u, bidiagonal svd f64): \
+		 {counts:?}"
 	);
 }

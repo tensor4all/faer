@@ -28,7 +28,7 @@ jobs:
       # handle, and the "the team is left again" affinity check.
       - run: cargo test -p faer-ffi -j4
       - run: cargo test -p t4a-faer --no-default-features --features "std,linalg" --test lsmr_initial_residual --test generalized_schur_reorder --test generalized_schur_reorder_no_alloc --test public_qz_aed --test public_qz_scratch --test public_householder_upgrade
-      - run: cargo test -p t4a-faer --features perf-warn --test lu_perf_warn
+      - run: cargo test -p t4a-faer --features perf-warn --test lu_perf_warn --test evd_perf_warn
       - run: python3 scripts/check-migration-examples.py
       - run: cargo build --examples -j8
       - run: |
