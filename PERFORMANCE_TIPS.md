@@ -14,17 +14,16 @@ you are changing, at 1T and 8T, before choosing where to work; remove them befor
 
 ## Rows of a column-major matrix are strided operands
 
-A row of `A` has stride `m`. `matmul` reaches a `matvec` kernel only when the destination is one
-column or one row (`faer/src/linalg/matmul/mod.rs:1236`); whether the destination must then be
-contiguous depends on which kernel takes it. The column-major one writes a
-`ColMut<'_, T, Dim<'M>, ContiguousFwd>`, so it needs a contiguous destination column but takes a
-`rhs` of any stride (`:891-899`). The row-major one (`:1253-1266`) needs a row-major-contiguous `lhs`
-and a contiguous `rhs` (`:762-770`), while its destination is a plain `ColMut` of any stride. So a
-doubly strided `lhs`, or a strided destination under a column-major `lhs`, falls to the general
-kernel; a strided destination on its own does not. A reflector's norm becomes a strided reduction in
-any case. Gather the row into a contiguous buffer once, update it, reflect it and use it as the
-products' vector there, scatter once (`bidiag_blocked_panel`'s `w`). The row-side steps of the panel
-went from 15 ms to 6 ms at n = 512.
+A row of `A` has stride `m`. `matmul` reaches a `matvec` kernel only for a one-column or one-row
+destination (`faer/src/linalg/matmul/mod.rs:1236`), and the two kernels accept different layouts:
+`matvec_colmajor` takes a contiguous destination (`ColMut<'_, T, Dim<'M>, ContiguousFwd>`, `:891-899`)
+and a `rhs` of any stride, while `matvec_rowmajor` takes a contiguous `rhs` and accepts a strided
+destination (`:762-770`). Which one a call reaches depends on the leading transposition in
+`matmul_imp` (`:1226-1310`), so the layout that costs a gather is the *rhs* in one kernel and the
+*destination* in the other; nothing here says a strided operand alone reaches the general kernel. A
+reflector's norm becomes a strided reduction in any case. Gather the row into a contiguous buffer
+once, update it, reflect it and use it as the products' vector there, scatter once
+(`bidiag_blocked_panel`'s `w`). The row-side steps of the panel went from 15 ms to 6 ms at n = 512.
 
 ## A leading dimension that is a multiple of 1 KiB aliases L1 sets
 
@@ -120,17 +119,14 @@ changed it by 1 ms; overlapping it with the previous block's trailing apply on a
 (look-ahead) is the lever (`docs/worklogs/2026-10-30-qr-lookahead.md`, faer#160). Before threading a
 stage further, time it at block widths that differ by 4x: if it does not follow the arithmetic, hide it.
 
-## An overwrite-only entry inherits the replace entry's one-row forwarding on x86_64 only
+## An overwrite-only entry does not keep the replace entry's dispatch for free
 
-`matmul_with_conj_uninit` writes a fresh destination and so skipped the replace entry's one-row
-(`m == 1`) `matvec` branch, landing on the full GEMM kernel: 2.2x slower and different last bits on
-x86 AVX2. On x86_64 that one branch is the only thing shared: `matmul_uninit_imp` zero-fills the O(n)
-destination and calls `matmul_with_conj` (`faer/src/linalg/matmul/mod.rs:1680-1691`), and above one
-row the native types take their own route, `t4a-private-gemm-x86` with `Accum::Replace`
-(`:1692-1785`). Everywhere else there is no separate kernel to miss: on targets without it —
-aarch64, and any native type without the kernel — every product, at any number of rows, fills the
-O(m*n) destination and calls `matmul_with_conj` (`:1786-1794`); a non-native scalar has no fill at
-all and computes each destination element in place (`:1795-1810`). So an overwrite-only entry does
-not keep the dispatch for free: on x86_64 every path it skips has to be restored by hand, and only
-where the fill it was avoiding is smaller than the kernel it lands on (tensor4all/faer#200,
+`matmul_with_conj_uninit` writes a fresh destination, and the routes it takes are not the replace
+entry's: it fills and re-enters `matmul_with_conj` for an empty `k` (`:1675-1679`) and for a one-row
+product (`:1680-1691`), takes `t4a-private-gemm-x86` with `Accum::Replace` for a native scalar above
+one row when AVX2 or AVX-512 is available (`:1692-1785`), fills and re-enters elsewhere or when the
+`std` feature is off (`:1786-1793`), and computes each element in place for other scalars
+(`:1795-1810`). The original claim — that the replace entry's dispatch is kept — was wrong in both
+directions, so an overwrite-only entry has to restore the dispatch by hand, and only where the fill
+it was avoiding is smaller than the kernel it lands on (tensor4all/faer#200,
 `docs/worklogs/2026-11-03-matmul-uninit-thin.md`).
