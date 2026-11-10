@@ -5,7 +5,11 @@ follow-up to [#31](https://github.com/tensor4all/faer/issues/31) (the LAPACK
 `lapack-netlib/TESTING` validation in [lapack-validation.md](lapack-validation.md))
 and part of [#166](https://github.com/tensor4all/faer/issues/166). Port
 completion and numerical success are separate: this file records what was
-ported, what has no counterpart, and what stays unported in the later batches.
+ported, what has no counterpart, and what stays unported.
+
+Two batches have landed: the triangular, rank-update and `norm_l2` ports
+([#349](https://github.com/tensor4all/faer/pull/349)), and the `GEMM`/`GEMV`
+boundary port. Which batch a row belongs to is in its `Port?` column.
 
 ## Source and licence
 
@@ -29,8 +33,9 @@ Adapted files and the material changes to each are recorded in their headers:
 | `faer/src/linalg/matmul/tests/blas_trmm.rs` | `test/blat3.f` `DCHK3`, `DTRMM` |
 | `faer/src/linalg/matmul/tests/blas_rank_update.rs` | `test/blat2.f` `DCHK4` (`DGER`) and `DCHK5` (`DSYR`); `test/blat3.f` `DCHK4` (`DSYRK`) |
 | `faer/src/linalg/tests/blas_trsm_cases.rs` | `test/blat3.f` `DCHK3` (`DTRSM`); `test/blat2.f` `DCHK3` (`DTRSV`) |
+| `faer/src/linalg/matmul/tests/blas_gemm.rs` | `test/blat3.f` `DCHK1` (`DGEMM`); `test/blat2.f` `DCHK1` (`DGEMV`) |
 
-Material adaptations, common to the three suites: the source's random
+Material adaptations, common to the four suites: the source's random
 `DBEG`/`DMAKE` sequence and its dimension sweep (`N = 0,1,2,3,7,31,63`, `LDA =
 N+1` padding, `alpha` 0.0/0.7/1.0) are replaced by bounded shapes with an
 exact-integer fixture and exact binary `alpha`, so the reference product is
@@ -53,8 +58,7 @@ exposes them.
 
 ## Inventory
 
-"Port?" is this batch only. Rows marked *covered* have a faer unit test that
-already exercises the source's check; a reason says which.
+"Port?" covers both batches; the file named in brackets is the port site.
 
 ### Level 1 — `test/{s,d,c,z}blat1.f` (`CHECK0`-`CHECK3`), `ctest/c_{s,d,c,z}blas1.c`
 
@@ -70,7 +74,7 @@ already exercises the source's check; a reason says which.
 
 | OpenBLAS file/check | faer counterpart | Port? | Reason |
 | --- | --- | --- | --- |
-| `DCHK1` `GEMV`/`GBMV` | `matmul::matmul` with one destination column (the `matvec` route) | no | the route is exercised by `matmul`'s own tests; `GBMV`'s banded storage has no counterpart |
+| `DCHK1` `GEMV`/`GBMV` | `matmul::matmul` with one destination column (the `matvec` route) | ported (`blas_gemm.rs`), `GBMV` no | the source's `N`/`T` sweep becomes the two matvec routes (a `1`-column destination and a `1`-row one), `m`/`n` = 0 are real cases in the Fortran driver's `test/dblat2.dat` (`0 1 2 3 7 31 63`), and `alpha`/`beta` are in its `ALF`/`BET` lists. `GBMV`'s banded storage has no counterpart |
 | `DCHK2` `SYMV`/`SBMV`/`SPMV` | none | no | faer's structured matmul carries triangular block structures only; a symmetric operand is materialized dense, and banded/packed storage has no API |
 | `DCHK3` `TRMV`/`TBMV`/`TPMV` | `matmul::triangular::matmul_with_conj` with a `Rectangular` destination | ported (`blas_trmm.rs`) | the TRMM shapes carry it; the `Rectangular` case with a triangular operand is the level-2 multiply. Banded/packed variants have no counterpart |
 | `DCHK3` `TRSV`/`TBSV`/`TPSV` | `triangular_solve::solve_{,unit_}{lower,upper}_triangular_in_place_with_conj` | ported (`blas_trsm.rs`) | the `nrhs = 1` cases are TRSV. Banded/packed variants have no counterpart |
@@ -92,7 +96,7 @@ does), and the complex-only rank updates are `ZCHK4` (`GERC`/`GERU`), `ZCHK5`
 
 | OpenBLAS file/check | faer counterpart | Port? | Reason |
 | --- | --- | --- | --- |
-| `DCHK1` `GEMM` | `matmul::matmul`, `matmul::triangular::matmul_with_conj` (both `Rectangular`) | no | `matmul::tests::test_matmul` covers the product but is `#[ignore]`d as too slow; the bounded non-ignored GEMM case is a candidate for the next batch, and this batch's TRMM/rank-k suites compute their reference with an explicit scalar accumulation (`blas_support::product`), not with a faer dense GEMM, so they do not exercise that path |
+| `DCHK1` `GEMM` | `matmul::matmul`, `matmul::triangular::matmul_with_conj` (both `Rectangular`) | ported (`blas_gemm.rs`) | the product, both `TRANS`/`Conj` operands, `alpha` 0/1/-2/0.5 and both `Accum` values over a bounded `(m, n, k)` sweep. The Fortran driver's `test/dblat3.dat` lists `0 1 2 3 7 31 63`, so its `NULL` path for `m <= 0 or n <= 0` and the empty `k = 0` reduction do run there; the CBLAS driver's `ctest/din3` starts at 1. `matmul::tests::test_matmul` stays `#[ignore]`d as too slow |
 | `DCHK2` `SYMM` | none | no | no symmetric structured multiply |
 | `DCHK3` `TRMM` | `matmul::triangular::matmul_with_conj` | ported (`blas_trmm.rs`) | both sides, `N`/`T`/`C`, lower/upper, and the generic/strict/unit diagonal; the source's ROGUE diagonal and ROGUE unreferenced triangle are the checked property, and the destination is a padded submatrix of a ROGUE parent |
 | `DCHK3` `TRSM` | `triangular_solve::solve_{,unit_}{lower,upper}_triangular_in_place_with_conj` | ported (`blas_trsm.rs`) | both sides and `N`/`T`/`C`; `alpha` has no parameter in faer, so the fixture scales the right-hand side by `alpha` before the solve, which is the same computation; the in-place right-hand side is a padded submatrix of a ROGUE parent |
@@ -112,10 +116,79 @@ does), and the complex-only rank updates are `ZCHK4` (`GERC`/`GERU`), `ZCHK5`
 | `compare_sgemm_bgemm.c`, `compare_sgemm_sbgemm.c`, `compare_sgemm_shgemm.c`, `compare_sgemv_*.c` | none | no | bfloat16/half mixed-precision kernels do not exist in faer |
 | `xerbla_test.c`, `shgemm_test.c`, `test_laed3_nan.c`, `get_threading_model.c`, `wasm/` | none | no | OpenBLAS build and runtime specifics (XERBLA, SME kernels, its bundled LAPACK, thread-model query, wasm build) |
 
-## What this batch establishes
+## What the ports establish
 
-Eight test functions over four scalar types (`f64`, `f32`, `c64`, `c32`), 32 tests
-in the default (non-nightly) run:
+Twelve test functions over four scalar types (`f64`, `f32`, `c64`, `c32`), 48
+tests in the default (non-nightly) run: eight from the first batch (32 tests,
+`trmm`, `trsm`, `trsv`, rank-1 and rank-k) and four from the `GEMM`/`GEMV` batch
+(16 tests).
+
+The four `GEMM`/`GEMV` ones:
+
+| Test | Property |
+| --- | --- |
+| `matmul::blas::*::gemm_matches_the_source_dimension_sweep` | `C = alpha*op(A)*op(B) + beta*C` equals an independently accumulated product for `'N'`/`'T'`/`'C'` on either operand, both `Accum` values and `alpha` 0/1/-2/0.5, over `(m, n, k)` including `m`, `n` and `k` = 0; both operands are unchanged |
+| `matmul::blas::*::gemm_reads_the_destination_only_when_it_accumulates` | `Accum::Replace` produces the product from a NaN-filled destination (the source's `beta = 0` "`C` need not be set on entry"), and `Accum::Add` brings the NaN back, so the two arms are distinguishable rather than both silently correct |
+| `matmul::blas::*::gemv_matches_the_source_dimension_sweep` | the same `alpha`/`beta`/empty-direction sweep for `y = alpha*op(A)*x + beta*y`, on both matvec routes (`ncols == 1` and `nrows == 1`) |
+| `matmul::blas::*::gemv_zeroes_the_destination_of_an_empty_reduction` | with `k = 0`, `Accum::Replace` zeroes the destination and `Accum::Add` returns it unchanged |
+
+Deliberate deviations from the reference routines, asserted rather than
+avoided:
+
+* `?gemv` returns before touching `y` when `m = 0` or `n = 0` (`dgemv.f:218-219`),
+  and the source test asserts `y` is unchanged there (`LDE(YS, YY, LY)` on its
+  `NULL` path). faer's `matmul` computes the algebraic `beta * dst` instead, so
+  `Accum::Replace` with `k = 0` zeroes the destination.
+  `gemv_zeroes_the_destination_of_an_empty_reduction` asserts faer's contract
+  and says so in its comment, and the empty `m`/`n` dimensions are covered by
+  `gemv_matches_the_source_dimension_sweep`.
+* `?gemm` with `alpha = 0` need not read `A` or `B`, and `?gemm` with `beta = 0`
+  need not read `C`. faer's `Accum::Replace` implements the second (asserted
+  above); the first is not asserted, because faer's kernel multiplies by
+  `alpha` and a NaN operand would propagate.
+* the two drivers' sweeps become bounded shape lists: the Fortran
+  `test/dblat2.dat` and `test/dblat3.dat` both list `0 1 2 3 7 31 63` (and
+  `0 1 2 4` for the level-2 `K`), while the CBLAS `ctest/din2`/`ctest/din3`
+  start at 1 and reach 5/9/35; `alpha`/`beta` `0.0/0.7/1.0` become exact
+  binaries so the comparison stays exact.
+
+### Inventory totals
+
+Counting the rows of the four tables above (30 checks):
+
+| Outcome | Checks | Which |
+| --- | --- | --- |
+| ported to a unit test on the default run | 9 | `GEMV`, `GEMM`, `TRMM`, `TRSM`, `TRMV`, `TRSV`, `GER`, `SYR`, `SYRK` |
+| partly (one arm of the check ported) | 3 | `ZGERC`/`ZGERU`, `ZHERK`, CBLAS row-major wrappers |
+| already covered by a faer unit test that predates this work | 2 | `ASUM`, `NRM2` |
+| helper group adapted (not translated) | 1 | `DMAKE`/`DMMCH`/`LDE`/`LDERES` |
+| not ported | 15 | `ISAMAX`, `DOT`, `AXPY`/`SCAL`/`ROT`/`COPY`/`SWAP`, `SYMV`/`HEMV`, `SYR2`, `HER`/`HPR`, `HER2`/`HPR2`, `SYMM`, `SYR2K`, `HER2K`, the 3m variants, XERBLA argument checks, mixed-precision comparisons, OpenBLAS build/runtime tests |
+
+So 9 of the 30 inventoried checks are now covered by a test that runs by
+default and 2 were already covered. Of the 15 that are not ported, twelve have
+no faer API to call at all — banded and packed storage, symmetric/Hermitian
+structured multiply, the conjugate-transpose rank updates, the 3m variants,
+mixed precision, and OpenBLAS's own build diagnostics — while three do have a
+counterpart that no test reaches: `DOT` (`matmul::dot::inner_prod`), `HER`/`HPR`
+(`matmul_with_conj` with a conjugated row operand) and the XERBLA argument
+checks (faer's shape preconditions, which panic instead of returning an info
+code). Those three are next-batch candidates, not cases faer cannot express.
+
+### Non-vacuity
+
+Each family was checked by mutating one deliberate defect into the kernel it
+tests, confirming the port goes red, and reverting:
+
+| Family | Mutation | Goes red |
+| --- | --- | --- |
+| `GEMM` (`nano_gemm` path) | `Accum::Replace` applies `beta = 1` instead of resetting the destination | `gemm_reads_the_destination_only_when_it_accumulates`, `gemm_matches_the_source_dimension_sweep` |
+| `GEMV` (`matvec_colmajor`) | the `Accum::Replace` arm no longer zeroes the destination | `gemv_matches_the_source_dimension_sweep`, `gemm_reads_the_destination_only_when_it_accumulates` |
+| empty reduction (`matmul_imp`'s `K == 0` branch) | the branch returns without applying `beta` | `gemv_zeroes_the_destination_of_an_empty_reduction`, and the `k = 0` arms of both sweeps and of `gemm_reads_the_destination_only_when_it_accumulates` |
+| rank-1 update (`rank_update` module) | the `Accum::Replace` arm writes nothing | `rank_one_update_matches_the_source_contract` |
+| unit-triangular base case | the sign of the 3x3 subdiagonal is flipped | every `trsm_*` test in all four dtypes |
+| `norm_l2` generic-stride fallback | the scaled accumulator is squared unscaled again (the #36 regression) | `test_norm_l2_strided_range` |
+
+The first batch's eight, for reference:
 
 | Test | Property |
 | --- | --- |
@@ -143,9 +216,9 @@ Which of these are new, and which overlap existing coverage:
   `blas_trsm.rs` port is a bounded version of that property on the default run
   and adds the right side and the exact (not ratio) recovery.
 
-Not covered by this batch, and not claimed: banded and packed storage, symmetric
-and Hermitian structured multiply (`SYMM`/`SYMV`), `SYR2K`, the 3m variants,
-mixed-precision comparisons, XERBLA-style argument validation, and the
-`#[ignore]`d full GEMM sweep. The source's `DMMCH` eps-ratio checker is replaced
-by exact comparison, which is stricter for these integer fixtures but says
-nothing about accumulation error at scale.
+Not covered by any batch, and not claimed: banded and packed storage, symmetric
+and Hermitian structured multiply (`SYMM`/`SYMV`/`HEMV`), `SYR2`/`SYR2K`/
+`HER2K`, the 3m variants, mixed-precision comparisons, XERBLA-style argument
+validation, and the `#[ignore]`d full GEMM sweep. The source's `DMMCH` eps-ratio
+checker is replaced by exact comparison, which is stricter for these integer
+fixtures but says nothing about accumulation error at scale.
