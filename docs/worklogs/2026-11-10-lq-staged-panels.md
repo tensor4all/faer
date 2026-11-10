@@ -69,9 +69,12 @@
   transposed view, and the probe that entered it was a `#[doc(hidden)]` hook kept on the
   measuring machine and deliberately not committed. Nothing in this repository can therefore
   re-run that column: the ratios above are a record of one paired run, not a measurement a
-  reader can repeat. The "after" numbers are producible — `cargo test -p t4a-faer lq` covers the
-  shapes, and any benchmark over `lq_in_place` reaches the staged path — but a claim of the form
-  "0.254x" is only checkable against a baseline this repository does not contain.
+  reader can repeat. The "after" side is reachable — every call through `lq_in_place` now takes
+  the staged path, and `cargo test -p t4a-faer lq` covers the shapes — but the numbers themselves
+  came from the in-process probe described above, whose harness is not committed and which is not
+  the campaign's `fbench` protocol: a reader can check that the path is taken, not that it costs
+  3.74 ms. A claim of the form "0.254x" is therefore only checkable against a baseline this
+  repository does not contain.
 
   | LQ `m x n` | t | before | after | after / before | column-major QR of `A^T` | after / QR |
   |---|---|---|---|---|---|---|
