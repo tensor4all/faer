@@ -35,7 +35,9 @@ pub use schur_eigenvalues::{SchurEigenvalueError,schur_eigenvalues_real};
 /// eigendecomposition error
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum GevdError {
-	/// reached max iterations
+	/// reached max iterations, the input was not finite, or the requested
+	/// eigenvectors came out non-finite (see [`gevd_real`] for the range of
+	/// scales where that happens)
 	NoConvergence,
 }
 /// eigendecomposition error
@@ -332,6 +334,17 @@ fn compute_gevd_generic<T: ComplexField>(
 		par,
 		stack,
 	);
+	// the eigenvector stage cannot recover from a QZ that underflowed: for a
+	// pencil whose entries are all below about `1e-280` (f64) the QZ can return
+	// `alpha = beta = 0`, and the vectors come out NaN. That is reported rather
+	// than returned with `Ok` (tensor4all/faer#370)
+	for u in [u_left.rb(), u_right.rb()] {
+		if let Some(u) = u {
+			if !u.is_all_finite() {
+				return Err(GevdError::NoConvergence);
+			}
+		}
+	}
 	Ok(())
 }
 fn solve_shifted_1x1<T: ComplexField>(
@@ -399,13 +412,78 @@ fn shifted_2x2_scale<T: RealField>(bnorm: T, pivot_min: T) -> T {
 	if bnorm > limit { limit / bnorm } else { one() }
 }
 
+// `(a + i b) / (c + i d)` without forming `c^2 + d^2` (LAPACK `dladiv`,
+// Baudin and Smith's robust complex division). The quotient by `num_complex`'s
+// `Div` squares the denominator, which underflows to zero for `|c + i d|`
+// below about `sqrt(min_positive)` and overflows above `sqrt(max_positive)`, so
+// a finite quotient came out as `0/0 = NaN` or `inf` (tensor4all/faer#370).
+fn ladiv<T: RealField>(a: &T, b: &T, c: &T, d: &T) -> (T, T) {
+	fn ladiv2<T: RealField>(a: &T, b: &T, c: &T, d: &T, r: &T, t: &T) -> T {
+		if *r != zero() {
+			let br = b * r;
+			if br != zero() {
+				(a + br) * t
+			} else {
+				a * t + (b * t) * r
+			}
+		} else {
+			(a + d * (b / c)) * t
+		}
+	}
+	fn ladiv1<T: RealField>(a: &T, b: &T, c: &T, d: &T) -> (T, T) {
+		let ref r = d / c;
+		let ref t = (c + d * r).recip();
+		let p = ladiv2(a, b, c, d, r, t);
+		let q = ladiv2(b, &-a, c, d, r, t);
+		(p, q)
+	}
+	let ref half = from_f64::<T>(0.5);
+	let ref two = from_f64::<T>(2.0);
+	let (mut a, mut b, mut c, mut d) = (a.copy(), b.copy(), c.copy(), d.copy());
+	let ab = a.abs().fmax(b.abs());
+	let cd = c.abs().fmax(d.abs());
+	let mut s = one::<T>();
+	let ov = max_positive::<T>();
+	let un = min_positive::<T>();
+	let eps = eps::<T>();
+	let be = two / (&eps * &eps);
+	let tiny = un * two / eps;
+	if ab >= half * &ov {
+		(a, b, s) = (half * a, half * b, two * s);
+	}
+	if cd >= half * &ov {
+		(c, d, s) = (half * c, half * d, half * s);
+	}
+	if ab <= tiny {
+		(a, b, s) = (&be * a, &be * b, s / &be);
+	}
+	if cd <= tiny {
+		(c, d, s) = (&be * c, &be * d, s * &be);
+	}
+	let (p, q) = if d.abs() <= c.abs() {
+		ladiv1(&a, &b, &c, &d)
+	} else {
+		let (p, q) = ladiv1(&b, &a, &d, &c);
+		(p, -q)
+	};
+	(p * &s, q * &s)
+}
+
+fn ladiv_complex<T: RealField>(x: &Complex<T>, y: &Complex<T>) -> Complex<T> {
+	let (re, im) = ladiv(&x.re, &x.im, &y.re, &y.im);
+	Complex { re, im }
+}
+
 // Solve the pivoted 2x2 system with a scaled RHS. Form U01/U00 before
-// multiplying by x1: U01*x1 itself can overflow even when x0 is finite.
+// multiplying by x1: U01*x1 itself can overflow even when x0 is finite. `div`
+// is the scalar quotient: `/` for a real system, `ladiv_complex` for a complex
+// one.
 fn solve_scaled_2x2<T: ComplexField>(
 	LU: MatRef<'_, T>,
 	row_perm: crate::perm::PermRef<'_, usize>,
 	col_perm: crate::perm::PermRef<'_, usize>,
 	mut b: ColMut<'_, T>,
+	div: impl Fn(&T, &T) -> T,
 ) -> T::Real {
 	let bnorm = b[0]
 		.real()
@@ -419,8 +497,8 @@ fn solve_scaled_2x2<T: ComplexField>(
 	let cols = col_perm.arrays().0;
 	let b0 = b[rows[0]].mul_real(&scale);
 	let b1 = b[rows[1]].mul_real(&scale) - &LU[(1, 0)] * &b0;
-	let x1 = b1 / &LU[(1, 1)];
-	let x0 = b0 / &LU[(0, 0)] - (&LU[(0, 1)] / &LU[(0, 0)]) * &x1;
+	let x1 = div(&b1, &LU[(1, 1)]);
+	let x0 = div(&b0, &LU[(0, 0)]) - div(&LU[(0, 1)], &LU[(0, 0)]) * &x1;
 	b[cols[0]] = x0;
 	b[cols[1]] = x1;
 	scale
@@ -483,7 +561,13 @@ fn solve_complex_shifted_2x2<T: RealField>(
 		if C[(1, 1)].abs() < *smin {
 			C[(1, 1)] = smin.copy();
 		}
-		solve_scaled_2x2(C.rb(), row_perm, col_perm, B.rb_mut().col_mut(0))
+		solve_scaled_2x2(
+			C.rb(),
+			row_perm,
+			col_perm,
+			B.rb_mut().col_mut(0),
+			|x: &T, y: &T| x / y,
+		)
 	} else {
 		let (mut C, stack) =
 			unsafe { linalg::temp_mat_uninit::<Complex<T>, _, _>(2, 2, stack) };
@@ -548,7 +632,13 @@ fn solve_complex_shifted_2x2<T: RealField>(
 				im: im.copy(),
 			}
 		});
-		let scale = solve_scaled_2x2(C.rb(), row_perm, col_perm, B.rb_mut());
+		let scale = solve_scaled_2x2(
+			C.rb(),
+			row_perm,
+			col_perm,
+			B.rb_mut(),
+			ladiv_complex::<T>,
+		);
 		zip!(Br, Bi, &B).for_each(|unzip!(re, im, z)| {
 			(*re, *im) = (z.re.copy(), z.im.copy())
 		});
@@ -1434,6 +1524,35 @@ pub fn gevd_scratch<T: ComplexField>(
 /// right eigenvectors in $U_R$
 ///
 /// the values in $A$ and $B$ after this function is called are unspecified.
+///
+/// # range of scales
+///
+/// the eigenvalues $\alpha / \beta$ and the eigenvector directions of
+/// $(sA, sB)$ are those of $(A, B)$, but the computation is not exactly scale
+/// invariant, because $(A, B)$ is not prescaled into a safe range as LAPACK's
+/// `dggev` does:
+///
+/// - the eigenvector back substitution divides complex numbers with LAPACK
+///   `dladiv`'s scaling, and it was not what limited the range in any measured
+///   case. (before tensor4all/faer#370 it formed $|d|^2$, and in `f64` a
+///   complex pair's eigenvectors became NaN for $s$ above about $5 \cdot
+///   10^{153}$ or below about $3 \cdot 10^{-147}$ to $10^{-162}$, depending on
+///   the pencil.)
+/// - the QZ iteration underflows when all entries of $A$ and $B$ are tiny. in
+///   `f64`, for well-conditioned pencils with entries of order $s$, the results
+///   were measured finite and scale invariant to about $10^{-14}$ for every
+///   $s = 10^k$ with $10^{-279} \le s \le 10^{307}$; the lower end depends on
+///   the pencil (one of the tested pencils fails below about $6 \cdot
+///   10^{-280}$, another below about $10^{-293}$).
+/// - below that, the QZ usually returns $\alpha = \beta = 0$ for every
+///   eigenvalue. when eigenvectors are requested this function then returns
+///   [`GevdError::NoConvergence`] instead of NaN eigenvectors; when they are
+///   not, it returns `Ok` with those zero values. at some scales in that range
+///   it instead returns `Ok` with finite but inaccurate results (measured:
+///   errors from $10^{-8}$ to $O(1)$ at $s = 10^{-301}$ and $10^{-305}$). a
+///   caller with such a pencil should scale $A$ and $B$ by a power of two
+///   before the call and scale $\alpha$ and $\beta$ back afterwards (the
+///   eigenvectors need no change).
 #[track_caller]
 pub fn gevd_real<T: RealField>(
 	A: MatMut<'_, T>,
@@ -1771,6 +1890,34 @@ mod tests {
 	#[test]
 	fn complex_shifted_2x2_large_rhs_f64() {
 		check_complex_shifted_2x2_large_rhs::<f64>();
+	}
+
+	/// tensor4all/faer#370: quotients whose denominator squares out of range.
+	/// `num_complex`'s `Div` returns NaN or `0` for each of these; `ladiv`
+	/// matches the exact quotient to a few ulps.
+	#[test]
+	fn ladiv_does_not_square_the_denominator() {
+		// (a, b, c, d, exact (a + ib) / (c + id))
+		let cases: [(f64, f64, f64, f64, (f64, f64)); 5] = [
+			// the clamped pivot of the faer#220 pencil at `s = 1e-200`
+			(1e-200, 0.0, 4e-216, 0.0, (2.5e15, 0.0)),
+			(1e-170, 1e-170, 1e-170, -1e-170, (0.0, 1.0)),
+			(1e300, 1e300, 1e300, -1e300, (0.0, 1.0)),
+			(3e-170, 4e-170, 1e-170, 0.0, (3.0, 4.0)),
+			(1.0, 0.0, 1e200, 1e200, (5e-201, -5e-201)),
+		];
+		for (a, b, c, d, (re, im)) in cases {
+			let naive = c64::new(a, b) / c64::new(c, d);
+			let (p, q) = ladiv(&a, &b, &c, &d);
+			let err = ((p - re).abs() + (q - im).abs())
+				/ (re.abs() + im.abs());
+			assert!(
+				err <= 4.0 * f64::EPSILON,
+				"({a:e} + {b:e}i) / ({c:e} + {d:e}i) = ({p:e}, {q:e}), exact \
+				 ({re:e}, {im:e}), naive {naive}"
+			);
+			assert!(!(naive.re == re && naive.im == im));
+		}
 	}
 	#[test]
 	fn test_lishen_() {
