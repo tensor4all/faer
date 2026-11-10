@@ -1829,8 +1829,10 @@ pub fn gevd_scratch<T: ComplexField>(
 /// a pencil that is singular within the QZ's backward error. Whether such a
 /// `0 / 0` depends on the input's scale is not established: on the three pencils
 /// of `tests/gevd_scaled_pencil.rs` under a common scale $s$, the only ones
-/// measured systematically, no $\alpha = \beta = 0$ occurs for any $s > 0$,
-/// and the scaling back never turns a nonzero pair into one.
+/// measured systematically, no $\alpha = \beta = 0$ was observed at any
+/// sampled scale (every $s = 10^{k/10}$ over the range, and the transitions
+/// bisected by `scan_zero_eigenvalue_boundary`); the samples do not prove
+/// absence between them. the scaling back never turns a nonzero pair into one.
 ///
 /// in short, for `f64`:
 ///
