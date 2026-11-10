@@ -146,3 +146,8 @@
   6.5% (5.2% to 10.9%). Both builds produce the same checksum, since the
   normalization never engages on that pencil. On a dense pencil the QZ stage
   dominates, so the share of the whole `gevd` is smaller; it was not measured.
+
+  Not reproducible from this tree: the timing entry point and the two
+  measured binaries were scratch files and were never committed, so the
+  percentages above record an ordering measured once, not a benchmark
+  that `cargo test` here can re-run.
