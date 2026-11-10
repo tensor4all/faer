@@ -14,10 +14,14 @@ you are changing, at 1T and 8T, before choosing where to work; remove them befor
 
 ## Rows of a column-major matrix are strided operands
 
-A row of `A` has stride `m`. `matmul`'s vector paths fall to the general kernel when the destination
-or the vector is strided, and a reflector's norm becomes a strided reduction. Gather the row into a
-contiguous buffer once, update it, reflect it and use it as the products' vector there, scatter once
-(`bidiag_blocked_panel`'s `w`). The row-side steps of the panel went from 15 ms to 6 ms at n = 512.
+A row of `A` has stride `m`. `matmul`'s vector paths need a contiguous destination column and an
+`lhs` that is contiguous in one direction (`faer/src/linalg/matmul/mod.rs:1236-1254`), so a strided
+destination or a doubly strided `lhs` falls to the general kernel, but a strided *vector* alone does
+not: the column-major variant takes any `ColRef` (`:891-899`), only the row-major one asks for
+`ContiguousFwd` (`:762-770`). A reflector's norm becomes a strided reduction in any case. Gather the
+row into a contiguous buffer once, update it, reflect it and use it as the products' vector there,
+scatter once (`bidiag_blocked_panel`'s `w`). The row-side steps of the panel went from 15 ms to 6 ms
+at n = 512.
 
 ## A leading dimension that is a multiple of 1 KiB aliases L1 sets
 
@@ -77,10 +81,11 @@ Measured with `probes/gemv-threads` (faer-benchmark, diagnostic): one 8-job regi
 costs 1.75 us, and `threadteam`'s `aarch64-apple` row puts a section at 1.4 us at width 6 and 3.0 us
 at width 2. The matvec path is taken only for a one-row or one-column destination (`m == 1` or
 `n == 1`; the one-column case is direct, the one-row case transposes), and its width is
-`cost::par_width` over `m*n` elements at `rate::matvec` with one section, not a fixed element count:
-below the width that pays it runs sequentially. A step that issues
-two regions pays about 3-4 us of synchronisation; 384 steps are 1.5 ms. Design the loop so that the
-regions are the big products, not the short ones.
+`cost::par_width` over the left operand's element count — `lhs.nrows() * lhs.ncols()`, so `m*k`, or
+`n*k` after the one-row transpose (`faer/src/linalg/matmul/mod.rs:775`, `:904`) — at `rate::matvec`
+with one section, not a fixed element count: below the width that pays it runs sequentially. A step
+that issues two regions pays about 3-4 us of synchronisation; 384 steps are 1.5 ms. Design the loop
+so that the regions are the big products, not the short ones.
 
 ## Short products are bandwidth-bound in L2, not call-bound
 
@@ -112,11 +117,16 @@ changed it by 1 ms; overlapping it with the previous block's trailing apply on a
 (look-ahead) is the lever (`docs/worklogs/2026-10-30-qr-lookahead.md`, faer#160). Before threading a
 stage further, time it at block widths that differ by 4x: if it does not follow the arithmetic, hide it.
 
-## An overwrite-only entry inherits the replace entry's dispatch
+## An overwrite-only entry inherits the replace entry's dispatch for a one-row product only
 
 `matmul_with_conj_uninit` writes a fresh destination and so skipped the replace entry's one-row
 (`m == 1`) `matvec` branch, landing on the full GEMM kernel: 2.2x slower and different last bits on
-x86 AVX2, while aarch64's fallback to `matmul_with_conj` was unaffected. When an entry promises only that it
-does not read the destination, keep the dispatch shared and pay the O(m*n) initialization instead of
-giving the kernel a second selection path (tensor4all/faer#200,
+x86 AVX2, while aarch64's fallback to `matmul_with_conj` was unaffected. What is shared is that one
+branch: `matmul_uninit_imp` zero-fills the O(n) destination and calls `matmul_with_conj`
+(`faer/src/linalg/matmul/mod.rs:1680-1691`). Above one row the native types take their own route —
+`t4a-private-gemm-x86` with `Accum::Replace` on x86_64/AVX2/AVX-512 (`:1692-1785`), the O(m*n) fill
+plus `matmul_with_conj` elsewhere, including aarch64 (`:1786-1794`) — and the other scalars a
+per-element dot-product loop (`:1795`). So an overwrite-only entry does not keep the dispatch for
+free: every path it skips has to be restored by hand, and only where the fill it was avoiding is
+smaller than the kernel it lands on (tensor4all/faer#200,
 `docs/worklogs/2026-11-03-matmul-uninit-thin.md`).
