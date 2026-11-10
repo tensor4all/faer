@@ -81,8 +81,6 @@ cell ran in its own process.
   and each stage row takes its own timestamps;
   (C) the threshold
   knob; the samples behind them are in the CSV.
-- **Hypothesis (1) is half right** — the branch is already there and unreachable at n <= 128; see the
-  gate argument above, which this paragraph does not repeat.
 - **What remains unverified.**
   - Whether a parallel QR leaf (deflated blocks as tasks) beats lowering the threshold. The
     threshold knob is measured; a threaded QR is not, and it is the route that can move the 1T
@@ -112,8 +110,6 @@ cell ran in its own process.
     address (an offset Vec reads the same). The library's own allocation closes the sum, so table
     B is Mat-backed. Unexplained, and left as a lead: if it is not the allocation but something
     about a caller-owned `Vec`, every in-place kernel in the library has the same cliff.
-- The tree measured is the tree this record travels in. The change is a record only, so no
-  measured path moves and no test count is claimed here.
 - Host: AMD Ryzen AI 9 HX 470 (Zen5 mobile APU), 24 logical / 12 physical, SMT on, CPU boost
   off, governor `performance`, kernel 7.0.0-38-generic, rustc 1.99.0. Measured CPUs `0` (1T) and
   `0-3,12-15` (8T, the 16 MiB L3 domain and its SMT siblings); the observing side pinned to
@@ -128,12 +124,9 @@ cell ran in its own process.
    `SelfAdjointEvdParams::recursion_threshold` a function of `par.degree()`). Measured effect:
    13-32% off the call at 8T for n = 64..128, 8% at f64 n = 256, 3% at c64 n = 256, 1% at
    n = 512, and -5% to +9% at 1T.
-   Those numbers belong to `recursion_threshold = 16` **only**. The other edit that reads like the
-   same thing - relaxing the fallback from `n <= qr_fallback_threshold` to `n <` - is a different
-   change and is **not measured**: it would leave n = 64 and 96 on QR (their entry gate `n <
-   recursion_threshold` is still true) and would move only n = 128 into D&C, which is where table
-   C's largest gain sits (32% at 8T) but the edit itself was not run, so no number is claimed for
-   it. Risk: the D&C merge's accuracy path differs from QR's; the fork's own
+   Those numbers belong to `recursion_threshold = 16` **only**; relaxing the fallback from
+   `n <= qr_fallback_threshold` to `n <` is a different edit, was not run, and no number is claimed
+   for it. Risk: the D&C merge's accuracy path differs from QR's; the fork's own
    `lapack_self_adjoint_evd_*` and spectrum-accuracy tests already run both thresholds (the
    QR/D&C choice is a parameter there), so the regression surface is those fixtures, not new
    code. Cost: one gate, no new algorithm.
@@ -185,6 +178,7 @@ CPU boost off; `docs/worklogs/evidence/2026-11-10-eigh-raw-samples.csv` filtered
 | c64 | f | 256 | 17.580 | 25.926 | 0.68 | 9.291 | 10.541 | 0.88 | 1.89x | 2.46x |
 | c64 | f | 512 | 105.580 | 167.972 | 0.63 | 41.803 | 51.011 | 0.82 | 2.53x | 3.29x |
 
+
 ### B. stage split, ms (one cell per process, order f)
 
 faer stages are `tridiag::tridiag_in_place`, `tridiagonal_self_adjoint_evd` (with vectors),
@@ -196,6 +190,7 @@ Reproduction B.
 
 **f64**
 
+| stage | par | n=64 | n=96 | n=128 | n=256 | n=512 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | faer stage 1 (tridiagonalize) | 1T | 0.080 | 0.182 | 0.335 | 1.855 | 11.566 |
 | faer stage 1 (tridiagonalize) | 8T | 0.079 | 0.254 | 0.423 | 1.592 | 6.475 |
@@ -220,6 +215,7 @@ Reproduction B.
 
 **c64**
 
+| stage | par | n=64 | n=96 | n=128 | n=256 | n=512 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | faer stage 1 (tridiagonalize) | 1T | 0.128 | 0.344 | 0.728 | 5.022 | 36.626 |
 | faer stage 1 (tridiagonalize) | 8T | 0.175 | 0.359 | 0.610 | 2.715 | 13.782 |
@@ -260,6 +256,9 @@ Reproduction C.
 | c64 | 128 | 3.287 | 3.161 | 3.288 | 2.780 | 2.049 | 2.738 | +4% | +26% |
 | c64 | 256 | 17.570 | 17.220 | 19.764 | 9.222 | 8.909 | 13.954 | +2% | +3% |
 | c64 | 512 | 105.428 | 104.920 | 131.838 | 41.147 | 40.811 | 85.127 | +0% | +1% |
+
+The CSV also holds the 20 `faer_tridiag_evd_t16` cell rows (this table's thr=16 arm); they are the source of that
+column and are cited rather than dropped.
 
 ## Reproduction
 
