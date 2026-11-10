@@ -190,7 +190,7 @@ width, interleaved:
 # qr_factor f64 F 64x64, four interleaved repetitions each, taskset -c 4-7 / 4-11
 GATE=unset 4t  0.076352  0.076632  0.076362  0.076262   median 0.076357
 GATE=0     4t  0.075160  0.075681  0.075070  0.074799   median 0.075115   -> 1.24 us
-GATE=unset 8t  0.075671  0.075360  0.075260  0.075090   median 0.075315
+GATE=unset 8t  0.075671  0.075360  0.075260  0.075090   median 0.075310
 GATE=0     8t  0.075270  0.074859  0.074529  0.074729   median 0.074794   -> 0.52 us
 ```
 
