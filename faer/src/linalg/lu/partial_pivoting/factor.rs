@@ -791,7 +791,8 @@ pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 	// (tensor4all/faer#314): the recursion copies each leaf panel (`m x recursion_threshold` at
 	// most) into a column-major buffer and runs the column-major leaf on it, the row swaps move
 	// whole rows, which are contiguous in this layout, and the triangular solves and products take
-	// row-major operands as they are. No `m x n` buffer is allocated then.
+	// row-major operands as they are. No whole-matrix copy is allocated then, but when
+	// `n <= recursion_threshold` the leaf panel is the whole matrix, so its buffer is `m x n`.
 	//
 	// The copy (generic strides, and row-major input on a team from `256 * 256`): the unblocked core walks each pivot
 	// column twice (the search, then the scaling) and the swap stage swaps
