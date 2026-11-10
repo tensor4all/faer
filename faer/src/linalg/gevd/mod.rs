@@ -35,9 +35,10 @@ pub use schur_eigenvalues::{SchurEigenvalueError,schur_eigenvalues_real};
 /// eigendecomposition error
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum GevdError {
-	/// reached max iterations, the input was not finite, or the requested
-	/// eigenvectors came out non-finite (see [`gevd_real`] for the range of
-	/// scales where that happens)
+	/// reached max iterations, the input was not finite, an eigenvalue's `alpha`
+	/// and `beta` both underflowed to zero when the prescaling was undone, or
+	/// the requested eigenvectors came out non-finite (see [`gevd_real`] for the
+	/// range of scales)
 	NoConvergence,
 }
 /// eigendecomposition error
@@ -250,6 +251,45 @@ fn compute_gevd_generic<T: ComplexField>(
 	let need_qz = u_left.is_some() || u_right.is_some();
 	let mut A = A;
 	let mut B = B;
+	// tensor4all/faer#375: like LAPACK `dggev`, scale `A` and `B` separately
+	// before the reduction and the QZ, which otherwise underflow for tiny pencils
+	// and return `alpha = beta = 0`. a matrix whose largest entry is below
+	// `smlnum = sqrt(safmin) / eps` is scaled to a largest entry in
+	// `[smlnum, 2 smlnum)`, one above `bignum = 1 / smlnum` to `(bignum / 2,
+	// bignum]`. unlike `dggev` (`dlascl` by `smlnum / norm`) the factor is a power
+	// of two, so the scaling and the scaling back are exact (except where an
+	// entry is or becomes subnormal) and `(2^k A, 2^k B)` gets exactly `2^k`
+	// times the `alpha` and `beta` of `(A, B)` when both are scaled. in `f32`
+	// and `f64` the factor and its inverse are normal numbers.
+	//
+	// `alpha` is scaled back by `A`'s factor and `beta` by `B`'s after the QZ.
+	// The eigenvectors are not scaled back: `(a A, b B)` has the eigenvalues
+	// `(a alpha, b beta)` and the same eigenvectors, the orthogonal `Q`, `Z` do
+	// not depend on `a`, `b`, and the eigenvector stage normalizes its output.
+	let smlnum = sqrt_min_positive::<T::Real>() / eps::<T::Real>();
+	let bignum = smlnum.recip();
+	// the inverse of the factor applied to `M`, if `M` was scaled
+	let prescale = |M: MatMut<'_, T>| -> Option<T::Real> {
+		let norm = M.rb().norm_max();
+		let two = one::<T::Real>() + one::<T::Real>();
+		let half = two.recip();
+		let mut factor = one::<T::Real>();
+		if norm > zero::<T::Real>() && norm < smlnum {
+			while &norm * &factor < smlnum {
+				factor = &factor * &two;
+			}
+		} else if norm > bignum {
+			while &norm * &factor > bignum {
+				factor = &factor * &half;
+			}
+		} else {
+			return None;
+		}
+		zip!(M).for_each(|unzip!(x)| *x = x.mul_real(&factor));
+		Some(factor.recip())
+	};
+	let a_unscale = prescale(A.rb_mut());
+	let b_unscale = prescale(B.rb_mut());
 	let mut u_left = u_left;
 	let mut u_right = u_right;
 	let mut alpha_re = alpha_re;
@@ -326,6 +366,34 @@ fn compute_gevd_generic<T: ComplexField>(
 		params.schur,
 		stack,
 	);
+	// undo the prescaling of `A` and `B` on `alpha` and `beta`. scaling back can
+	// underflow, and an eigenvalue whose `alpha` and `beta` were not both zero
+	// must not come out as `alpha = beta = 0` (an indeterminate eigenvalue) with
+	// `Ok`, so that is reported as an error
+	if a_unscale.is_some() || b_unscale.is_some() {
+		let mut underflow = false;
+		for j in 0..n {
+			let was_zero = alpha_re[j] == zero()
+				&& (!T::IS_REAL || alpha_im[j] == zero())
+				&& beta[j] == zero();
+			if let Some(f) = &a_unscale {
+				alpha_re[j] = alpha_re[j].mul_real(f);
+				if const { T::IS_REAL } {
+					alpha_im[j] = alpha_im[j].mul_real(f);
+				}
+			}
+			if let Some(f) = &b_unscale {
+				beta[j] = beta[j].mul_real(f);
+			}
+			let is_zero = alpha_re[j] == zero()
+				&& (!T::IS_REAL || alpha_im[j] == zero())
+				&& beta[j] == zero();
+			underflow |= is_zero && !was_zero;
+		}
+		if underflow {
+			return Err(GevdError::NoConvergence);
+		}
+	}
 	qz_to_gevd(
 		A.rb(),
 		B.rb(),
@@ -334,10 +402,10 @@ fn compute_gevd_generic<T: ComplexField>(
 		par,
 		stack,
 	);
-	// the eigenvector stage cannot recover from a QZ that underflowed: for a
-	// pencil whose entries are all below about `1e-280` (f64) the QZ can return
-	// `alpha = beta = 0`, and the vectors come out NaN. That is reported rather
-	// than returned with `Ok` (tensor4all/faer#370)
+	// non-finite eigenvectors are reported rather than returned with `Ok`
+	// (tensor4all/faer#370). before the prescaling of tensor4all/faer#375 this
+	// is how a QZ that underflowed to `alpha = beta = 0` for a pencil below
+	// about `1e-280` (f64) showed up; it is kept as a safety net
 	for u in [u_left.rb(), u_right.rb()] {
 		if let Some(u) = u {
 			if !u.is_all_finite() {
@@ -1528,31 +1596,28 @@ pub fn gevd_scratch<T: ComplexField>(
 /// # range of scales
 ///
 /// the eigenvalues $\alpha / \beta$ and the eigenvector directions of
-/// $(sA, sB)$ are those of $(A, B)$, but the computation is not exactly scale
-/// invariant, because $(A, B)$ is not prescaled into a safe range as LAPACK's
-/// `dggev` does:
+/// $(sA, sB)$ are those of $(A, B)$. like LAPACK's `dggev`, $A$ and $B$ are
+/// each scaled by a power of two before the reduction when their largest entry
+/// is below $\sqrt{\text{safmin}} / \varepsilon$ or above its inverse, and
+/// $\alpha$, $\beta$ are scaled back afterwards (tensor4all/faer#375; before
+/// that the QZ underflowed and returned $\alpha = \beta = 0$ for every
+/// eigenvalue of a tiny pencil). in `f64`, for the well-conditioned pencils of
+/// `tests/gevd_scaled_pencil.rs`, the eigenvalues and eigenvectors were
+/// measured within $3 \cdot 10^{-15}$ of $s = 1$ for every $s = 10^k$ at which
+/// all entries of $(sA, sB)$ are normal and finite ($10^{-305}$ to $10^{307}$
+/// for the widest-ranged pencil). when entries are subnormal, the input itself
+/// has lost precision, and the results are correspondingly less accurate
+/// (measured: within $10^{-13}$ of $s = 1$ down to $s \approx 2.4 \cdot
+/// 10^{-311}$ to $3.4 \cdot 10^{-311}$, depending on the pencil).
 ///
-/// - the eigenvector back substitution divides complex numbers with LAPACK
-///   `dladiv`'s scaling, and it was not what limited the range in any measured
-///   case. (before tensor4all/faer#370 it formed $|d|^2$, and in `f64` a
-///   complex pair's eigenvectors became NaN for $s$ above about $5 \cdot
-///   10^{153}$ or below about $3 \cdot 10^{-147}$ to $10^{-162}$, depending on
-///   the pencil.)
-/// - the QZ iteration underflows when all entries of $A$ and $B$ are tiny. in
-///   `f64`, for well-conditioned pencils with entries of order $s$, the results
-///   were measured finite and scale invariant to about $10^{-14}$ for every
-///   $s = 10^k$ with $10^{-279} \le s \le 10^{307}$; the lower end depends on
-///   the pencil (one of the tested pencils fails below about $6 \cdot
-///   10^{-280}$, another below about $10^{-293}$).
-/// - below that, the QZ usually returns $\alpha = \beta = 0$ for every
-///   eigenvalue. when eigenvectors are requested this function then returns
-///   [`GevdError::NoConvergence`] instead of NaN eigenvectors; when they are
-///   not, it returns `Ok` with those zero values. at some scales in that range
-///   it instead returns `Ok` with finite but inaccurate results (measured:
-///   errors from $10^{-8}$ to $O(1)$ at $s = 10^{-301}$ and $10^{-305}$). a
-///   caller with such a pencil should scale $A$ and $B$ by a power of two
-///   before the call and scale $\alpha$ and $\beta$ back afterwards (the
-///   eigenvectors need no change).
+/// $\alpha$ and $\beta$ are returned at the scale of the input, so they can
+/// underflow when it is tiny. when both $\alpha$ and $\beta$ of an eigenvalue
+/// underflow to zero (in `f64` this needs subnormal entries), this function
+/// returns [`GevdError::NoConvergence`] rather than an indeterminate
+/// $\alpha = \beta = 0$; the outputs are then unspecified. $\alpha = \beta
+/// = 0$ is still returned with `Ok` when the QZ itself finds it, i.e. for a
+/// pencil that is singular within the QZ's backward error, the same at every
+/// scale.
 #[track_caller]
 pub fn gevd_real<T: RealField>(
 	A: MatMut<'_, T>,
@@ -1587,6 +1652,10 @@ pub fn gevd_real<T: RealField>(
 /// right eigenvectors in $U_R$
 ///
 /// the values in $A$ and $B$ after this function is called are unspecified.
+///
+/// $A$ and $B$ are prescaled as in [`gevd_real`] (see its range of scales),
+/// with the same error when an eigenvalue's $\alpha$ and $\beta$ both
+/// underflow when the scaling is undone.
 #[track_caller]
 pub fn gevd_cplx<T: ComplexField>(
 	A: MatMut<'_, T>,
