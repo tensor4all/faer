@@ -69,13 +69,14 @@
   transposed view, and the probe that entered it was a `#[doc(hidden)]` hook kept on the
   measuring machine and deliberately not committed. Nothing in this repository can therefore
   re-run that column: the ratios above are a record of one paired run, not a measurement a
-  reader can repeat. The "after" side is reachable — every call through `lq_in_place` now takes
-  the staged route, which `lq/no_pivoting/factor.rs:47` shows is unconditional (`staged = true`
-  is passed to `qr_in_place_packed`), and `cargo test -p t4a-faer lq` covers the shapes — but the
-  numbers themselves came from the in-process probe described above, whose harness is not
-  committed and which is not the campaign's `fbench` protocol: a reader can check that the path is
-  taken, not that it costs 3.74 ms. A claim of the form "0.254x" is therefore only checkable
-  against a baseline this repository does not contain.
+  reader can repeat. The "after" side is reachable — `lq_in_place` passes `staged = true`
+  (`lq/no_pivoting/factor.rs:57`), and `cargo test -p t4a-faer lq` covers the shapes — but whether a
+  given call actually stages is decided further in: `qr/no_pivoting/factor.rs:160-166` stages only
+  when the row stride is not 1 and the stack can hold the two panel buffers, and `:193` narrows it
+  again when it cannot. So a reader can check that the staged code runs for a call that meets those
+  conditions, not that every call does, and not that it costs 3.74 ms — the numbers came from the
+  in-process probe described above, whose harness is not committed. A claim of the form "0.254x" is
+  therefore only checkable against a baseline this repository does not contain.
 
   | LQ `m x n` | t | before | after | after / before | column-major QR of `A^T` | after / QR |
   |---|---|---|---|---|---|---|
