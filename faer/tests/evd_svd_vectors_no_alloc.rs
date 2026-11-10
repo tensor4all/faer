@@ -2,8 +2,8 @@
 //! self-adjoint EVD with eigenvectors (into a column-major and, #314, a
 //! row-major `u`) and the bidiagonal SVD with vectors
 //! (divide and conquer from n = 128) allocate nothing on the heap on a warm
-//! call. The allocator counts every allocation of the process while the call
-//! runs; the inputs and the scratch are built outside the counted interval.
+//! call. The allocator counts every allocation of the counting thread while the
+//! call runs; the inputs and the scratch are built outside the counted interval.
 //!
 //! It holds on x86_64 with AVX2 and FMA. Elsewhere, and on x86_64 without
 //! them, `matmul` falls back to the `gemm` crate, which allocates its packing
@@ -22,20 +22,34 @@ use faer::linalg::svd::{bidiagonal_svd, bidiagonal_svd_scratch};
 use faer::traits::ComplexField;
 use faer::{Mat, Par, ParShape, c64};
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Counting;
-static COUNTING: AtomicBool = AtomicBool::new(false);
+// Per thread, not per process: `self_adjoint_evd` and `bidiagonal_svd` are both called with
+// `Par::Seq` below, so every allocation they make is made on this thread, and a line the harness
+// prints on another thread (its "has been running for over 60 seconds" watchdog, a result line)
+// is not the call's. A process-wide flag counted the watchdog's own allocations: CI run
+// 42864337928 failed at n = 300 on `evd f64 row-major u` with three of them, while the same test
+// passed on the parent head f2336439.
+thread_local! {
+	static COUNTING: Cell<bool> = const { Cell::new(false) };
+}
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+#[inline]
+fn counting() -> bool {
+	COUNTING.with(Cell::get)
+}
 unsafe impl GlobalAlloc for Counting {
 	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
+		if counting() {
 			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
 		}
 		unsafe { System.alloc(layout) }
 	}
 	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
+		if counting() {
 			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
 		}
 		unsafe { System.alloc_zeroed(layout) }
@@ -46,7 +60,7 @@ unsafe impl GlobalAlloc for Counting {
 		layout: Layout,
 		new_size: usize,
 	) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
+		if counting() {
 			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
 		}
 		unsafe { System.realloc(ptr, layout, new_size) }
@@ -63,9 +77,9 @@ static GLOBAL: Counting = Counting;
 fn warm(mut run: impl FnMut()) -> usize {
 	run();
 	ALLOCATIONS.store(0, Ordering::SeqCst);
-	COUNTING.store(true, Ordering::SeqCst);
+	COUNTING.with(|c| c.set(true));
 	run();
-	COUNTING.store(false, Ordering::SeqCst);
+	COUNTING.with(|c| c.set(false));
 	ALLOCATIONS.load(Ordering::SeqCst)
 }
 
@@ -135,7 +149,7 @@ fn hermitian(n: usize) -> Mat<c64> {
 	})
 }
 
-// one test function: the counter is process wide, so nothing else may run while it counts
+// one test function: the counted windows run on this thread, one cell after another
 #[test]
 #[cfg_attr(
 	not(target_arch = "x86_64"),
