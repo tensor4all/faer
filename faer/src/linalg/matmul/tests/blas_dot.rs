@@ -118,9 +118,15 @@ fn dot_reads_every_referenced_entry() {
 	// dot product the analogous property is that the result moves when any
 	// entry the view refers to moves. One NaN written into a referred entry of
 	// either operand must reach the sum as a NaN, and one infinity must leave
-	// the sum non-finite. Each runs on stride 1, 2 and -2 views of length 4 and
-	// on every conjugation arm, so a kernel that skips a referred entry, or the
-	// conjugation of one operand, cannot pass.
+	// the sum non-finite. Each runs on stride 1, 2 and -2 views of length 4, and
+	// on all four conjugation arms of the complex types (the real types run only
+	// the unconjugated arm, where conjugation is the identity), so that no arm
+	// has its own cop-out: a kernel that skips a referred entry cannot pass.
+	//
+	// This is a propagation check only. Whether the conjugation is applied
+	// correctly is not observable through a NaN or an infinity, so it is not
+	// claimed here: `dot_matches_the_source_stride_sweep` compares the exact
+	// result on every arm and is what fails when `inner_prod` drops it.
 	let n = 4;
 	for stride in [1isize, 2, -2] {
 		for at in 0..n {
