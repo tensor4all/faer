@@ -45,7 +45,7 @@ cell ran in its own process.
 - **The measured consequence of that threshold, not a hypothesis:** `recursion_threshold = 16`
   (D&C at every size, the only knob, no code change) takes 16-32% off the f64 call and 13-26% off
   the c64 call at 8T for n = 64..128, turns the complex cells from a small loss into a win, and is
-  worth 8% / 3% / 1% at n = 256 / 256 / 512. At 1T it is neutral at n = 64 and 96 and 9% (f64) /
+  worth 8% at f64 n = 256, 3% at c64 n = 256 and 1% at n = 512. At 1T it is neutral at n = 64 and 96 and 9% (f64) /
   4% (c64) better at n = 128. **Table C is the measurement**; the per-cell numbers are not repeated
   here. So the default is not wrong at 1T; it is wrong at 8T, where D&C's merge is cheaper than a
   serial QR of the same tridiagonal, and slightly wrong at 8T above the band as well.
@@ -137,8 +137,8 @@ cell ran in its own process.
    `lapack_self_adjoint_evd_*` and spectrum-accuracy tests already run both thresholds (the
    QR/D&C choice is a parameter there), so the regression surface is those fixtures, not new
    code. Cost: one gate, no new algorithm.
-2. **Parallelise the QR leaf** (deflated blocks as tasks inside `qr_algorithm`). This is the only
-   option that changes the arithmetic order rather than the schedule. It is not the only one that
+2. **Parallelise the QR leaf** (deflated blocks as tasks inside `qr_algorithm`). This changes the
+   arithmetic order rather than the schedule. It is not the only one that
    moves 1T: the threshold knob already does (table C, f64 n = 128 at 1T, 2.318 → 2.105 ms), it
    just stops at D&C's merge cost. What this option adds is the use of n = 64/96 with a threshold
    without paying that merge. Risk: the eigenvector chase is a sequential recurrence over
@@ -196,23 +196,17 @@ Reproduction B.
 
 **f64**
 
-| stage | 1T/8T | n=64 | n=96 | n=128 | n=256 | n=512 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | faer stage 1 (tridiagonalize) | 1T | 0.080 | 0.182 | 0.335 | 1.855 | 11.566 |
 | faer stage 1 (tridiagonalize) | 8T | 0.079 | 0.254 | 0.423 | 1.592 | 6.475 |
-| faer stage 1 (tridiagonalize) | 1T/8T | 1.01x | 0.71x | 0.79x | 1.17x | 1.79x |
 | MKL ?sytrd | 1T | 0.053 | 0.154 | 0.338 | 2.623 | 21.317 |
 | MKL ?sytrd | 8T | 0.054 | 0.216 | 0.439 | 1.901 | 9.367 |
-| MKL ?sytrd | 1T/8T | 0.99x | 0.71x | 0.77x | 1.38x | 2.28x |
 | faer stage 2 (tridiag EVD + vectors) | 1T | 0.387 | 0.915 | 1.772 | 6.652 | 27.090 |
 | faer stage 2 (tridiag EVD + vectors) | 8T | 0.386 | 0.915 | 1.771 | 5.196 | 15.919 |
-| faer stage 2 (tridiag EVD + vectors) | 1T/8T | 1.00x | 1.00x | 1.00x | 1.28x | 1.70x |
 | MKL ?stedc | 1T | 0.249 | 0.525 | 0.915 | 3.672 | 15.544 |
 | MKL ?stedc | 8T | 0.205 | 0.404 | 0.610 | 2.425 | 6.982 |
-| MKL ?stedc | 1T/8T | 1.22x | 1.30x | 1.50x | 1.51x | 2.23x |
 | faer stage 3 (reflector apply) | 1T | 0.036 | 0.096 | 0.199 | 1.335 | 9.779 |
 | faer stage 3 (reflector apply) | 8T | 0.037 | 0.066 | 0.109 | 0.419 | 2.796 |
-| faer stage 3 (reflector apply) | 1T/8T | 0.98x | 1.47x | 1.83x | 3.18x | 3.50x |
 | sum of faer's three stages | 1T | 0.503 | 1.193 | 2.305 | 9.842 | 48.435 |
 | sum of faer's three stages | 8T | 0.502 | 1.234 | 2.303 | 7.208 | 25.190 |
 | faer `self_adjoint_evd` | 1T | 0.508 | 1.200 | 2.318 | 9.884 | 49.282 |
@@ -226,23 +220,17 @@ Reproduction B.
 
 **c64**
 
-| stage | 1T/8T | n=64 | n=96 | n=128 | n=256 | n=512 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | faer stage 1 (tridiagonalize) | 1T | 0.128 | 0.344 | 0.728 | 5.022 | 36.626 |
 | faer stage 1 (tridiagonalize) | 8T | 0.175 | 0.359 | 0.610 | 2.715 | 13.782 |
-| faer stage 1 (tridiagonalize) | 1T/8T | 0.73x | 0.96x | 1.19x | 1.85x | 2.66x |
 | MKL ?sytrd | 1T | 0.247 | 0.732 | 1.597 | 11.548 | 88.560 |
 | MKL ?sytrd | 8T | 0.316 | 0.639 | 1.112 | 5.632 | 29.996 |
-| MKL ?sytrd | 1T/8T | 0.78x | 1.15x | 1.44x | 2.05x | 2.95x |
 | faer stage 2 (tridiag EVD + vectors) | 1T | 0.360 | 0.938 | 1.754 | 6.580 | 26.831 |
 | faer stage 2 (tridiag EVD + vectors) | 8T | 0.362 | 0.938 | 1.759 | 4.625 | 16.038 |
-| faer stage 2 (tridiag EVD + vectors) | 1T/8T | 0.99x | 1.00x | 1.00x | 1.42x | 1.67x |
 | MKL ?stedc | 1T | 0.251 | 0.532 | 0.920 | 3.713 | 15.787 |
 | MKL ?stedc | 8T | 0.207 | 0.409 | 0.693 | 2.270 | 6.246 |
-| MKL ?stedc | 1T/8T | 1.21x | 1.30x | 1.33x | 1.64x | 2.53x |
 | faer stage 3 (reflector apply) | 1T | 0.142 | 0.354 | 0.774 | 5.507 | 39.426 |
 | faer stage 3 (reflector apply) | 8T | 0.087 | 0.151 | 0.283 | 1.487 | 10.181 |
-| faer stage 3 (reflector apply) | 1T/8T | 1.63x | 2.35x | 2.74x | 3.70x | 3.87x |
 | sum of faer's three stages | 1T | 0.630 | 1.636 | 3.257 | 17.109 | 102.883 |
 | sum of faer's three stages | 8T | 0.624 | 1.448 | 2.651 | 8.827 | 40.002 |
 | faer `self_adjoint_evd` | 1T | 0.639 | 1.653 | 3.287 | 17.570 | 105.428 |
@@ -272,12 +260,6 @@ Reproduction C.
 | c64 | 128 | 3.287 | 3.161 | 3.288 | 2.780 | 2.049 | 2.738 | +4% | +26% |
 | c64 | 256 | 17.570 | 17.220 | 19.764 | 9.222 | 8.909 | 13.954 | +2% | +3% |
 | c64 | 512 | 105.428 | 104.920 | 131.838 | 41.147 | 40.811 | 85.127 | +0% | +1% |
-
-### D. raw samples
-
-Every sample of the cells under test (15 per cell, three sessions) is in
-`evidence/2026-11-10-eigh-raw-samples.csv`; table A's medians are its median column. The table is not repeated
-here.
 
 ## Reproduction
 
