@@ -1,0 +1,432 @@
+diff --git a/faer/Cargo.toml b/faer/Cargo.toml
+index 79fe9285..fe48a793 100644
+--- a/faer/Cargo.toml
++++ b/faer/Cargo.toml
+@@ -71,6 +71,7 @@ nano-gemm = { version = "0.2.2", default-features = false }
+ t4a-private-gemm-x86 = { version = "0.1.28", default-features = false, optional = true }
+ 
+ [features]
++dc-count = []
+ default = [
+   "std",
+   "rayon",
+diff --git a/faer/src/dc_probe.rs b/faer/src/dc_probe.rs
+new file mode 100644
+index 00000000..4c578162
+--- /dev/null
++++ b/faer/src/dc_probe.rs
+@@ -0,0 +1,126 @@
++//! Throwaway instrumentation for tensor4all/faer#391 increment 1 (not for landing).
++//!
++//! Accumulates wall time (ns), call counts and allocation counts per
++//! (recursion level, phase) of the tridiagonal divide-and-conquer, in process-wide
++//! atomics, so that time spent on any team member is counted.
++use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
++use std::time::Instant;
++
++pub const MAX_LEVEL: usize = 10;
++pub const PHASES: &[&str] = &[
++	"split",
++	"leaf",
++	"z_build",
++	"merge_perm",
++	"deflate",
++	"secular",
++	"lowner",
++	"sort_perm",
++	"vectors",
++	"hh_apply",
++	"gemm",
++	"copy_out",
++	"outer_pre",
++	"dc_wrap",
++	"outer_post",
++];
++pub const N_PHASES: usize = 15;
++pub const SPLIT: usize = 0;
++pub const LEAF: usize = 1;
++pub const Z_BUILD: usize = 2;
++pub const MERGE_PERM: usize = 3;
++pub const DEFLATE: usize = 4;
++pub const SECULAR: usize = 5;
++pub const LOWNER: usize = 6;
++pub const SORT_PERM: usize = 7;
++pub const VECTORS: usize = 8;
++pub const HH_APPLY: usize = 9;
++pub const GEMM: usize = 10;
++pub const COPY_OUT: usize = 11;
++pub const OUTER_PRE: usize = 12;
++pub const DC_WRAP: usize = 13;
++pub const OUTER_POST: usize = 14;
++
++const Z: AtomicU64 = AtomicU64::new(0);
++const ZL: [AtomicU64; N_PHASES] = [Z; N_PHASES];
++pub static NS: [[AtomicU64; N_PHASES]; MAX_LEVEL] = [ZL; MAX_LEVEL];
++pub static CALLS: [[AtomicU64; N_PHASES]; MAX_LEVEL] = [ZL; MAX_LEVEL];
++pub static ALLOC: [[AtomicU64; N_PHASES]; MAX_LEVEL] = [ZL; MAX_LEVEL];
++/// merges per level whose two half-solves were joined in parallel / sequentially
++pub static HALVES_PAR: [AtomicU64; MAX_LEVEL] = [Z; MAX_LEVEL];
++pub static HALVES_SEQ: [AtomicU64; MAX_LEVEL] = [Z; MAX_LEVEL];
++/// merges per level whose two GEMMs were joined in parallel / sequentially
++pub static GEMM_PAR: [AtomicU64; MAX_LEVEL] = [Z; MAX_LEVEL];
++pub static GEMM_SEQ: [AtomicU64; MAX_LEVEL] = [Z; MAX_LEVEL];
++/// non-deflated size k summed per level (divide by merge count for the mean)
++pub static K_SUM: [AtomicU64; MAX_LEVEL] = [Z; MAX_LEVEL];
++/// leaf sizes seen (index = size, capped)
++pub static LEAF_SIZE: [AtomicU64; 257] = [Z; 257];
++/// incremented by the probe binary's global allocator
++pub static ALLOCS: AtomicU64 = AtomicU64::new(0);
++
++#[derive(Copy, Clone)]
++pub struct Mark {
++	t: Instant,
++	a: u64,
++}
++#[inline(always)]
++pub fn mark() -> Mark {
++	Mark {
++		a: ALLOCS.load(Relaxed),
++		t: Instant::now(),
++	}
++}
++/// adds the time since `m` to (level, phase) and returns a fresh mark
++#[inline(always)]
++pub fn lap(level: usize, phase: usize, m: Mark) -> Mark {
++	let now = Instant::now();
++	let a = ALLOCS.load(Relaxed);
++	let l = level.min(MAX_LEVEL - 1);
++	NS[l][phase].fetch_add((now - m.t).as_nanos() as u64, Relaxed);
++	CALLS[l][phase].fetch_add(1, Relaxed);
++	ALLOC[l][phase].fetch_add(a - m.a, Relaxed);
++	Mark { t: Instant::now(), a: ALLOCS.load(Relaxed) }
++}
++pub fn reset() {
++	for l in 0..MAX_LEVEL {
++		for p in 0..N_PHASES {
++			NS[l][p].store(0, Relaxed);
++			CALLS[l][p].store(0, Relaxed);
++			ALLOC[l][p].store(0, Relaxed);
++		}
++		HALVES_PAR[l].store(0, Relaxed);
++		HALVES_SEQ[l].store(0, Relaxed);
++		GEMM_PAR[l].store(0, Relaxed);
++		GEMM_SEQ[l].store(0, Relaxed);
++		K_SUM[l].store(0, Relaxed);
++	}
++	for s in LEAF_SIZE.iter() {
++		s.store(0, Relaxed);
++	}
++}
++
++// ---- count-only build (`dc-count`): secular-equation work per level, never timed ----
++pub static SEC_ROOTS: [AtomicU64; MAX_LEVEL] = [Z; MAX_LEVEL];
++pub static SEC_EVALS: [AtomicU64; MAX_LEVEL] = [Z; MAX_LEVEL];
++pub static SEC_BATCH: [AtomicU64; MAX_LEVEL] = [Z; MAX_LEVEL];
++pub static SEC_TERMS: [AtomicU64; MAX_LEVEL] = [Z; MAX_LEVEL];
++pub static SEC_BISECT_ROOTS: [AtomicU64; MAX_LEVEL] = [Z; MAX_LEVEL];
++pub static SEC_BISECT_EVALS: [AtomicU64; MAX_LEVEL] = [Z; MAX_LEVEL];
++std::thread_local! {
++	pub static CUR_LEVEL: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
++}
++#[inline(always)]
++pub fn cnt(arr: &[AtomicU64; MAX_LEVEL], v: u64) {
++	if cfg!(feature = "dc-count") {
++		let l = CUR_LEVEL.with(|c| c.get()).min(MAX_LEVEL - 1);
++		arr[l].fetch_add(v, Relaxed);
++	}
++}
++pub fn reset_counts() {
++	for l in 0..MAX_LEVEL {
++		for a in [&SEC_ROOTS, &SEC_EVALS, &SEC_BATCH, &SEC_TERMS, &SEC_BISECT_ROOTS, &SEC_BISECT_EVALS] {
++			a[l].store(0, Relaxed);
++		}
++	}
++}
+diff --git a/faer/src/lib.rs b/faer/src/lib.rs
+index d3dba892..33a70bed 100644
+--- a/faer/src/lib.rs
++++ b/faer/src/lib.rs
+@@ -702,6 +702,9 @@ pub mod row;
+ pub mod sparse;
+ /// helper utilities
+ pub mod utils;
++/// throwaway #391 instrumentation
++#[doc(hidden)]
++pub mod dc_probe;
+ /// the parallel route: owns a threadteam team and hands out `Par::Team` for a closure
+ #[cfg(feature = "threadteam")]
+ pub use utils::team;
+diff --git a/faer/src/linalg/evd/mod.rs b/faer/src/linalg/evd/mod.rs
+index 9ac89818..442dbd18 100644
+--- a/faer/src/linalg/evd/mod.rs
++++ b/faer/src/linalg/evd/mod.rs
+@@ -217,6 +217,8 @@ pub fn tridiagonal_self_adjoint_evd<T: ComplexField>(
+ 	if n == 0 {
+ 		return Ok(());
+ 	}
++	use crate::dc_probe as P;
++	let m = P::mark();
+ 	let (mut real_diag, stack) =
+ 		unsafe { temp_mat_uninit::<T::Real, _, _>(n, 1, stack) };
+ 	let (mut real_offdiag, stack) =
+@@ -271,12 +273,15 @@ pub fn tridiagonal_self_adjoint_evd<T: ComplexField>(
+ 	} else {
+ 		u_real.rb_mut()
+ 	};
++	let m = P::lap(0, P::OUTER_PRE, m);
+ 	if n < params.recursion_threshold {
+ 		tridiag_evd::qr_algorithm(
+ 			real_diag.rb_mut(),
+ 			real_offdiag.rb_mut(),
+ 			Some(u_evd.rb_mut()),
+ 		)?;
++		P::lap(0, P::LEAF, m);
++		P::LEAF_SIZE[n.min(256)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+ 	} else {
+ 		tridiag_evd::divide_and_conquer::<T::Real>(
+ 			real_diag.rb_mut(),
+@@ -287,6 +292,7 @@ pub fn tridiagonal_self_adjoint_evd<T: ComplexField>(
+ 			params.recursion_threshold,
+ 		)?;
+ 	}
++	let m = P::mark();
+ 	if const { !T::IS_REAL } {
+ 		let normalized = |x: T| {
+ 			if x == zero() {
+@@ -318,6 +324,7 @@ pub fn tridiagonal_self_adjoint_evd<T: ComplexField>(
+ 	for i in 0..n {
+ 		s[i] = real_diag[i].to_cplx();
+ 	}
++	P::lap(0, P::OUTER_POST, m);
+ 	Ok(())
+ }
+ /// Scales the lower triangle of `a` by a power of two so that its largest
+diff --git a/faer/src/linalg/evd/tridiag_evd.rs b/faer/src/linalg/evd/tridiag_evd.rs
+index e264bd8e..cf168cae 100644
+--- a/faer/src/linalg/evd/tridiag_evd.rs
++++ b/faer/src/linalg/evd/tridiag_evd.rs
+@@ -286,9 +286,18 @@ fn compute_eigenvalues<T: RealField>(
+ 		};
+ 		let d = d.subrows(0, n);
+ 		let z = z.subrows(0, n);
++		crate::dc_probe::cnt(&crate::dc_probe::SEC_ROOTS, 1);
+ 		let (shift, mu) = secular_eq_root_finder(
+-			&|shift, mu| secular_eq(shift, mu, d, z, rho_recip.copy()),
+-			&|shift, mu| batch_secular_eq(shift, mu, d, z, rho_recip.copy()),
++			&|shift, mu| {
++				crate::dc_probe::cnt(&crate::dc_probe::SEC_EVALS, 1);
++				crate::dc_probe::cnt(&crate::dc_probe::SEC_TERMS, n as u64);
++				secular_eq(shift, mu, d, z, rho_recip.copy())
++			},
++			&|shift, mu| {
++				crate::dc_probe::cnt(&crate::dc_probe::SEC_BATCH, 1);
++				crate::dc_probe::cnt(&crate::dc_probe::SEC_TERMS, 4 * n as u64);
++				batch_secular_eq(shift, mu, d, z, rho_recip.copy())
++			},
+ 			left,
+ 			right,
+ 			last,
+@@ -319,11 +328,17 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 	mut repaired_u: MatMut<'_, T, usize, usize, ContiguousFwd>,
+ 	mut tmp: MatMut<'_, T, usize, usize, ContiguousFwd>,
+ 	qr_fallback_threshold: usize,
++	level: usize,
+ ) -> Result<(), EvdError> {
++	use crate::dc_probe as P;
++	let m = P::mark();
+ 	let n = diag.nrows();
+ 	let qr_fallback_threshold = Ord::max(qr_fallback_threshold, 4);
+ 	if n <= qr_fallback_threshold {
+-		return qr_algorithm(diag, offdiag, Some(u));
++		let r = qr_algorithm(diag, offdiag, Some(u));
++		P::lap(level, P::LEAF, m);
++		P::LEAF_SIZE[n.min(256)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++		return r;
+ 	}
+ 	let n1 = n / 2;
+ 	let mut rho = offdiag[n1 - 1].copy();
+@@ -363,6 +378,12 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 		} else {
+ 			Par::Seq
+ 		};
++		if matches!(join_par, Par::Seq) {
++			P::HALVES_SEQ[level.min(P::MAX_LEVEL - 1)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++		} else {
++			P::HALVES_PAR[level.min(P::MAX_LEVEL - 1)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++		}
++		P::lap(level, P::SPLIT, m);
+ 		join_raw(
+ 			|par| {
+ 				r0 = divide_and_conquer_recurse(
+@@ -383,6 +404,7 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 					repaired_u0,
+ 					tmp0,
+ 					qr_fallback_threshold,
++					level + 1,
+ 				);
+ 			},
+ 			|par| {
+@@ -404,6 +426,7 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 					repaired_u1,
+ 					tmp1,
+ 					qr_fallback_threshold,
++					level + 1,
+ 				);
+ 			},
+ 			join_par,
+@@ -411,6 +434,7 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 		r0?;
+ 		r1?;
+ 	}
++	let m = P::mark();
+ 	let mut repaired_u = repaired_u.subrows_mut(0, n);
+ 	let mut tmp = tmp.subrows_mut(0, n);
+ 	let (mut z0, mut z1) = z.rb_mut().split_at_row_mut(n1);
+@@ -424,6 +448,7 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 	let ref inv_sqrt2 = from_f64::<T>(0.5).sqrt();
+ 	z!(z.rb_mut()).for_each(|uz!(x)| *x *= inv_sqrt2);
+ 	rho = rho.abs().mul_pow2(from_f64::<T>(2.0));
++	let m = P::lap(level, P::Z_BUILD, m);
+ 	{
+ 		let mut i = 0usize;
+ 		let mut j = 0usize;
+@@ -450,6 +475,10 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 	let ref zmax = permuted_z.norm_max();
+ 	let ref eps = eps::<T>();
+ 	let ref tol = from_f64::<T>(8.0) * eps * dmax.fmax(zmax);
++	let m = P::lap(level, P::MERGE_PERM, m);
++	if cfg!(feature = "dc-count") {
++		P::CUR_LEVEL.with(|c| c.set(level));
++	}
+ 	if &rho * zmax <= *tol {
+ 		let (mut tmp_tl, mut tmp_tr, mut tmp_bl, mut tmp_br) =
+ 			tmp.rb_mut().split_at_mut(n1, n1);
+@@ -463,6 +492,7 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 		for (j, diag) in diag.iter_mut().enumerate() {
+ 			*diag = permuted_diag[j].copy();
+ 		}
++		P::lap(level, P::DEFLATE, m);
+ 		return Ok(());
+ 	}
+ 	for i in 0..n {
+@@ -526,6 +556,8 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 		permuted_diag[non_deflated + i] = diag[i].copy();
+ 		pl_after[non_deflated + i] = pr[i];
+ 	}
++	P::K_SUM[level.min(P::MAX_LEVEL - 1)].fetch_add(non_deflated as u64, core::sync::atomic::Ordering::Relaxed);
++	let m = P::lap(level, P::DEFLATE, m);
+ 	compute_eigenvalues(
+ 		mus.rb_mut(),
+ 		shifts.rb_mut(),
+@@ -534,6 +566,7 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 		rho.copy(),
+ 		non_deflated,
+ 	);
++	let m = P::lap(level, P::SECULAR, m);
+ 	for i in 0..non_deflated {
+ 		let ref di = permuted_diag[i].copy();
+ 		let ref mu_i = mus[i].copy();
+@@ -552,6 +585,7 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 		let new_zi = if *zi < zero() { -prod } else { prod };
+ 		*zi = new_zi;
+ 	}
++	let m = P::lap(level, P::LOWNER, m);
+ 	let mut eigenvals = z;
+ 	for i in 0..n {
+ 		eigenvals[i] = &mus[i] + &shifts[i];
+@@ -578,6 +612,7 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 			*p = pl_before[*p];
+ 		}
+ 	}
++	let m = P::lap(level, P::SORT_PERM, m);
+ 	for (j, &pj) in pr.iter().enumerate() {
+ 		if pj >= non_deflated {
+ 			repaired_u.rb_mut().col_mut(j).fill(zero());
+@@ -598,6 +633,7 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 				.for_each(|unzip!(x)| *x *= inv_norm);
+ 		}
+ 	}
++	let m = P::lap(level, P::VECTORS, m);
+ 	if applied_householder {
+ 		let mut idx = 0;
+ 		while idx < n {
+@@ -633,6 +669,7 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 		}
+ 		core::mem::swap(&mut repaired_u, &mut tmp);
+ 	}
++	let m = P::lap(level, P::HH_APPLY, m);
+ 	let (repaired_u_top, repaired_u_bot) = repaired_u.rb().split_at_row(n1);
+ 	let (tmp_top, tmp_bot) = tmp.rb_mut().split_at_row_mut(n1);
+ 	// one section; the two products `n1 x n1` and `(n - n1) x (n - n1)` against `n` columns
+@@ -646,6 +683,11 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 	} else {
+ 		Par::Seq
+ 	};
++	if matches!(join_par, Par::Seq) {
++		P::GEMM_SEQ[level.min(P::MAX_LEVEL - 1)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++	} else {
++		P::GEMM_PAR[level.min(P::MAX_LEVEL - 1)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++	}
+ 	crate::utils::thread::join_raw(
+ 		|par| {
+ 			matmul(tmp_top, Accum::Replace, u0.rb(), repaired_u_top, one(), par)
+@@ -655,10 +697,12 @@ fn divide_and_conquer_recurse<T: RealField>(
+ 		},
+ 		join_par,
+ 	);
++	let m = P::lap(level, P::GEMM, m);
+ 	u.copy_from(tmp.rb());
+ 	for i in 0..n {
+ 		diag[i] = &mus[pr[i]] + &shifts[pr[i]];
+ 	}
++	P::lap(level, P::COPY_OUT, m);
+ 	Ok(())
+ }
+ pub(crate) fn divide_and_conquer<T: RealField>(
+@@ -669,6 +713,8 @@ pub(crate) fn divide_and_conquer<T: RealField>(
+ 	stack: &mut MemStack,
+ 	qr_fallback_threshold: usize,
+ ) -> Result<(), EvdError> {
++	use crate::dc_probe as P;
++	let m = P::mark();
+ 	let n = diag.nrows();
+ 	let ref scale = normalize_range(&mut diag, &mut offdiag);
+ 	let (mut pl_before, stack) = stack.make_with(n, |_| 0usize);
+@@ -683,6 +729,7 @@ pub(crate) fn divide_and_conquer<T: RealField>(
+ 	let (mut shifts, stack) = unsafe { temp_mat_uninit(n, 1, stack) };
+ 	let (mut repaired_u, stack) = unsafe { temp_mat_uninit(n, n, stack) };
+ 	let (mut tmp, _) = unsafe { temp_mat_uninit(n, n, stack) };
++	P::lap(0, P::DC_WRAP, m);
+ 	let res = divide_and_conquer_recurse(
+ 		diag.rb_mut(),
+ 		offdiag.rb_mut(),
+@@ -717,10 +764,13 @@ pub(crate) fn divide_and_conquer<T: RealField>(
+ 		repaired_u.as_mat_mut().try_as_col_major_mut().unwrap(),
+ 		tmp.as_mat_mut().try_as_col_major_mut().unwrap(),
+ 		qr_fallback_threshold,
++		0,
+ 	);
++	let m = P::mark();
+ 	for x in diag.iter_mut() {
+ 		*x *= scale;
+ 	}
++	P::lap(0, P::DC_WRAP, m);
+ 	res
+ }
+ pub(crate) fn divide_and_conquer_scratch<T: ComplexField>(
+diff --git a/faer/src/linalg/svd/bidiag_svd.rs b/faer/src/linalg/svd/bidiag_svd.rs
+index b5fb882c..948dd3c4 100644
+--- a/faer/src/linalg/svd/bidiag_svd.rs
++++ b/faer/src/linalg/svd/bidiag_svd.rs
+@@ -261,9 +261,11 @@ pub(crate) fn secular_eq_root_finder<T: RealField>(
+ 		_ => {},
+ 	}
+ 	if use_bisection {
++		crate::dc_probe::cnt(&crate::dc_probe::SEC_BISECT_ROOTS, 1);
+ 		while &right_shifted - &left_shifted
+ 			> two * epsilon * left_shifted.abs().fmax(right_shifted.abs())
+ 		{
++			crate::dc_probe::cnt(&crate::dc_probe::SEC_BISECT_EVALS, 1);
+ 			let mid_shifted = (&left_shifted + &right_shifted) * one_half;
+ 			let f_mid = secular_eq(shift.copy(), mid_shifted.copy());
+ 			if f_mid == zero() {

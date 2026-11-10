@@ -10,13 +10,20 @@ rustc 1.99.1. The routine measured is stage 2, the public `tridiagonal_self_adjo
 tridiagonal that faer's own `tridiag_in_place` makes from a seeded random Hermitian matrix (the same stage as
 table B of the previous record). The instrumented build times every phase of every recursion level of
 `divide_and_conquer_recurse` with `Instant` into process-wide atomics; an unmodified build of the same
-revision gives the reference call time. The instrumentation is not part of this change.
+revision gives the reference call time. The instrumentation is not part of this change; the patch used for
+the instrumented build is kept as
+[`evidence/2026-11-11-eigh-merge-phases/instrumentation.patch`](evidence/2026-11-11-eigh-merge-phases/instrumentation.patch)
+so that the phase boundaries and the allocation counters behind every table can be read.
 
 All numbers are recomputed from
 [`evidence/2026-11-11-eigh-merge-phases/`](evidence/2026-11-11-eigh-merge-phases/) by its `aggregate.py`
-(`python3 aggregate.py phases-raw.csv counts-raw.csv revision-raw.csv`). Every value is the median of five
-processes, one cell per process, each process reporting its per-call mean over a 1 s window after 250 ms of
-priming.
+(`python3 aggregate.py phases-raw.csv counts-raw.csv revision-raw.csv`). Every timing value is the median of
+five processes, one cell per process, each process reporting its per-call mean over a 1 s window after 250 ms
+of priming. The phase tables add one such median per phase and level, so their totals are a **sum of medians**
+and can differ from the median of the per-process totals printed in the coverage table: f64 n = 128 at 8T is
+1.923 ms there against 1.927 ms in the coverage row, and c64 n = 128 at 1T 1.650 against 1.651. The allocation
+counts are medians of the same five processes; the count-only table (C) is a **single observation per
+counter**, not five.
 
 ## Decisions
 
@@ -78,8 +85,9 @@ priming.
 ## Verification conclusions and constraints
 
 - **The instrumentation covers the call.** At 1T the sum of all phases is within +0.0% to +0.6% of the
-  unmodified call in every cell, and **+0.4% at f64 n = 128 thr = 16** (1.581 vs 1.574 ms; table E), inside
-  the 2% bar. The instrumented call itself is within 2% of the unmodified one (1.0% at f64 n = 128). At 8T the phase sum is
+  unmodified call in every cell, and **+0.4% at f64 n = 128 thr = 16** (1.581 vs 1.574 ms; table E). The
+  instrumented call itself is within 2% of the unmodified one in every cell but one: **+2.5% at c64 n =
+  64, 8T, thr = 16** (0.327 vs 0.319 ms), at most +1.8% elsewhere (f64 n = 64, 1T: 0.389 vs 0.382). At 8T the phase sum is
   thread-time across concurrent nodes and exceeds the wall time by construction (+47-62%). The 8T statement is
   therefore made from the critical-path estimate (per-node time per level, multiplied by how many nodes of that
   level run one after another), which matches the measured call within 1.0-1.9%.

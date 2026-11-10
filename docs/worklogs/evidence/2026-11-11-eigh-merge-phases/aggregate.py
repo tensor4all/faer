@@ -2,7 +2,9 @@
 """tensor4all/faer#391 increment 1: recompute every table of the worklog from the raw CSV.
 
 usage: python3 aggregate.py phases-raw.csv [counts-raw.csv [revision-raw.csv]]
-Every value is the median over the 5 processes of the per-call value one process reports.
+Every row is the median over the 5 processes of the per-call value one process reports. Rows that add
+several phases are sums of those medians, not medians of per-process totals; the coverage table prints the
+latter. The count-only CSV (table C) holds one observation per counter.
 """
 import csv, sys, statistics as st
 from collections import defaultdict
