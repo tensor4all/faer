@@ -43,11 +43,12 @@ fn rnd(k: u64) -> f64 {
 /// One call's outcome: the result, the eigenvalues, and `u` as an owned matrix.
 type Outcome<T> = (Result<(), EvdError>, Vec<T>, Mat<T>);
 
-/// `self_adjoint_evd` into a column-major, a row-major and a generic-strided `u` (each zeroed),
-/// from the same input and the same scratch request.
+/// `self_adjoint_evd` into a column-major, a row-major and a generic-strided `u`, each filled
+/// with the same pattern `init` first, from the same input and the same scratch request.
 fn three_layouts<T: ComplexField>(
 	a: MatRef<'_, T>,
 	par: Par,
+	init: &dyn Fn(usize, usize) -> T,
 ) -> [Outcome<T>; 3] {
 	let n = a.nrows();
 	// QR iteration below 8, divide and conquer from 8: both sides at small sizes
@@ -74,13 +75,15 @@ fn three_layouts<T: ComplexField>(
 		);
 		(r, (0..n).map(|i| s[i].clone()).collect::<Vec<_>>())
 	};
-	let mut col = Mat::<T>::zeros(n, n);
+	let mut col = Mat::<T>::from_fn(n, n, init);
 	let (rc, sc) = run(col.as_mut());
-	let mut row = vec![zero::<T>(); n * n];
+	let mut row: Vec<T> = (0..n * n).map(|k| init(k / n, k % n)).collect();
 	let (rr, sr) = run(MatMut::from_row_major_slice_mut(&mut row, n, n));
 	let row = MatRef::from_row_major_slice(&row, n, n).to_owned();
 	// every other row of a column-major `2n x n` buffer: neither stride is 1
-	let mut buf = Mat::<T>::zeros(2 * n, n);
+	let mut buf = Mat::<T>::from_fn(2 * n, n, |i, j| {
+		if i % 2 == 0 { init(i / 2, j) } else { zero() }
+	});
 	let cs = buf.col_stride();
 	// SAFETY: rows 0, 2, .., 2n - 2 of the `2n x n` column-major buffer
 	let generic =
@@ -90,16 +93,57 @@ fn three_layouts<T: ComplexField>(
 	[(rc, sc, col), (rr, sr, row), (rg, sg, generic)]
 }
 
-fn check<T: ComplexField>(a: MatRef<'_, T>, finite: bool, par: Par) {
+/// Returns how many entries of `u` a failed real solve left as the caller set them.
+fn check<T: ComplexField>(
+	a: MatRef<'_, T>,
+	finite: bool,
+	par: Par,
+	init: &dyn Fn(usize, usize) -> T,
+) -> usize {
 	let n = a.nrows();
 	let threads = par.degree();
 	let what = format!(
 		"{} n = {n}, {threads} thread(s)",
 		core::any::type_name::<T>()
 	);
-	let [(rc, sc, uc), (rr, sr, ur), (rg, sg, ug)] = three_layouts(a, par);
+	let [(rc, sc, uc), (rr, sr, ur), (rg, sg, ug)] =
+		three_layouts(a, par, init);
 	assert_eq!(rc, rr, "{what}: the row-major call's result differs");
 	assert_eq!(rc, rg, "{what}: the generic-strided call's result differs");
+	let mut kept = 0;
+	// A failed solve (`self_adjoint_evd`): a real one leaves the entries of `u` it had not
+	// reached as the caller left them, a complex one leaves all of `u`. Every `u` started at
+	// the same nonzero pattern, so the entries still holding it are the untouched ones, and
+	// they must be the same entries in every layout.
+	if !finite && rc.is_err() {
+		let untouched = |u: &Mat<T>| -> Vec<(usize, usize)> {
+			(0..n)
+				.flat_map(|j| (0..n).map(move |i| (i, j)))
+				.filter(|&(i, j)| bits(&u[(i, j)]) == bits(&init(i, j)))
+				.collect()
+		};
+		let kc = untouched(&uc);
+		if !T::IS_REAL {
+			assert_eq!(
+				kc.len(),
+				n * n,
+				"{what}: a failed complex solve wrote u"
+			);
+		}
+		assert_eq!(
+			untouched(&ur),
+			kc,
+			"{what}: row-major u: untouched entries differ"
+		);
+		assert_eq!(
+			untouched(&ug),
+			kc,
+			"{what}: generic-strided u: untouched entries differ"
+		);
+		if T::IS_REAL {
+			kept = kc.len();
+		}
+	}
 	for i in 0..n {
 		assert!(
 			bits(&sc[i]) == bits(&sr[i]),
@@ -155,9 +199,15 @@ fn check<T: ComplexField>(a: MatRef<'_, T>, finite: bool, par: Par) {
 			}
 		}
 	}
+	kept
 }
 
 fn check_type<T: ComplexField>(make: impl Fn(f64, f64) -> T) {
+	// nonzero and different at every position (the imaginary part for complex `T`)
+	let init = |i: usize, j: usize| {
+		make(1.0 + i as f64 + 10.0 * j as f64, 0.5 + j as f64)
+	};
+	let mut kept = 0;
 	for n in [1usize, 2, 5, 17, 40] {
 		let hermitian = Mat::<T>::from_fn(n, n, |i, j| {
 			let (p, q) = if i >= j { (i, j) } else { (j, i) };
@@ -170,10 +220,19 @@ fn check_type<T: ComplexField>(make: impl Fn(f64, f64) -> T) {
 		for (a, finite) in
 			[(hermitian.as_ref(), true), (poisoned.as_ref(), false)]
 		{
-			check(a, finite, Par::Seq);
+			kept += check(a, finite, Par::Seq, &init);
 			#[cfg(feature = "threadteam")]
-			faer::team::with_team(4, |par| check(a, finite, par));
+			faer::team::with_team(4, |par| {
+				kept += check(a, finite, par, &init)
+			});
 		}
+	}
+	// the failure-path assertion has something to see: some failed real solve left entries
+	if T::IS_REAL {
+		assert!(
+			kept > 0,
+			"no failed real solve left an untouched entry of u"
+		);
 	}
 }
 
