@@ -38,8 +38,10 @@ which that cell ran in its own process.
   `divide_and_conquer` is entered and immediately falls back to QR because its first test is
   `n <= qr_fallback_threshold` with the same 128. The fork's own gate trace (`cost::trace`,
   built with `par-trace`) shows no `tridiag_evd` decision being asked at all at n = 128, so the
-  D&C fork is not declined - it is never reached. MKL's `?syevd` runs divide and conquer at
-  these sizes (its `?stedc` scales 1.22-1.50x from 1T to 8T at n = 64..128).
+  D&C fork is not declined - it is never reached. MKL's `?syevd` is expected to take its D&C route
+  at these sizes - its own `?stedc` scales 1.22-1.50x from 1T to 8T at n = 64..128 - but the
+  driver internal branch was not traced here, since table B times `?sytrd` and `?stedc` as
+  separate calls.
 - **The measured consequence of that threshold, not a hypothesis:** `recursion_threshold = 16`
   (D&C at every size, the only knob, no code change) gives, at 8T, f64 n = 64 0.472 ms (default
   0.565), n = 96 1.043 (1.263), n = 128 1.627 (2.391) - **16-32% off the call** - and c64 0.568
@@ -75,9 +77,11 @@ which that cell ran in its own process.
 - What the tables establish: (A) the faer/MKL ratio per dtype, order, size and thread budget;
   (B) the stage split, with MKL's own `?sytrd`/`?stedc` measured on the *same* tridiagonal, the
   sum of faer's three stages closing with `self_adjoint_evd` within 2.6% at 1T and 4.6% at 8T
-  except f64 n = 64 at 8T (-11.0%) and f64 n = 256 at 8T (+8.4%) - the residual is the
-  lower-triangle copy, the team dispatch and each region's fill/drain, which no single stage row
-  contains (a stage probe that does not close would not be a decomposition); (C) the threshold
+  except f64 n = 64 at 8T (+11.0%) and f64 n = 256 at 8T (-8.4%); the residual is the
+  lower-triangle copy, the team dispatch and each region's fill/drain, none of which a stage row
+  contains. At f64 n = 256 8T the three rows already sum to more than the whole call, so that
+  difference is left unexplained, not attributed (each stage row takes its own timestamps);
+  (C) the threshold
   knob; (D) the raw samples of the cells under test.
 - **Hypothesis (1) is half right, and the half that is wrong matters.** MKL does use divide and
   conquer where faer uses QR, and that is the mechanism. But "add a small-size D&C branch" is
@@ -86,8 +90,9 @@ which that cell ran in its own process.
   the threshold gets the 13-32% and stops.
 - **What remains unverified.**
   - Whether a parallel QR leaf (deflated blocks as tasks) beats lowering the threshold. The
-    threshold knob is measured; a threaded QR is not, and it is the only route that also fixes
-    the 1T gap (where D&C is only 9% better at n = 128 and nothing at n = 64/96).
+    threshold knob is measured; a threaded QR is not, and it is the route that can move the 1T
+    gap at n = 64/96 too, where the knob is neutral. At n = 128 the knob already gives 9% (f64)
+    and 4% (c64) at 1T, so it is not the only 1T improvement available.
   - How much of MKL's `?stedc` advantage is its merge implementation rather than its parallelism.
     At 1T MKL is 1.55-1.94x faster than faer's QR at n = 64..128 (f64), so part of the gap
     survives any parallelisation of faer's current algorithm.
