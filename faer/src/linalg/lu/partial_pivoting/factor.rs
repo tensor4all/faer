@@ -356,6 +356,14 @@ fn swap_stage_width<T: ComplexField>(
 /// column of `mat`.
 fn apply_transpositions<I: Index, T: ComplexField>(mat: MatMut<'_, T>, trans: &[I]) {
 	let mut mat = mat;
+	// a row-major block swaps whole rows, each a contiguous run (tensor4all/faer#314): the column
+	// walk below would touch a cache line per element
+	if is_row_major(mat.rb()) {
+		for (j, &t) in trans.iter().enumerate() {
+			swap_rows_idx(mat.rb_mut(), j, t.zx() + j);
+		}
+		return;
+	}
 	for j in 0..mat.ncols() {
 		let mut col = mat.rb_mut().col_mut(j);
 		for (j, &t) in trans.iter().enumerate() {
@@ -363,13 +371,94 @@ fn apply_transpositions<I: Index, T: ComplexField>(mat: MatMut<'_, T>, trans: &[
 		}
 	}
 }
+/// Whether `mat` is row-major (`|col_stride| = 1`, `|row_stride| != 1`): the layout the native
+/// row-major path of [`lu_in_place`] takes (tensor4all/faer#314). A matrix with one row or one
+/// column has a unit stride on both sides when it is contiguous and counts as column-major.
+#[inline]
+fn is_row_major<T>(mat: MatRef<'_, T>) -> bool {
+	mat.col_stride().unsigned_abs() == 1 && mat.row_stride().unsigned_abs() != 1
+}
+
+/// The leaf of a row-major matrix: the `m x w` panel (columns `start..end`, `w` at most the
+/// recursion threshold) is copied into the column-major `buf`, factored there by the column-major
+/// leaf -- the same search, swaps and arithmetic, so the same pivots and the same bits -- and
+/// copied back; the panel's row swaps then reach the other columns of `A` as whole-row swaps,
+/// which are contiguous in this layout. `buf` holds at least `m * w` elements.
+fn lu_in_place_unblocked_row_major<I: Index, T: ComplexField>(
+	A: MatMut<'_, T>,
+	start: usize,
+	end: usize,
+	trans: &mut [I],
+	buf: &mut [T],
+) -> usize {
+	let mut A = A;
+	let (m, w) = (A.nrows(), end - start);
+	if w == 0 {
+		return 0;
+	}
+	let mut panel = MatMut::from_column_major_slice_mut(&mut buf[..m * w], m, w);
+	copy_panel(panel.rb_mut(), A.rb().subcols(start, w));
+	let n_trans = lu_in_place_unblocked(panel.rb_mut(), 0, w, trans);
+	copy_panel(A.rb_mut().subcols_mut(start, w), panel.rb());
+	let (left, right) = A.split_at_col_mut(start);
+	apply_transpositions(left, &trans[..w]);
+	let rest = right.ncols() - w;
+	apply_transpositions(right.subcols_mut(w, rest), &trans[..w]);
+	n_trans
+}
+
+/// `dst = src` for a leaf panel (`m x w`, `w` at most the recursion threshold), a row at a time:
+/// one side is row-major, so each row is a contiguous run of `w` elements on that side and `w`
+/// column streams on the other. Measured against [`linalg::copy_across_layouts_block`]'s tiles on
+/// a `4096 x 256` `f64` matrix (Apple M5 Max, one thread): the panel copies of a factorization,
+/// with the leaves' swaps of the other columns, took 0.69 ms this way against 1.58 ms through the
+/// tiles.
+fn copy_panel<T: ComplexField>(dst: MatMut<'_, T>, src: MatRef<'_, T>) {
+	let mut dst = dst;
+	let (m, w) = src.shape();
+	for i in 0..m {
+		for j in 0..w {
+			dst[(i, j)] = src[(i, j)].copy();
+		}
+	}
+}
+
+/// The column-major panel buffer of [`lu_in_place_unblocked_row_major`] for an `m x n` matrix
+/// factored over `n` columns: `m * min(n, recursion_threshold)` elements, as every leaf is at most
+/// that wide and has at most `m` rows (the leaves run one after the other, so one buffer serves
+/// them all). Empty unless `A` is row-major.
+fn row_major_leaf_buffer<T: ComplexField>(
+	A: MatRef<'_, T>,
+	n: usize,
+	params: &PartialPivLuParams,
+) -> alloc::vec::Vec<T> {
+	if !is_row_major(A) {
+		return alloc::vec::Vec::new();
+	}
+	let w = Ord::min(n, Ord::max(params.recursion_threshold, 1));
+	alloc::vec![zero::<T>(); A.nrows() * w]
+}
+
 pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
+	A: MatMut<'_, T>,
+	start: usize,
+	end: usize,
+	trans: &mut [I],
+	par: Par,
+	params: Spec<PartialPivLuParams, T>,
+) -> usize {
+	let mut buf = row_major_leaf_buffer(A.rb(), end - start, &params.config);
+	lu_in_place_recursion_imp(A, start, end, trans, par, params, &mut buf)
+}
+
+fn lu_in_place_recursion_imp<I: Index, T: ComplexField>(
 	A: MatMut<'_, T>,
 	start: usize,
 	end: usize,
 	trans: &mut [I],
 	mut par: Par,
 	params: Spec<PartialPivLuParams, T>,
+	leaf_buf: &mut [T],
 ) -> usize {
 	let params = params.config;
 	let mut A = A;
@@ -377,6 +466,9 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 	let ncols = A.ncols();
 	let n = end - start;
 	if n <= params.recursion_threshold {
+		if is_row_major(A.rb()) && leaf_buf.len() >= m * n {
+			return lu_in_place_unblocked_row_major(A, start, end, trans, leaf_buf);
+		}
 		return lu_in_place_unblocked(A, start, end, trans);
 	}
 	let half = n / 2;
@@ -387,13 +479,14 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 	// The left half sees only its own columns: its transpositions reach the right half in the
 	// trailing update below, inside the same section as the solve, so each worker swaps the rows
 	// of the columns it then solves instead of the caller swapping them alone beforehand.
-	n_trans += lu_in_place_recursion(
+	n_trans += lu_in_place_recursion_imp(
 		A.rb_mut().get_mut(.., start..start + block_size),
 		0,
 		block_size,
 		&mut trans[..block_size],
 		par.reborrow(),
 		params.into(),
+		leaf_buf,
 	);
 	{
 		let mut A = A.rb_mut().get_mut(.., start..end);
@@ -448,13 +541,14 @@ pub(crate) fn lu_in_place_recursion<I: Index, T: ComplexField>(
 				par_here,
 			);
 		});
-		n_trans += lu_in_place_recursion(
+		n_trans += lu_in_place_recursion_imp(
 			A.rb_mut().get_mut(block_size..m, ..),
 			block_size,
 			n,
 			&mut trans[block_size..n],
 			par.reborrow(),
 			params.into(),
+			leaf_buf,
 		);
 	}
 	let swap = |mat: MatMut<'_, T>| apply_transpositions(mat, &trans[..n]);
@@ -637,6 +731,39 @@ pub(crate) fn has_generic_strides(
 ) -> bool {
 	row_stride.unsigned_abs() != 1 && col_stride.unsigned_abs() != 1
 }
+/// Whether [`lu_in_place`] factors an `m x n` view with these strides on `threads` threads
+/// through a column-major copy of the whole matrix (tensor4all/faer#314). Column-major input never
+/// does. Otherwise the shape has to be tall or square and past [`linalg::row_major_copy_pays`]'s
+/// floor, and then:
+///
+/// - generic strides (neither stride 1) always take the copy;
+/// - row-major input (`|col_stride| = 1`) is factored in place on one thread, and takes the copy on
+///   more threads once `m * n >= 256 * 256`.
+///
+/// The in-place path copies each leaf panel (`m x recursion_threshold`) into a column-major
+/// buffer and back, one leaf after the other, so it moves the whole matrix twice on one thread;
+/// the copy moves it twice on every thread. `lu_in_place` on row-major input, in place over the
+/// copy (median time; f64; Apple M5 Max, not pinned, a loaded host, so indicative): one thread
+/// 0.65-0.84 on `64`, `128`, `512`, `2048`, `4096 x 256`; eight threads 0.68 at `64`, 0.87-0.97
+/// at `128`, `192` and `512 x 64`, 1.00 at `256`, and 1.05-1.16 at `1024 x 64`, `512 x 128`,
+/// `384`, `512`, `2048`, 1.42 at `4096 x 256`. Eight threads is the only team width measured.
+/// A wide matrix never took the copy; in place it runs at 0.25 (one thread) and 0.33 (eight) of
+/// the strided factorization it replaces at `256 x 4096`.
+#[inline]
+pub(crate) fn takes_the_copy(
+	nrows: usize,
+	ncols: usize,
+	row_stride: isize,
+	col_stride: isize,
+	threads: usize,
+) -> bool {
+	let row_major = col_stride.unsigned_abs() == 1;
+	row_stride.unsigned_abs() != 1
+		&& nrows >= ncols
+		&& ncols > 1
+		&& linalg::row_major_copy_pays(nrows, ncols)
+		&& (!row_major || (threads > 1 && nrows * ncols >= 256 * 256))
+}
 pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 	A: MatMut<'_, T>,
 	perm: &'out mut [I],
@@ -660,21 +787,28 @@ pub fn lu_in_place<'out, I: Index, T: ComplexField>(
 	let mut stack = stack;
 	let m = matrix.nrows();
 	let n = matrix.ncols();
-	// Row-major input: the unblocked core walks each pivot column twice (the
-	// search, then the scaling) and the swap stage swaps elements inside a
-	// column, which is a cache line per element when the columns are not
-	// contiguous -- `size * m` touches that way against `m * n` elements the copy
-	// moves contiguously twice. Factor a column-major copy and write the factor
-	// back, which is what LAPACK's row-major interface pays internally; the
-	// arithmetic is the copy's, so the factor and the permutation are the
-	// column-major ones. The guard is the panel's own cost model, the same one
-	// `qr_in_place` states: a wide matrix has `size == m` over `n` columns, where
-	// the copy would cost more than it saved.
-	if matrix.row_stride().unsigned_abs() != 1
-		&& matrix.nrows() >= matrix.ncols()
-		&& matrix.ncols() > 1
-		&& linalg::row_major_copy_pays(matrix.nrows(), matrix.ncols())
-	{
+	// Row-major input (`|col_stride| = 1`) is factored in place where `takes_the_copy` says so
+	// (tensor4all/faer#314): the recursion copies each leaf panel (`m x recursion_threshold` at
+	// most) into a column-major buffer and runs the column-major leaf on it, the row swaps move
+	// whole rows, which are contiguous in this layout, and the triangular solves and products take
+	// row-major operands as they are. No `m x n` buffer is allocated then.
+	//
+	// The copy (generic strides, and row-major input on a team from `256 * 256`): the unblocked core walks each pivot
+	// column twice (the search, then the scaling) and the swap stage swaps
+	// elements inside a column, which is a cache line per element when the
+	// columns are not contiguous -- `size * m` touches that way against `m * n`
+	// elements the copy moves contiguously twice. Factor a column-major copy and
+	// write the factor back; the arithmetic is the copy's, so the factor and the
+	// permutation are the column-major ones. The guard is the panel's own cost
+	// model, the same one `qr_in_place` states: a wide matrix has `size == m`
+	// over `n` columns, where the copy would cost more than it saved.
+	if takes_the_copy(
+		matrix.nrows(),
+		matrix.ncols(),
+		matrix.row_stride(),
+		matrix.col_stride(),
+		par.degree(),
+	) {
 		let mut work = linalg::column_major_copy(matrix.rb(), par.reborrow());
 		let mut work = MatMut::from_column_major_slice_mut(&mut work, m, n);
 		let ret = lu_in_place(
