@@ -127,7 +127,7 @@ The four `GEMM`/`GEMV` ones:
 
 | Test | Property |
 | --- | --- |
-| `matmul::blas::*::gemm_matches_the_source_dimension_sweep` | `C = alpha*op(A)*op(B) + beta*C` equals an independently accumulated product for `'N'`/`'T'`/`'C'` on either operand, both `Accum` values and `alpha` 0/1/-2/0.5, over `(m, n, k)` including `m`, `n` and `k` = 0; both operands are unchanged |
+| `matmul::blas::*::gemm_matches_the_source_dimension_sweep` | `C = alpha*op(A)*op(B) + beta*C` equals an independently accumulated product for `'N'`/`'T'`/`'C'` on either operand, both `Accum` values and `alpha` 0/1/-2/0.5, over `(m, n, k)` including `m`, `n` and `k` = 0; each operand still equals an independently built copy of the same values (a persistent mutation is caught, one that also rewrites the copy is not) |
 | `matmul::blas::*::gemm_reads_the_destination_only_when_it_accumulates` | `Accum::Replace` produces the product from a NaN-filled destination (the source's `beta = 0` "`C` need not be set on entry"), and `Accum::Add` brings the NaN back, so the two arms are distinguishable rather than both silently correct |
 | `matmul::blas::*::gemv_matches_the_source_dimension_sweep` | the same `alpha`/`beta`/empty-direction sweep for `y = alpha*op(A)*x + beta*y`, on both matvec routes (`ncols == 1` and `nrows == 1`) |
 | `matmul::blas::*::gemv_zeroes_the_destination_of_an_empty_reduction` | with `k = 0`, `Accum::Replace` zeroes the destination and `Accum::Add` returns it unchanged |

@@ -175,9 +175,10 @@ fn gemm_reads_the_destination_only_when_it_accumulates() {
 #[test]
 fn gemv_matches_the_source_dimension_sweep() {
 	// DCHK1 GEMV: `y = alpha * op(A) * x + beta * y`, through `matmul`'s
-	// `ncols == 1` route, and its transpose (`nrows == 1`) sibling. The
-	// source's `din2` sweeps `n = 0, 1, 2, 3, 5, 9, 63` with `m` just below
+	// `ncols == 1` route, and its transpose (`nrows == 1`) sibling.
+	// `test/dblat2.dat` sweeps `n = 0, 1, 2, 3, 5, 9, 63` with `m` just below
 	// and just above `n`, so the two empty directions are real cases there.
+	// The CBLAS `ctest/din2` starts at 1 and does not reach them.
 	for (m, k) in [(0, 0), (0, 3), (3, 0), (1, 1), (3, 2), (2, 3), (5, 4)] {
 		let a = Mat::<Scalar>::from_fn(m, k, |i, j| integer(i, j + 1));
 		let a_before = a.clone();
