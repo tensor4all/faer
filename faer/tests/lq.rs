@@ -215,7 +215,20 @@ fn views<T: ComplexField>(m: usize, n: usize) {
 #[cfg(feature = "threadteam")]
 fn team_agrees<T: ComplexField>(m: usize, n: usize) {
 	let k = Ord::min(m, n);
-	let a = sample_mat::<T>(m, n, 0.5);
+	// `Q` is compared entry by entry against `200 n eps`, which holds only for a
+	// well-conditioned leading block: `Q` moves by about `cond * eps` under any
+	// change of summation order. `sample_mat` alone gives condition numbers of
+	// 1e9-1e11 at these shapes (257x129: 1.4e9, its leading 129x129 block 4.3e10),
+	// so the comparison passed only while the team and the sequential run did the
+	// same arithmetic; the staged LQ panel (tensor4all/faer#314) runs the
+	// column-major kernels, whose threaded paths sum in a different order
+	// (column-major c64 QR on `main` differs by 3.4e-7 between the two on the
+	// same matrix, both reconstructing it to 7e-16). The shift brings the
+	// condition number to at most 21.
+	let mut a = sample_mat::<T>(m, n, 0.5);
+	for i in 0..k {
+		a[(i, i)] = a[(i, i)].clone() + T::from_f64(16.0);
+	}
 	let block_size = Ord::max(
 		factor::recommended_block_size::<T>(m, n).min(Ord::max(k, 1)) / 2,
 		1,
