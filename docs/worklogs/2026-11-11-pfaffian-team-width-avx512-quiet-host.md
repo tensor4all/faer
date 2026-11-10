@@ -16,8 +16,9 @@ off.
 
 The work is a validation of an existing code path, not a change: no library
 source moved for it. Evidence: `evidence/2026-11-11-pfaffian-quiet-host.tar.gz`
-(topology, binaries, the harness, every run's stdout and guard log, the test
-logs).
+(topology, the binary hashes in `binaries.sha256`, the harness sources, every
+run's stdout and guard log, and the build and test logs; the executable
+binaries, the matrix inputs and `pinned.sh` are not in the archive).
 
 ## Decisions
 
@@ -151,10 +152,10 @@ the SMT twin helps)**
   `V4` lane runs and returns the right answer (below); against the `V3` build it
   buys 2.5–7.6 % on `c64` Seq and 6.1–9.4 % on the `c64` Team cells from n = 64 to
   512, and 3.6–5.9 % on the `c64` Team cells at n = 1024, while `f64` is neutral
-  to −6 %: +3.9 % at n = 64 Seq and slower in five Team cells (0.989 at 128
-  Team8, 0.997 at 256 Team8, 0.943 at 512 Team16, 0.968 at 1024 Team8, 0.951 at
-  1024 Team16). Doubling the register width does not move the factorization much
-  because the n = 1024 cells are out of cache (8 MiB domain) and the small cells
+  to −6 %: +3.9 % at n = 64 Seq and slower in seven of the eight Team cells
+  (0.989 at 128 Team8, 0.976 at 128 Team16, 0.997 at 256 Team8, 0.959 at 256
+  Team16, 0.943 at 512 Team16, 0.968 at 1024 Team8, 0.951 at 1024 Team16).
+  Doubling the register width does not move the factorization much because the n = 1024 cells are out of cache (8 MiB domain) and the small cells
   are bound by the serial panel and the dispatch, not the vector ALU. This is the
   execution evidence that `2026-10-31-pfaffian.md` recorded as unperformed.
 - **The Team path scales to the width the host has.** Team8 over Seq is
@@ -170,7 +171,7 @@ the SMT twin helps)**
 - **The #176 4x target still misses at n = 256 and meets at n ≥ 512.**
   `best 1T / Team8` with the best measured 1-thread arm (Fortran PFAPACK or
   faer's own Seq, whichever is faster in that cell) is 1.01–1.26 at n = 64,
-  1.59–1.78 at 128, **2.85–3.00 at 256**, 4.05–4.25 at 512 and 5.74–5.93 at
+  1.59–1.78 at 128, **2.85–3.00 at 256**, 4.05–4.25 at 512 and 5.74–5.98 at
   1024. At n = 256 faer's own Seq is the fastest 1-thread implementation, so the
   Team8 factor there is the parallel factor, not a serial-deficit artefact.
 - **The small-size serial criterion is still missed at n = 64 `f64`**:
@@ -184,10 +185,12 @@ the SMT twin helps)**
   and extreme-scale cases and the team-agreement/row-dispatch cases; the held-team
   no-allocation test `tests/no_step_alloc.rs` is **1 passed** in each. All four
   runs are in the evidence.
-- **Cross-build agreement is exact.** Over the 40 (n, dtype) cells × 4 widths,
-  the `V4` build returns a Pfaffian *bit-identical* to the `V3` build
-  (max relative difference 0.0, not merely below tolerance), and both agree with
-  the Fortran PFAPACK reference inside 5.8e-13 relative.
+- **Cross-build agreement is exact.** Over the 10 (n, dtype) cells × 4 widths
+  (40 input/width combinations per build), the `V4` build returns a Pfaffian
+  identical to the `V3` build in every one of the 18 printed significant digits
+  (max relative difference 0.0 on the printed values, not merely below
+  tolerance), and both agree with the Fortran PFAPACK reference inside 5.8e-13
+  relative.
 - **The one named `#86` symptom that also runs here passes**: the full-pivot unit
   test `linalg::lu::full_pivoting::factor::tests::test_gh238` passes in the
   `x86-v4` build on this host (and in the default build). That is one test on one
