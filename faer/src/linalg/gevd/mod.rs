@@ -1652,6 +1652,24 @@ pub fn gevd_real<T: RealField>(
 /// right eigenvectors in $U_R$
 ///
 /// the values in $A$ and $B$ after this function is called are unspecified.
+///
+/// # range of scales
+///
+/// as for [`gevd_real`], $(A, B)$ is not prescaled into a safe range, so the
+/// result is scale invariant only within a range of scales $s$ of $(sA, sB)$.
+/// the eigenvector back substitution divides with a scaled complex reciprocal
+/// and was not what limited the range in any measured case. in `c64`, for the
+/// three well-conditioned pencils of `faer/tests/gevd_scaled_pencil.rs`
+/// (entries of order $s$), the eigenvalues and eigenvectors were measured
+/// finite and equal to those of $s = 1$ to $10^{-13}$ for every $s = 10^k$ with
+/// $10^{-295} \le s \le 10^{307}$, which contains the range
+/// $[10^{-150}, 10^{160}]$ that tensor4all/faer#370 asked about; the lower end
+/// depends on the pencil ($10^{-297}$ and $10^{-307}$ for the other two). below
+/// it the QZ underflows and this function returns `Ok` with finite but
+/// inaccurate results (measured between $10^{-306}$ and $10^{-296}$: errors
+/// from just above $10^{-13}$ up to eigenvalues that no longer match any of
+/// $s = 1$); scale $A$ and $B$ by a power of two before the
+/// call and $\alpha$, $\beta$ back afterwards.
 #[track_caller]
 pub fn gevd_cplx<T: ComplexField>(
 	A: MatMut<'_, T>,
