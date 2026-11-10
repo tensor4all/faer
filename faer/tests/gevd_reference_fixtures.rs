@@ -322,6 +322,43 @@ fn check(fixture: &str) -> Worst {
 	}
 
 	let mut w = Worst::default();
+	// the match has to preserve conjugate pairs: the `rconde == 0` branch below
+	// records a distance but has no bound to compare it against, so a corrupted
+	// member of a pair could consume an unbounded reference entry in silence.
+	// compare eigenvalues, not `alpha`: `dggev` writes a pair as conjugate
+	// `alpha` with two different `beta`, so only the quotients are conjugate
+	// (and only to the 17 digits the fixture was written at)
+	let eig_ours: Vec<c64> = (0..n).map(|i| o.alpha[i] / o.beta[i]).collect();
+	let eig_ref: Vec<c64> = (0..n).map(|j| f.alpha[j] / f.beta[j]).collect();
+	let near_conj =
+		|x: c64, y: c64| (x - y.conj()).norm() <= 1e-12 * (1.0 + x.norm());
+	for i in 0..n {
+		if eig_ours[i].im == 0.0 {
+			continue;
+		}
+		let j = to_ref[i];
+		let mut partner = false;
+		for l in 0..n {
+			if l == i || !near_conj(eig_ours[l], eig_ours[i]) {
+				continue;
+			}
+			partner = true;
+			let k = to_ref[l];
+			if !near_conj(eig_ref[k], eig_ref[j]) {
+				w.failures.push(format!(
+					"{}: conjugate pair ({i}, {l}) ({:?}, {:?}) is matched onto reference ({j}, {k}) ({:?}, {:?}), which is not a pair",
+					f.name, eig_ours[i], eig_ours[l], eig_ref[j], eig_ref[k]
+				));
+			}
+		}
+		if !partner {
+			w.failures.push(format!(
+				"{}: eigenvalue {i} ({:?}) is complex but has no conjugate partner",
+				f.name, eig_ours[i]
+			));
+		}
+	}
+
 	for i in 0..n {
 		let j = to_ref[i];
 		let dist = chordal(o.alpha[i], o.beta[i], f.alpha[j], f.beta[j]);
