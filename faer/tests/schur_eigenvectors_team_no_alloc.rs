@@ -31,17 +31,24 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 struct Counting;
 static COUNTING: AtomicBool = AtomicBool::new(false);
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+/// Sizes of the first counted allocations, so a failure says what allocated.
+static SIZES: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
+
+fn note(size: usize) {
+	if COUNTING.load(Ordering::Relaxed) {
+		let i = ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+		if i < SIZES.len() {
+			SIZES[i].store(size, Ordering::Relaxed);
+		}
+	}
+}
 unsafe impl GlobalAlloc for Counting {
 	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
+		note(layout.size());
 		unsafe { System.alloc(layout) }
 	}
 	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
+		note(layout.size());
 		unsafe { System.alloc_zeroed(layout) }
 	}
 	unsafe fn realloc(
@@ -50,9 +57,7 @@ unsafe impl GlobalAlloc for Counting {
 		layout: Layout,
 		new_size: usize,
 	) -> *mut u8 {
-		if COUNTING.load(Ordering::Relaxed) {
-			ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		}
+		note(new_size);
 		unsafe { System.realloc(ptr, layout, new_size) }
 	}
 	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -148,7 +153,7 @@ real!(f64);
 complex!(c32, f32);
 complex!(c64, f64);
 
-/// Allocations of the second of two identical calls on the team (the first is the warm-up), for
+/// Allocations of the third of three identical calls on the team (the first two are warm-up), for
 /// a column-major (`row_major == false`) or row-major `t` and `x`. Checks the eigenvectors of
 /// the counted call independently: `t x - x diag(t)` against `256 n eps |t|` and unit columns.
 fn warm_allocations<T: Scalar>(
@@ -181,12 +186,24 @@ fn warm_allocations<T: Scalar>(
 			MemStack::new(&mut mem),
 		);
 	};
+	// Two identical calls before the counted one: the first creates the team workers and the
+	// per-thread working buffers; on a loaded runner a worker can still be created on the second
+	// (tensor4all/faer#362: one run reported 3 allocations for f64 at n = 1024 F, while the run
+	// four minutes earlier reported 0 on a test file that differed only in a comment). The
+	// steady state is the third call.
+	call(&mut x, par);
 	call(&mut x, par);
 	ALLOCATIONS.store(0, Ordering::SeqCst);
 	COUNTING.store(true, Ordering::SeqCst);
 	call(&mut x, par);
 	COUNTING.store(false, Ordering::SeqCst);
 	let count = ALLOCATIONS.load(Ordering::SeqCst);
+	if count != 0 {
+		let sizes: Vec<usize> = (0..count.min(SIZES.len()))
+			.map(|i| SIZES[i].load(Ordering::Relaxed))
+			.collect();
+		eprintln!("counted call allocated {count} times, sizes {sizes:?}");
+	}
 
 	let x = if row_major {
 		x.as_ref().transpose()
