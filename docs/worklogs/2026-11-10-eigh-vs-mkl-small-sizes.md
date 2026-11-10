@@ -7,6 +7,13 @@ Measured revision: `1ac38c6d7bab168c4478c9e2379a5bd9e69a2272` (fork `main`, clea
 kernels, `x86-v4` off). MKL 2026.1 (`libmkl_rt.so.3`, Intel OpenMP), driver links the fork by
 path and MKL in one process.
 
+Every number below is recomputed from
+[`evidence/2026-11-10-eigh-raw-samples.csv`](evidence/2026-11-10-eigh-raw-samples.csv) - 420
+cell rows, each with its `samples_ms` column - by the script at the end of this record
+(reproduction A/B/C/layout). Tables A and D are the **pooled median of all 15 samples** of a
+cell (3 sessions x 5 reps); tables B and C are the median of the 5 samples of one session, in
+which that cell ran in its own process.
+
 ## Decisions
 
 - **The loss is one stage, not the whole call.** `self_adjoint_evd` splits into the
@@ -14,11 +21,17 @@ path and MKL in one process.
   (`tridiagonal_self_adjoint_evd`) and the block-Householder apply onto `U`. At n = 64..128 the
   middle one is **76% of the f64 call** (53-57% for c64, where the complex apply is itself
   large) and is the only stage slower than MKL's counterpart: f64 n = 128 at 1T is 1.772 ms
-  against MKL's `?stedc` 0.915 ms (**1.94x**). Stage 1 is at parity with MKL's `?sytrd` there
-  (0.335 vs 0.338 ms), and stage 3 is 2.7x *faster* than the reflector apply left inside MKL's
-  `?syevd` (0.199 ms against 0.540 ms, the latter derived as `?syevd` minus `?sytrd` minus
-  `?stedc`). The 1T gap of the whole call (2.318 vs 1.793, 1.29x) is therefore *smaller* than
-  stage 2's own gap: stage 3 pays part of it back.
+  against MKL's `?stedc` 0.915 ms (**1.94x**), and c64 is 1.754 against 0.920 (**1.91x**).
+  Stage 1 is at parity with MKL's `?sytrd` there (0.335 vs 0.338 ms) and stage 3 costs 0.199 ms.
+- **The rest of MKL's `?syevd` is unattributed, not measured.** `?syevd` exceeds its own
+  `?sytrd` plus `?stedc` by 0.084 / 0.195 / 0.544 / 3.460 / 22.296 ms at f64 n = 64..512 1T
+  (table B, `MKL remainder`). That time contains whatever else the driver does - the reflector
+  apply, the copy, the scaling - but this record did not probe which, so it is **not** called
+  the reflector apply and it is not compared with faer's stage 3. What the arithmetic does
+  establish is the direction of the whole-call gap: faer's stage 2 is 0.857 ms slower than
+  MKL's `?stedc` at f64 n = 128 1T, yet the whole call is only 0.525 ms slower (2.321 vs
+  1.796, 1.29x), because MKL's unattributed remainder (0.544 ms) is larger than faer's stage 3
+  (0.199 ms).
 - **Below n = 128 the tridiagonal eigenproblem has no parallel route at all**, which is why faer
   gains nothing from 8 threads in that band while MKL does. `qr_algorithm` takes no `Par`; the
   entry gate is `n < params.recursion_threshold` (default 128), and at exactly n = 128
@@ -30,21 +43,27 @@ path and MKL in one process.
 - **The measured consequence of that threshold, not a hypothesis:** `recursion_threshold = 16`
   (D&C at every size, the only knob, no code change) gives, at 8T, f64 n = 64 0.472 ms (default
   0.565), n = 96 1.043 (1.263), n = 128 1.627 (2.391) - **16-32% off the call** - and c64 0.568
-  (0.654), 1.173 (1.494), 2.049 (2.780) - **13-26%**. faer/MKL at 8T moves from 1.77/1.86/1.94 to
-  1.48/1.52/1.32 for f64, and from 0.95/1.08/1.22 to 0.83/0.84/0.91 for c64: the complex cells
-  flip from a small loss to a win. At 1T the knob is neutral at n = 64 and 96 (+1% / -1%) and
-  9-10% better at n = 128 (2.105 vs 2.318). So the default is not wrong at 1T; it is wrong at 8T,
-  where D&C's merge is cheaper than a serial QR of the same tridiagonal.
+  (0.654), 1.173 (1.494), 2.049 (2.780) - **13-26%**. faer/MKL at 8T moves from 1.77/1.85/1.94 to
+  1.47/1.52/1.32 for f64, and from 0.96/1.08/1.22 to 0.83/0.84/0.91 for c64: the complex cells
+  flip from a small loss to a win. At 1T the knob is neutral at n = 64 and 96 (f64 -1% / +1%,
+  c64 -5% / +1%) and better at n = 128 (2.105 vs 2.318, 9% for f64; 3.161 vs 3.287, 4% for
+  c64). It is not limited to the band: at 8T it is also worth 8% at f64 n = 256 (6.088 vs 6.649)
+  and 3% at c64 n = 256 (8.909 vs 9.222), and 1% at n = 512. So the default is not wrong at 1T;
+  it is wrong at 8T, where D&C's merge is cheaper than a serial QR of the same tridiagonal, and
+  slightly wrong at 8T above the band as well.
 - **Hypothesis (2) (thread start-up) is real but an order of magnitude too small to explain
   2x.** f64 stage 1 at 8T is 0.71x (n = 96) and 0.79x (n = 128) of its own 1T time: the parallel
   gate opens a region that does not pay, costing 20-29% of a stage that is 15% of the call.
   MKL's `?sytrd` loses the same way (0.71x, 0.77x), so this is not a fork-specific defect.
-- **Hypothesis (3) (row-major vs column-major) is refuted at this size.** faer's c and f cells
-  differ by at most 1.0% (f64 n = 64: 0.508 vs 0.505; c64 n = 512: 105.20 vs 105.58), and the
-  mechanism is in the source:
+- **Hypothesis (3) (row-major vs column-major) is refuted at this size, within measured
+  bounds.** faer's c and f cells differ by at most **0.68% at 1T and 1.70% at 8T** (worst cell
+  f64 n = 256 both times; median 0.28% / 0.49%); MKL's differ by up to 2.62% at 1T (f64 n = 96,
+  c 0.898 vs f 0.875) and 5.03% at 8T (f64 n = 64, c 0.336 vs f 0.320). Those are the bounds over
+  the 20 cells measured; nothing outside them is claimed. faer's order difference is two orders
+  of magnitude below the 77-94% loss at 8T, and the mechanism is in the source:
   `self_adjoint_evd` copies the lower triangle into a contiguous temporary
   (`trid.copy_from_triangular_lower(A)`) before any kernel sees it, so the caller's order never
-  reaches a kernel. MKL's row-major entry point is 1.4-2.7% slower than its column-major one.
+  reaches a kernel.
 - **Not implemented.** The knob is worth 13-32% at 8T, but after it faer is still 1.3-1.5x behind
   MKL on the f64 cells at 8T and 1.2x at 1T, so a threshold change alone does not reach parity
   and the remaining question is a design one (a parallel QR leaf, a threaded D&C merge, or MKL's
@@ -54,9 +73,9 @@ path and MKL in one process.
 ## Verification conclusions and constraints
 
 - What the tables establish: (A) the faer/MKL ratio per dtype, order, size and thread budget;
-  (B) the stage split, with MKL's own `?sytrd`/`?stedc` measured on the *same* tridiagonal, and
-  the sum of faer's three stages closing with `self_adjoint_evd` within 2.6% at 1T and 4.6% at
-  8T, except f64 n = 64 at 8T (-11%) and f64 n = 256 at 8T (+8.4%) - the residual is the
+  (B) the stage split, with MKL's own `?sytrd`/`?stedc` measured on the *same* tridiagonal, the
+  sum of faer's three stages closing with `self_adjoint_evd` within 2.6% at 1T and 4.6% at 8T
+  except f64 n = 64 at 8T (-11.0%) and f64 n = 256 at 8T (+8.4%) - the residual is the
   lower-triangle copy, the team dispatch and each region's fill/drain, which no single stage row
   contains (a stage probe that does not close would not be a decomposition); (C) the threshold
   knob; (D) the raw samples of the cells under test.
@@ -68,10 +87,12 @@ path and MKL in one process.
 - **What remains unverified.**
   - Whether a parallel QR leaf (deflated blocks as tasks) beats lowering the threshold. The
     threshold knob is measured; a threaded QR is not, and it is the only route that also fixes
-    the 1T gap (where D&C is only 10% better at n = 128 and nothing at n = 64/96).
+    the 1T gap (where D&C is only 9% better at n = 128 and nothing at n = 64/96).
   - How much of MKL's `?stedc` advantage is its merge implementation rather than its parallelism.
-    At 1T MKL is 1.55-1.94x faster than faer's QR at n = 64..128, so part of the gap survives
-    any parallelisation of faer's current algorithm.
+    At 1T MKL is 1.55-1.94x faster than faer's QR at n = 64..128 (f64), so part of the gap
+    survives any parallelisation of faer's current algorithm.
+  - What MKL's `?syevd` does with the 0.084-22.296 ms its `?sytrd` and `?stedc` do not account
+    for (table B). Not probed, so not attributed.
   - The complex path's trailing work (the `scale` normalisation and the complex combine after the
     real tridiagonal solve) is not a separate row: table B's c64 stage 2 is the real solve, which
     is what `self_adjoint_evd` runs for a complex input; the stage sum closes within 2.6% at 1T,
@@ -105,21 +126,27 @@ path and MKL in one process.
 ### If we do implement: the options and what each buys
 
 1. **Lower the D&C entry threshold when the team is wider than one** (make
-   `SelfAdjointEvdParams::recursion_threshold` a function of `par.degree()`, or change the
-   `n <= qr_fallback_threshold` fallback to `<`). Measured effect: 13-32% off the call at 8T for
-   n = 64..128, 0-10% at 1T, no change at n >= 256. Risk: the D&C merge's accuracy path is
-   different from QR's; the fork's own `lapack_self_adjoint_evd_*` and spectrum-accuracy tests
-   already cover both thresholds (the QR/D&C choice is a parameter there), so the regression
-   surface is the accuracy fixtures, not new code. Cost: one gate, no new algorithm.
+   `SelfAdjointEvdParams::recursion_threshold` a function of `par.degree()`). Measured effect:
+   13-32% off the call at 8T for n = 64..128, 8% at f64 n = 256, 3% at c64 n = 256, 1% at
+   n = 512, and -5% to +9% at 1T.
+   Those numbers belong to `recursion_threshold = 16` **only**. The other edit that reads like the
+   same thing - relaxing the fallback from `n <= qr_fallback_threshold` to `n <` - is a different
+   change and is **not measured**: it would leave n = 64 and 96 on QR (their entry gate `n <
+   recursion_threshold` is still true) and would move only n = 128 into D&C, which is where table
+   C's largest gain sits (32% at 8T) but the edit itself was not run, so no number is claimed for
+   it. Risk: the D&C merge's accuracy path differs from QR's; the fork's own
+   `lapack_self_adjoint_evd_*` and spectrum-accuracy tests already run both thresholds (the
+   QR/D&C choice is a parameter there), so the regression surface is those fixtures, not new
+   code. Cost: one gate, no new algorithm.
 2. **Parallelise the QR leaf** (deflated blocks as tasks inside `qr_algorithm`). This is the only
    option that can move the 1T gap too, and it is what would let n = 64/96 use a threshold
    without paying D&C's merge. Risk: the eigenvector chase is a sequential recurrence over
    rotations; block-parallel variants change the arithmetic order, so it needs its own accuracy
    and residual tests. Unmeasured.
-3. **Leave it.** The band is 1.8-1.9x behind MKL at 8T and 1.3x at 1T; faer already wins at 512
-   at 1T (0.84x) but loses it at 8T (1.21x), and wins complex at 1T (0.62-0.83x). If the target is
-   the campaign's win rate rather than this band, option 1 is the cheapest 13-32% and option 3 is
-   defensible.
+3. **Leave it.** The band is 1.77-1.94x behind MKL at 8T (f64) and 1.29-1.38x at 1T; faer already
+   wins f64 n = 512 at 1T (0.84x) but loses it at 8T (1.22x), and wins complex at 1T (0.76-0.83
+   over n = 64..128, 0.63 at n = 512). If the target is the campaign's win rate rather than this
+   band, option 1 is the cheapest 13-32% and option 3 is defensible.
 
 ## Evidence
 
@@ -128,39 +155,43 @@ both repositories (the fork carries no benchmark harness): it links this checkou
 `libmkl_rt` in one process, sizes every workspace with the library's own `*_scratch`, primes
 each cell for 250 ms and takes 5 samples, and restores every input outside the clock.
 
-### A. `eigh` faer (owning `self_adjoint_eigen`) vs MKL `?syevd`
+### A. `eigh` faer (owning `self_adjoint_eigen`) vs MKL `?syevd`, ms
 
-Median of 15 samples (3 sessions x 5 reps), prime 250 ms per cell, CPU boost off.
+Pooled median of the 15 samples (3 sessions x 5 reps) of each cell, prime 250 ms per cell,
+CPU boost off; `docs/worklogs/evidence/2026-11-10-eigh-raw-samples.csv` filtered to the cell
+(reproduction A). Table D is the same statistic cell by cell, so A and D agree exactly.
 
 | dtype | order | n | faer 1T | MKL 1T | faer/MKL | faer 8T | MKL 8T | faer/MKL | faer 1T->8T | MKL 1T->8T |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| f64 | c | 64 | 0.508 | 0.394 | 1.29 | 0.567 | 0.336 | 1.68 | 0.90x | 1.17x |
-| f64 | c | 96 | 1.202 | 0.898 | 1.34 | 1.272 | 0.728 | 1.75 | 0.95x | 1.23x |
-| f64 | c | 128 | 2.314 | 1.841 | 1.26 | 2.388 | 1.263 | 1.89 | 0.97x | 1.46x |
-| f64 | c | 256 | 9.930 | 9.888 | 1.00 | 6.664 | 5.339 | 1.25 | 1.49x | 1.85x |
-| f64 | c | 512 | 49.120 | 60.196 | 0.82 | 25.075 | 21.476 | 1.17 | 1.96x | 2.80x |
-| f64 | f | 64 | 0.505 | 0.387 | 1.31 | 0.564 | 0.318 | 1.77 | 0.90x | 1.22x |
-| f64 | f | 96 | 1.203 | 0.881 | 1.37 | 1.275 | 0.687 | 1.86 | 0.94x | 1.28x |
-| f64 | f | 128 | 2.321 | 1.793 | 1.29 | 2.397 | 1.233 | 1.94 | 0.97x | 1.45x |
-| f64 | f | 256 | 9.998 | 9.755 | 1.02 | 6.761 | 5.141 | 1.31 | 1.48x | 1.90x |
-| f64 | f | 512 | 49.405 | 59.105 | 0.84 | 25.257 | 20.834 | 1.21 | 1.96x | 2.84x |
-| c64 | c | 64 | 0.639 | 0.800 | 0.80 | 0.655 | 0.702 | 0.93 | 0.98x | 1.14x |
-| c64 | c | 96 | 1.660 | 2.021 | 0.82 | 1.503 | 1.402 | 1.07 | 1.10x | 1.44x |
-| c64 | c | 128 | 3.301 | 4.376 | 0.75 | 2.744 | 2.308 | 1.19 | 1.20x | 1.90x |
-| c64 | c | 256 | 17.505 | 26.212 | 0.67 | 9.188 | 10.723 | 0.86 | 1.91x | 2.44x |
-| c64 | c | 512 | 105.199 | 169.258 | 0.62 | 41.286 | 51.746 | 0.80 | 2.55x | 3.27x |
-| c64 | f | 64 | 0.640 | 0.790 | 0.81 | 0.656 | 0.688 | 0.95 | 0.98x | 1.15x |
-| c64 | f | 96 | 1.658 | 1.996 | 0.83 | 1.499 | 1.391 | 1.08 | 1.11x | 1.44x |
-| c64 | f | 128 | 3.303 | 4.324 | 0.76 | 2.756 | 2.261 | 1.22 | 1.20x | 1.91x |
+| f64 | c | 64 | 0.508 | 0.394 | 1.29 | 0.567 | 0.336 | 1.69 | 0.90x | 1.17x |
+| f64 | c | 96 | 1.203 | 0.898 | 1.34 | 1.273 | 0.700 | 1.82 | 0.94x | 1.28x |
+| f64 | c | 128 | 2.316 | 1.841 | 1.26 | 2.387 | 1.263 | 1.89 | 0.97x | 1.46x |
+| f64 | c | 256 | 9.930 | 9.891 | 1.00 | 6.661 | 5.336 | 1.25 | 1.49x | 1.85x |
+| f64 | c | 512 | 49.123 | 60.196 | 0.82 | 25.076 | 21.396 | 1.17 | 1.96x | 2.81x |
+| f64 | f | 64 | 0.506 | 0.387 | 1.31 | 0.567 | 0.320 | 1.77 | 0.89x | 1.21x |
+| f64 | f | 96 | 1.203 | 0.875 | 1.38 | 1.273 | 0.687 | 1.85 | 0.95x | 1.27x |
+| f64 | f | 128 | 2.321 | 1.796 | 1.29 | 2.397 | 1.233 | 1.94 | 0.97x | 1.46x |
+| f64 | f | 256 | 9.998 | 9.755 | 1.02 | 6.776 | 5.141 | 1.32 | 1.48x | 1.90x |
+| f64 | f | 512 | 49.413 | 59.158 | 0.84 | 25.301 | 20.773 | 1.22 | 1.95x | 2.85x |
+| c64 | c | 64 | 0.639 | 0.801 | 0.80 | 0.655 | 0.707 | 0.93 | 0.98x | 1.13x |
+| c64 | c | 96 | 1.660 | 2.022 | 0.82 | 1.503 | 1.400 | 1.07 | 1.10x | 1.44x |
+| c64 | c | 128 | 3.302 | 4.376 | 0.75 | 2.742 | 2.308 | 1.19 | 1.20x | 1.90x |
+| c64 | c | 256 | 17.520 | 26.212 | 0.67 | 9.208 | 10.752 | 0.86 | 1.90x | 2.44x |
+| c64 | c | 512 | 105.199 | 169.258 | 0.62 | 41.305 | 51.806 | 0.80 | 2.55x | 3.27x |
+| c64 | f | 64 | 0.640 | 0.791 | 0.81 | 0.657 | 0.687 | 0.96 | 0.98x | 1.15x |
+| c64 | f | 96 | 1.658 | 1.997 | 0.83 | 1.499 | 1.391 | 1.08 | 1.11x | 1.44x |
+| c64 | f | 128 | 3.302 | 4.324 | 0.76 | 2.758 | 2.261 | 1.22 | 1.20x | 1.91x |
 | c64 | f | 256 | 17.580 | 25.926 | 0.68 | 9.291 | 10.541 | 0.88 | 1.89x | 2.46x |
 | c64 | f | 512 | 105.580 | 167.972 | 0.63 | 41.803 | 51.011 | 0.82 | 2.53x | 3.29x |
 
-### B. stage split, ms (each cell its own process, order f)
+### B. stage split, ms (one cell per process, order f)
 
 faer stages are `tridiag::tridiag_in_place`, `tridiagonal_self_adjoint_evd` (with vectors),
 `apply_block_householder_sequence_on_the_left_in_place_with_conj`. MKL stages are `?sytrd`/
 `?hetrd` and `?stedc` (`compz='I'`) on the *same* tridiagonal faer's stage 1 produced.
-`faer total` is `self_adjoint_evd` in place; `MKL total` is `?syevd` from table A.
+`faer self_adjoint_evd` is the in-place route, `MKL ?syevd` is table A's column.
+`MKL remainder` is `?syevd` minus `?sytrd` minus `?stedc`: **not** attributed to a stage.
+Reproduction B.
 
 **f64**
 
@@ -181,12 +212,16 @@ faer stages are `tridiag::tridiag_in_place`, `tridiagonal_self_adjoint_evd` (wit
 | faer stage 3 (reflector apply) | 1T | 0.036 | 0.096 | 0.199 | 1.335 | 9.779 |
 | faer stage 3 (reflector apply) | 8T | 0.037 | 0.066 | 0.109 | 0.419 | 2.796 |
 | faer stage 3 (reflector apply) | 1T/8T | 0.98x | 1.47x | 1.83x | 3.18x | 3.50x |
-| faer total (3 stages) | 1T | 0.503 | 1.193 | 2.305 | 9.842 | 48.435 |
-| faer total (3 stages) | 8T | 0.502 | 1.234 | 2.303 | 7.208 | 25.190 |
+| sum of faer's three stages | 1T | 0.503 | 1.193 | 2.305 | 9.842 | 48.435 |
+| sum of faer's three stages | 8T | 0.502 | 1.234 | 2.303 | 7.208 | 25.190 |
 | faer `self_adjoint_evd` | 1T | 0.508 | 1.200 | 2.318 | 9.884 | 49.282 |
 | faer `self_adjoint_evd` | 8T | 0.565 | 1.263 | 2.391 | 6.649 | 25.814 |
-| MKL `?syevd` | 1T | 0.387 | 0.881 | 1.793 | 9.755 | 59.105 |
-| MKL `?syevd` | 8T | 0.318 | 0.687 | 1.233 | 5.141 | 20.834 |
+| MKL `?syevd` | 1T | 0.387 | 0.875 | 1.796 | 9.755 | 59.158 |
+| MKL `?syevd` | 8T | 0.320 | 0.687 | 1.233 | 5.141 | 20.773 |
+| MKL remainder (`?syevd` - `?sytrd` - `?stedc`) | 1T | 0.084 | 0.195 | 0.544 | 3.460 | 22.296 |
+| MKL remainder (`?syevd` - `?sytrd` - `?stedc`) | 8T | 0.062 | 0.067 | 0.183 | 0.816 | 4.424 |
+| faer residual (`self_adjoint_evd` - 3 stages) | 1T | 0.005 | 0.007 | 0.013 | 0.042 | 0.848 |
+| faer residual (`self_adjoint_evd` - 3 stages) | 8T | 0.062 | 0.029 | 0.089 | -0.558 | 0.624 |
 
 **c64**
 
@@ -207,34 +242,40 @@ faer stages are `tridiag::tridiag_in_place`, `tridiagonal_self_adjoint_evd` (wit
 | faer stage 3 (reflector apply) | 1T | 0.142 | 0.354 | 0.774 | 5.507 | 39.426 |
 | faer stage 3 (reflector apply) | 8T | 0.087 | 0.151 | 0.283 | 1.487 | 10.181 |
 | faer stage 3 (reflector apply) | 1T/8T | 1.63x | 2.35x | 2.74x | 3.70x | 3.87x |
-| faer total (3 stages) | 1T | 0.630 | 1.636 | 3.257 | 17.109 | 102.883 |
-| faer total (3 stages) | 8T | 0.624 | 1.448 | 2.651 | 8.827 | 40.002 |
+| sum of faer's three stages | 1T | 0.630 | 1.636 | 3.257 | 17.109 | 102.883 |
+| sum of faer's three stages | 8T | 0.624 | 1.448 | 2.651 | 8.827 | 40.002 |
 | faer `self_adjoint_evd` | 1T | 0.639 | 1.653 | 3.287 | 17.570 | 105.428 |
 | faer `self_adjoint_evd` | 8T | 0.654 | 1.494 | 2.780 | 9.222 | 41.147 |
-| MKL `?syevd` | 1T | 0.790 | 1.996 | 4.324 | 25.926 | 167.972 |
-| MKL `?syevd` | 8T | 0.688 | 1.391 | 2.261 | 10.541 | 51.011 |
+| MKL `?syevd` | 1T | 0.791 | 1.997 | 4.324 | 25.926 | 167.972 |
+| MKL `?syevd` | 8T | 0.687 | 1.391 | 2.261 | 10.541 | 51.011 |
+| MKL remainder (`?syevd` - `?sytrd` - `?stedc`) | 1T | 0.292 | 0.733 | 1.807 | 10.665 | 63.625 |
+| MKL remainder (`?syevd` - `?sytrd` - `?stedc`) | 8T | 0.163 | 0.344 | 0.457 | 2.639 | 14.769 |
+| faer residual (`self_adjoint_evd` - 3 stages) | 1T | 0.009 | 0.017 | 0.030 | 0.462 | 2.544 |
+| faer residual (`self_adjoint_evd` - 3 stages) | 8T | 0.030 | 0.046 | 0.128 | 0.396 | 1.146 |
 
 ### C. the `recursion_threshold` knob: `self_adjoint_evd` in place, ms
 
-`default` is 128 (the value `SelfAdjointEvdParams::auto` gives), `16` forces divide and
-conquer at every size, `usize::MAX` forces QR iteration at every size.
+`default` is 128 (what `SelfAdjointEvdParams::auto` gives), `16` is the knob
+`recursion_threshold = 16`, `QR forced` is `usize::MAX`. One cell per process, 5 samples.
+Reproduction C.
 
-| dtype | n | 1T default | 1T thr=16 | 1T QR forced | 8T default | 8T thr=16 | 8T QR forced | thr=16 vs default (8T) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| f64 | 64 | 0.508 | 0.514 | 0.506 | 0.565 | 0.472 | 0.564 | +16% |
-| f64 | 96 | 1.200 | 1.183 | 1.202 | 1.263 | 1.043 | 1.263 | +17% |
-| f64 | 128 | 2.318 | 2.105 | 2.327 | 2.391 | 1.627 | 2.386 | +32% |
-| f64 | 256 | 9.884 | 9.450 | 12.350 | 6.649 | 6.088 | 11.762 | +8% |
-| f64 | 512 | 49.282 | 48.716 | 76.401 | 25.814 | 25.430 | 67.711 | +1% |
-| c64 | 64 | 0.639 | 0.668 | 0.641 | 0.654 | 0.568 | 0.652 | +13% |
-| c64 | 96 | 1.653 | 1.630 | 1.649 | 1.494 | 1.173 | 1.494 | +21% |
-| c64 | 128 | 3.287 | 3.161 | 3.288 | 2.780 | 2.049 | 2.738 | +26% |
-| c64 | 256 | 17.570 | 17.220 | 19.764 | 9.222 | 8.909 | 13.954 | +3% |
-| c64 | 512 | 105.428 | 104.920 | 131.838 | 41.147 | 40.811 | 85.127 | +1% |
+| dtype | n | 1T default | 1T thr=16 | 1T QR forced | 8T default | 8T thr=16 | 8T QR forced | thr=16 vs default 1T | 8T |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| f64 | 64 | 0.508 | 0.514 | 0.506 | 0.565 | 0.472 | 0.564 | -1% | +16% |
+| f64 | 96 | 1.200 | 1.183 | 1.202 | 1.263 | 1.043 | 1.263 | +1% | +17% |
+| f64 | 128 | 2.318 | 2.105 | 2.327 | 2.391 | 1.627 | 2.386 | +9% | +32% |
+| f64 | 256 | 9.884 | 9.450 | 12.350 | 6.649 | 6.088 | 11.762 | +4% | +8% |
+| f64 | 512 | 49.282 | 48.716 | 76.401 | 25.814 | 25.430 | 67.711 | +1% | +1% |
+| c64 | 64 | 0.639 | 0.668 | 0.641 | 0.654 | 0.568 | 0.652 | -5% | +13% |
+| c64 | 96 | 1.653 | 1.630 | 1.649 | 1.494 | 1.173 | 1.494 | +1% | +21% |
+| c64 | 128 | 3.287 | 3.161 | 3.288 | 2.780 | 2.049 | 2.738 | +4% | +26% |
+| c64 | 256 | 17.570 | 17.220 | 19.764 | 9.222 | 8.909 | 13.954 | +2% | +3% |
+| c64 | 512 | 105.428 | 104.920 | 131.838 | 41.147 | 40.811 | 85.127 | +0% | +1% |
 
 ### D. raw samples of the cells under test (order f), ms
 
-Every sample of the 3 sessions (15 per cell).
+Every sample of the three sessions (15 per cell); the median column is table A's value.
+Reproduction A.
 
 | cell | samples | median |
 | --- | --- | ---: |
@@ -263,7 +304,45 @@ Every sample of the 3 sessions (15 per cell).
 | faer_eigen c64 128 8T | 2.7542, 2.7586, 2.7565, 2.7560, 2.7556, 2.7509, 2.7590, 2.7535, 2.7506, 2.7588, 2.7611, 2.7579, 2.7628, 2.7576, 2.7682 | 2.7576 |
 | mkl c64 128 8T | 2.2880, 2.2246, 2.2260, 2.2403, 2.2192, 2.2578, 2.2920, 2.2958, 2.2607, 2.2614, 2.2502, 2.2687, 2.3295, 2.2757, 2.3009 | 2.2614 |
 
-Between-session spread (max/min of the three session medians): median 0.3% (faer 1T),
-0.9% (faer 8T); one cell (`mkl c64 64 8T`) read 0.702 / 0.702 / 1.996 ms in the three
-sessions and was re-run three times at 0.699-0.706 ms, so the 1.996 is a discarded outlier,
-not the cell.
+## Reproduction
+
+From the repository root. `A` prints the rows of tables A and D, `B` the rows of table B and
+the two remainders, `C` the rows of table C, and `layout` the order bounds quoted above.
+
+```sh
+python3 - <<'PY'
+import csv, statistics as st
+rows = list(csv.DictReader(open('docs/worklogs/evidence/2026-11-10-eigh-raw-samples.csv')))
+def med(v, d, o, n, t):
+    return st.median([float(x) for r in rows
+        if (r['variant'], r['dtype'], r['order'], r['n'], r['threads']) == (v, d, o, str(n), str(t))
+        for x in r['samples_ms'].split(';')])
+N = (64, 96, 128, 256, 512)
+print('A')                                    # tables A and D
+for d in ('f64', 'c64'):
+    for o in 'cf':
+        for n in N:
+            f1, k1, f8, k8 = (med(v, d, o, n, t) for t in (1, 8) for v in ('faer_eigen', 'mkl'))
+            print(d, o, n, f'{f1:.3f} {k1:.3f} {f1/k1:.2f} {f8:.3f} {k8:.3f} {f8/k8:.2f} {f1/f8:.2f}x {k1/k8:.2f}x')
+print('B')                                    # table B, and the two remainders
+for d in ('f64', 'c64'):
+    for t in (1, 8):
+        for v in ('faer_tridiag', 'mkl_tridiag', 'faer_tridiag_evd', 'mkl_stage2', 'faer_apply', 'faer_evd', 'mkl'):
+            print(d, t, v, ' '.join(f'{med(v, d, "f", n, t):.3f}' for n in N))
+        s3 = [sum(med(v, d, 'f', n, t) for v in ('faer_tridiag', 'faer_tridiag_evd', 'faer_apply')) for n in N]
+        print(d, t, 'sum3', ' '.join(f'{x:.3f}' for x in s3))
+        print(d, t, 'MKL remainder', ' '.join(f'{med("mkl", d, "f", n, t) - med("mkl_tridiag", d, "f", n, t) - med("mkl_stage2", d, "f", n, t):.3f}' for n in N))
+        print(d, t, 'faer residual', ' '.join(f'{med("faer_evd", d, "f", n, t) - x:.3f}' for n, x in zip(N, s3)))
+print('C')                                    # table C
+for d in ('f64', 'c64'):
+    for n in N:
+        print(d, n, ' '.join(f'{med(v, d, "f", n, t):.3f}' for t in (1, 8)
+              for v in ('faer_evd', 'faer_evd_t16', 'faer_evd_qr')))
+print('layout')                               # the order bounds in the text
+for v in ('faer_eigen', 'mkl'):
+    for t in (1, 8):
+        w = max(((abs(med(v, d, 'c', n, t) / med(v, d, 'f', n, t) - 1) * 100, d, n)
+                 for d in ('f64', 'c64') for n in N))
+        print(v, t, f'max {w[0]:.2f}% at {w[1]} n={w[2]}')
+PY
+```
