@@ -88,8 +88,10 @@ triangular-solve base case for a column-major right-hand side. Neither is tried 
   (n = 64 / 128 / 256 / 512). Every cell is within 1.05x after the change.
 - Boost could not be switched off on the host (no sudo); the ratios are within one
   process with the layouts interleaved, which is what the 1.05x criterion compares.
-- Only n = 64-512 square, f64 and c64, 1T and 8T were timed; f32/c32 and larger sizes are
-  checked for correctness only (the bit-for-bit test covers f32/f64/c32/c64).
+- Only n = 64-512 square, f64 and c64, 1T and 8T were timed. f32/c32 are checked for
+  correctness only, by the bit-for-bit test at n = 1, 2, 5, 17, 40 (f32/f64/c32/c64). The
+  allocation guard runs the row-major `u` at n = 2-300 (f64/c64, x86_64 only) and counts
+  allocations, not correctness. Sizes above 512 are neither timed nor tested.
 - Tests: `faer/tests/self_adjoint_evd_row_major_u.rs` (bit for bit; red on `main` at f64
   n = 5), `faer/tests/evd_perf_warn.rs` (red on `main`: the row-major `u` warned), the
   row-major arm of `faer/tests/evd_svd_vectors_no_alloc.rs` (a guard, green on `main` too).

@@ -7,8 +7,9 @@
 //! comparison is what observes the path: only the column-major arithmetic gives these bits.
 //!
 //! Both sides of the solver's dispatch (`n < recursion_threshold`: QR iteration; otherwise divide
-//! and conquer), sequential and on a team, f32/f64/c32/c64, and a NaN input, whose failed solve
-//! must leave the same `u` (and the same error) in both layouts. A generic-strided `u` keeps the
+//! and conquer), sequential and on a team, f32/f64/c32/c64, and a NaN input, whose solve must
+//! leave the same `u` (and the same result) in both layouts and must not hide the NaN: it either
+//! returns an error or returns `Ok(())` with a NaN eigenvalue. A generic-strided `u` keeps the
 //! in-place path and is checked against the column-major one to a tolerance.
 #![cfg(feature = "std")]
 use faer::diag::Diag;
@@ -18,7 +19,7 @@ use faer::linalg::evd::{
 	self_adjoint_evd_scratch,
 };
 use faer::traits::ComplexField;
-use faer::traits::math_utils::{abs, conj, from_f64, zero};
+use faer::traits::math_utils::{abs, conj, from_f64, is_nan, zero};
 use faer::{Auto, Mat, MatMut, MatRef, Par, Spec, c32, c64};
 
 /// The bytes of a native scalar (`f32`, `f64`, `c32`, `c64`: no padding), to compare two results
@@ -135,6 +136,23 @@ fn check<T: ComplexField>(a: MatRef<'_, T>, finite: bool, par: Par) {
 				d <= &tol * &norm,
 				"{what}: generic-strided eigenvalue {i} off by {d:?}"
 			);
+		}
+	} else {
+		// `self_adjoint_evd` documents no NaN contract, and which way a poisoned solve goes
+		// depends on the size (measured at f64: `Ok` with NaN eigenvalues at n = 1, 2;
+		// `Err(NoConvergence)` from n = 5). What every case must do is not hide the poison:
+		// either the call fails, or a NaN reaches the eigenvalues. The layout comparison above
+		// cannot see this on its own: a solver that returned `Ok(())` without writing would
+		// leave three equal zero buffers.
+		for (layout, r, s) in
+			[("column-major", &rc, &sc), ("generic-strided", &rg, &sg)]
+		{
+			if r.is_ok() {
+				assert!(
+					s.iter().any(|x| is_nan(x)),
+					"{what}: NaN input, {layout} u: Ok(()) with no NaN eigenvalue: {s:?}"
+				);
+			}
 		}
 	}
 }
