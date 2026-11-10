@@ -66,15 +66,16 @@ Worst cell against the base: **+0.32%** (8T c64 128), as the run's own aggregati
 interleaved process sets gives it (the per-process observations are in the raw CSVs, not in the
 repository). Worst effect of the clause over the arm without it: **+0.37%** (same cell); the clause's win at 256 is 9.2-12.3% (f64), 4.1-6.9% (c64) and 1.6-3.2% (c32).
 
-Guard cells -- the QR/LQ routes whose packed destination has a power-of-two stride (`copy_r` /
-`copy_l`, f64, order c, five sets), with the working-set gate evaluated per cell as `2 * m * n * 8`
-bytes against `TILE_COPY_CACHE_BYTES` = 4 MiB: `qr_factor 2048x256` 8 MiB (tiles in both arms) 1T
-0.990, 8T 1.001; `qr_factor 64x2048` 2 MiB (**the clause flips it from walk to tiles**) 1T 1.006, 8T
-0.997; `lq 2048x64` 2 MiB (**flipped**) 1T 1.010, 8T **1.025**; `lq 256x2048` 8 MiB (tiles in both)
-1T 0.998, 8T 0.996, all against the base `620b96a0`. So two of the four are the clause's cost in
-cells it does flip -- worst 2.5%, inside the 3% the issue set -- and the other two only show the
-pair's run-to-run spread. The #330 arm was not measured for any of them, so none of these numbers
-bounds the clause against #330.
+Guard cells -- the QR/LQ dispatch cells whose copied factor has a power-of-two destination
+stride, f64, order c, five sets. The copied factor is not the input matrix: `copy_r` on a
+`2048 x 256` input copies a `256 x 256` factor (1 MiB over both buffers), and `copy_l` on a
+`256 x 2048` input does the same; `copy_r` on `64 x 2048` and `copy_l` on `2048 x 64` copy 2 MiB.
+**All four are below `TILE_COPY_CACHE_BYTES`, so the clause flips every one of them** from the walk
+to the tiles -- they are the cells the clause changes, not controls. Measured against the base:
+`qr_factor 2048x256` 1T 0.990, 8T 1.001; `qr_factor 64x2048` 1T 1.006, 8T 0.997; `lq 2048x64` 1T
+1.010, 8T **1.025**; `lq 256x2048` 1T 0.998, 8T 0.996. The worst of them is +2.5%, inside the 3% the
+issue set. The #330 head was not measured on these four cells, so this table bounds the clause
+against the base and says nothing about its size relative to #330.
 
 Not measured, and therefore not claimed: f32; n = 1024 (tiled by the byte gate in both arms); tall and
 wide factors at other powers-of-two strides (`1024 x 64` etc.); whether 1024 bytes of stride aliases
