@@ -13,7 +13,11 @@ table B of the previous record). The instrumented build times every phase of eve
 revision gives the reference call time. The instrumentation is not part of this change; the patch used for
 the instrumented build is kept as
 [`evidence/2026-11-11-eigh-merge-phases/instrumentation.patch`](evidence/2026-11-11-eigh-merge-phases/instrumentation.patch)
-so that the phase boundaries and the allocation counters behind every table can be read.
+so that the phase boundaries and the allocation counters behind every table can be read. The probe binary
+that installs the counting global allocator is in
+[`evidence/2026-11-11-eigh-merge-phases/probe/`](evidence/2026-11-11-eigh-merge-phases/probe/); it increments
+the counter from `alloc`, `alloc_zeroed` and `realloc`, so allocations on every thread are counted, and it
+takes the counts from that counter around the timed window.
 
 All numbers are recomputed from
 [`evidence/2026-11-11-eigh-merge-phases/`](evidence/2026-11-11-eigh-merge-phases/) by its `aggregate.py`
