@@ -159,7 +159,8 @@ gates are never asked ("inferred" in the sense set out under the closing paragra
   feature counts the traced decisions in one clocked call:
   `decisions=26 parallel_yes=0` at 4T and `decisions=12 parallel_yes=0` at 8T, all from the
   `upgrade_above_floor` site, against `decisions=0` at 1T. That counter covers the `par_pays` and
-  `join_pays` sites only, so 26 is a lower bound on the decisions a 64x64 QR asks.
+  `join_pays` sites only, so 26 is a lower bound on the decisions a 64x64 QR asks. The bypass below
+  puts the gate at 1.24 us at 4T and 0.52 us at 8T, so this differential overstates it.
 * **1.1 us: a serial drift that is not attributed here.** 0.25.0's 1T run is 1.1 us slower than
   0.24.10's in the probe and 1.3 us slower in the harness (1.5% and 1.8%). At 1T the gates are not
   asked at all, so this is a change in the serial path or code layout, not a region cost. It is the
@@ -172,11 +173,47 @@ taken along one axis between the two revisions, and the three are chained, so
 2.2 + 1.3 = 4.6 us against 0.0773 - 0.0726 = 4.7 us at 8T, agree up to the rounding of each term,
 and would agree for any attribution whatsoever. What the measurements do support separately is the
 *axis*: the 4T-minus-1T difference lies on the code path the revisions differ in (the gate), and its
-cost is read off the timings, not from the decision counter. The cost of a declined gate was not
-measured on its own here: no run bypasses `pays_at` at the same width and compares, which is the
-comparison that would turn the gate term from an inference into a cause. It stays **unmeasured**.
-The `InPool` row is on the path and is what makes the gate decline — but on this reading the cost is
-the *declined parallelism plus the question*, not the entry.
+cost is read off the timings, not from the decision counter.
+
+### The gate, measured at the same width
+
+The comparison that turns the gate term from an inference into a measurement is a bypass at the
+same width, and it was run afterwards. `faer/src/utils/cost.rs` in the candidate was given a
+temporary env-gated override at its three gate entry points (`par_pays`, `join_pays`,
+`par_can_pay_time`): `FAER_GATE=0` answers "no" without computing the estimate, the shape or the
+comparison, `FAER_GATE=1` answers "yes", unset runs the rule. At these sizes the rule already
+answers "no" everywhere, so `unset` and `FAER_GATE=0` produce the same decision and the rest of the
+execution is identical: the difference between them is the gate and nothing else. One binary, one
+width, interleaved:
+
+```
+# qr_factor f64 F 64x64, four interleaved repetitions each, taskset -c 4-7 / 4-11
+GATE=unset 4t  0.076352  0.076632  0.076362  0.076262   median 0.076357
+GATE=0     4t  0.075160  0.075681  0.075070  0.074799   median 0.075115   -> 1.24 us
+GATE=unset 8t  0.075671  0.075360  0.075260  0.075090   median 0.075315
+GATE=0     8t  0.075270  0.074859  0.074529  0.074729   median 0.074794   -> 0.52 us
+```
+
+**The gate costs 1.24 us at 4T and 0.52 us at 8T** for this cell, against a recorded residual of
+4.3 us and 4.1 us. It is a real component and a minor one, and it is smaller than the 1.3-2.5 us
+the chained differential put on it. The override was compiled into a separate `-dirty` target
+directory; the clean binary the recorder built was left untouched, and the override was reverted
+afterwards.
+
+Forcing every gate to "yes" instead (`FAER_GATE=1`) takes the same cell to 0.1019 ms at 4T and
+0.1021 ms at 8T, +26 us: the rule's rejection is not obviously wrong, and the residual is not
+simply "the gate is too conservative". That arm forces *every* region open, which is not 0.24.10's
+set, so it bounds the wrong side and is not a stand-in for the baseline.
+
+What the bypass does not do is separate the estimate from the shape and the comparison; it removes
+all three. And it leaves the remainder of the residual unattributed: 4.3 - 1.24 = 3.1 us at 4T and
+4.1 - 0.52 = 3.6 us at 8T are not accounted for by any measurement here. The region counts and
+0.24.10's own 4T-versus-1T contrast (0.07490 against 0.07318 ms in the same direct runs, 1.72 us)
+point at the parallelism the candidate declines, but
+that is an inference, and 0.24.10's own contrast is not the same quantity as what the candidate
+would gain by taking those regions. The `InPool` row is on the path and is what makes the gate
+decline — but the cost is the *declined parallelism plus the question*, not the entry, and only the
+question has been measured.
 
 ## solve: the residual is one phase, and it is the same gate
 
@@ -201,11 +238,20 @@ triangular solve moves only at 4T/8T, while both revisions open **zero** regions
 path.
 
 So the "at least one serial cause" the issue inferred for `solve` does not exist on this host: the
-1T rows are flat (1.005, 1.007 in the harness; +0.2% in the probe). The 4T/8T residual is a
-differential attribution of the same kind as the QR one, not an isolated gate measurement: the
-`c4 - c1` / `c8 - c1` difference of `solve_in_place` is 0.72 / 0.61 us for F and 0.71 / 0.57 us for
-C, the gate is the only code the two revisions differ by on that axis, and its own cost was not
-measured separately here either.
+1T rows are flat (1.005, 1.007 in the harness; +0.2% in the probe). The `c4 - c1` / `c8 - c1`
+difference of `solve_in_place` is 0.72 / 0.61 us for F and 0.71 / 0.57 us for C, and the gate is the
+only code the two revisions differ by on that axis. The same-width bypass confirms it, on the
+recorded cell (three interleaved repetitions each):
+
+| cell | gate unset | `FAER_GATE=0` | gate cost | recorded residual |
+| --- | --- | --- | --- | --- |
+| solve f64 F 64x64 4T | 0.026529 | 0.025979 | **0.55 us** | 0.78 us |
+| solve f64 F 64x64 8T | 0.026991 | 0.026800 | **0.19 us** | 0.67 us |
+| solve f64 C 64x64 4T | 0.032270 | 0.032000 | **0.27 us** | 0.93 us |
+| solve f64 C 64x64 8T | 0.031790 | 0.031649 | **0.14 us** | 0.61 us |
+
+The gate is 0.14-0.55 us of a 0.61-0.93 us residual, so it accounts for 23-71% of it and is the
+largest identified term; the rest is inside the process-set spread of cells this small (0.2-0.5 us).
 
 ## Limitations
 
@@ -221,8 +267,17 @@ measured separately here either.
   flat 1T run — the 1T residual is real and still unattributed. The harness number is the one to
   quote as the residual and the probe's is the one that decomposes it, but the residual's size is
   known to two values, not one.
+* **Build-to-build and session-to-session variation is 0.8-1.3 us for these cells**, the same order
+  as the parts being discussed. The candidate built from the same tree with the (inert,
+  `FAER_GATE`-unset) override is 1.30 us faster at 1T and 0.84 us at 4T than the clean candidate
+  binary, interleaved three times each:
+  `clean 1t 0.075621 0.075581 0.075370 / patched 1t 0.074088 0.074529 0.074278`, and the
+  candidate's 4T reading moved by 1.1 us between two sessions of this record (0.07796 to 0.07684).
+  This is a measured contributor to the probe-versus-harness gap above, not an explanation of it:
+  no build of the probe was compared with itself, and the gap is 2.3 us. It is why a difference this
+  small is only resolvable within one binary, as the bypass above is.
 * `par-trace` counts the `par_pays`/`join_pays` decisions only, so the decision count is a lower
-  bound; the gate cost itself is measured as the 4T-minus-1T differential, not from the counter.
+  bound; the gate cost quoted above comes from the bypass, not from the counter.
 * The region counter is on `spindle::for_each`, which is where both revisions dispatch a Rayon-route
   region. It cannot see a region the 0.25 build would open through `threadteam`, because the
   measured binary does not enable that feature.
@@ -234,5 +289,6 @@ measured separately here either.
 ## Not changed
 
 No rate, region rule, threshold or `cost.rs` table was modified, and no probe was left in any
-checkout: `git status --porcelain` is empty in both measured revisions, and the probe crate lives
-outside the repository.
+checkout: the `FAER_GATE` override and the `spindle` counter were both reverted,
+`git status --porcelain` is empty in both measured revisions, and the probe crate lives outside the
+repository.
