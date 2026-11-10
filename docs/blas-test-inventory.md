@@ -7,9 +7,11 @@ and part of [#166](https://github.com/tensor4all/faer/issues/166). Port
 completion and numerical success are separate: this file records what was
 ported, what has no counterpart, and what stays unported.
 
-Two batches have landed: the triangular, rank-update and `norm_l2` ports
-([#349](https://github.com/tensor4all/faer/pull/349)), and the `GEMM`/`GEMV`
-boundary port. Which batch a row belongs to is in its `Port?` column.
+Three batches have landed: the triangular, rank-update and `norm_l2` ports
+([#349](https://github.com/tensor4all/faer/pull/349)), the `GEMM`/`GEMV` boundary
+port ([#373](https://github.com/tensor4all/faer/pull/373)), and the remainder
+port (`?dot`, `?gerc`, and the argument checks). Which batch a row belongs to is
+in its `Port?` column.
 
 ## Source and licence
 
@@ -31,11 +33,13 @@ Adapted files and the material changes to each are recorded in their headers:
 | --- | --- |
 | `faer/src/linalg/tests/blas_support.rs` | the shared oracles: `DMMCH` (independent product and ratio), `DMAKE` (rogue value in the part a routine must not access), `LDE`/`LDERES` (operand unchanged, referenced half only) |
 | `faer/src/linalg/matmul/tests/blas_trmm.rs` | `test/blat3.f` `DCHK3`, `DTRMM` |
-| `faer/src/linalg/matmul/tests/blas_rank_update.rs` | `test/blat2.f` `DCHK4` (`DGER`) and `DCHK5` (`DSYR`); `test/blat3.f` `DCHK4` (`DSYRK`) |
+| `faer/src/linalg/matmul/tests/blas_rank_update.rs` | `test/blat2.f` `DCHK4` (`DGER`), `ZCHK4` (`ZGERC`) and `DCHK5` (`DSYR`); `test/blat3.f` `DCHK4` (`DSYRK`) |
 | `faer/src/linalg/tests/blas_trsm_cases.rs` | `test/blat3.f` `DCHK3` (`DTRSM`); `test/blat2.f` `DCHK3` (`DTRSV`) |
 | `faer/src/linalg/matmul/tests/blas_gemm.rs` | `test/blat3.f` `DCHK1` (`DGEMM`); `test/blat2.f` `DCHK1` (`DGEMV`) |
+| `faer/src/linalg/matmul/tests/blas_dot.rs` | `test/blat1.f` `CHECK2` (`?dot`, `?dotc`, `?dotu`) |
+| `faer/src/linalg/matmul/tests/blas_arguments.rs` | `test/blat2.f` and `test/blat3.f` `DCHKE`; `test/xerbla_test.c`, `ctest/c_xerbla.c` and `ctest/cblas_test.h` |
 
-Material adaptations, common to the four suites: the source's random
+Material adaptations, common to these suites: the source's random
 `DBEG`/`DMAKE` sequence and its dimension sweep (`N = 0,1,2,3,7,31,63`, `LDA =
 N+1` padding, `alpha` 0.0/0.7/1.0) are replaced by bounded shapes with an
 exact-integer fixture and exact binary `alpha`, so the reference product is
@@ -66,7 +70,7 @@ exposes them.
 | --- | --- | --- | --- |
 | `CHECK1` `ISAMAX`/`IDAMAX` (index of the largest modulus) | none (`reductions::norm_max` returns the value, not the index) | no | faer has no index-reduction API; nothing to call |
 | `CHECK1` `SASUM`/`DASUM`, `SCASUM`/`DZASUM` | `reductions::norm_l1` (`abs1`, so the complex entries are `\|re\|+\|im\|`) | covered | `norm_l1::tests::test_norm_l1` runs its contiguous `f64` fixtures and, through `check_strided_complex`, a `c64` and a `c32` vector whose row stride is above 1 (the source's `incx = 2` half, which takes the strided fallback rather than the SIMD path). The source's 5-entry lengths and its negative strides are not ported |
-| `CHECK2` `SDOT`/`DDOT`/`CDOTU`/`ZDOTU`, `CDOTC`/`ZDOTC` | `matmul::dot::inner_prod` | no | the counterpart exists, but it has no unit test of its own (it is exercised only through the decompositions that call it), so the source's 5-entry dot over `incx`/`incy` in {1, 2, -2, -1} is a candidate for the next batch, not covered |
+| `CHECK2` `SDOT`/`DDOT`/`CDOTU`/`ZDOTU`, `CDOTC`/`ZDOTC` | `matmul::dot::inner_prod` | ported (`blas_dot.rs`) | the length list `NS = 0 1 2 4` and the increment lists (`INCXS = 1 2 -2 -1`, `INCYS = 1 -2 1 -2`) are the driver's own (`blat1.f:347-350`); the increment is the view's stride and a negative one is the same view built from its last element, and `?dotc` is `Conj::Yes` on the left operand. The source's 5-entry fixture and its scaled tolerance become an exact-integer fixture and an exact sum |
 | `CHECK2`/`CHECK3` `SAXPY`/`SCOPY`/`SSWAP`/`SSCAL`/`SROT`/`SROTG`, `CSSCAL`/`ZDSCAL`/`CROTG`/`CSROT` | none | no | no level-1 vector API in faer (the source sweeps `incx`/`incy` over {1, 2, -2, -1}) |
 | `CHECK1` `SNRM2`/`DNRM2`/`SCNRM2`/`DZNRM2` | `reductions::norm_l2`, `MatRef::norm_l2`, `ColRef::norm_l2` | covered | the source check is `n = 0..4` with `incx` 1/2 and small values; `norm_l2::tests::test_norm_l2_strided_range` already reads a stride-2 row view, and the exponent-range half of the property is [#36](https://github.com/tensor4all/faer/issues/36) / [faer-008](../upstream-reports/faer-008-norm-l2-strided-range/README.md) |
 
@@ -81,8 +85,8 @@ exposes them.
 | `DCHK4` `GER` | `matmul::matmul` with `K = 1` (the private `rank_update` module) | ported (`blas_rank_update.rs`) | the exact rank-1 update, including both destination layouts |
 | `DCHK5` `SYR`/`SPR` | `matmul_with_conj` with a triangular destination and `K = 1` | ported (`blas_rank_update.rs`) | `SPR`'s packed storage has no counterpart |
 | `DCHK6` `SYR2`/`SPR2` | none | no | two rank-1 terms, i.e. two calls; there is no single kernel to test |
-| `ZCHK4` `ZGERC`/`ZGERU` (complex only, `zblat2.f:165-166`) | `matmul::matmul` with `K = 1` (`ZGERU`, unconjugated) and `matmul::triangular::matmul_with_conj` with `Conj::Yes` on the row operand (`ZGERC`) | `ZGERU` covered, `ZGERC` no | the complex rank-1 test runs the unconjugated `K = 1` path, which is the `ZGERU` half of the pair. The conjugated form has the same counterpart with `Conj::Yes` but no test, so it is a next-batch candidate, not covered |
-| `ZCHK5` `ZHER`/`ZHPR` (complex only, `zblat2.f:167-168`) | `matmul_with_conj` with a triangular destination and `Conj::Yes` on the row operand | no | the `SYR`/`SPR` shape with the row operand conjugated; `ZHPR`'s packed storage has no counterpart. Deliberately unported in this batch |
+| `ZCHK4` `ZGERC`/`ZGERU` (complex only, `zblat2.f:165-166`) | `matmul::matmul` with `K = 1` (`ZGERU`, unconjugated) and `matmul::triangular::matmul_with_conj` with `Conj::Yes` on the row operand (`ZGERC`) | ported (`blas_rank_update.rs`) | `?geru` is the unconjugated `K = 1` path and `?gerc` the same call with `Conj::Yes` on the row operand; both run, and since conjugation is the identity for the real types the `?gerc` test returns immediately there |
+| `ZCHK5` `ZHER`/`ZHPR` (complex only, `zblat2.f:167-168`) | `matmul_with_conj` with a triangular destination and `Conj::Yes` on the row operand | `?her` partly (its `K = 1` arm of `blas_rank_update.rs`), `?hpr` no | the `SYR`/`SPR` shape with the row operand conjugated. It is `?herk` with `k = 1`: `symmetric_rank_k_update_writes_only_the_stored_triangle` already runs `(n, k) = (1, 1)` and `(3, 1)` with `Conj::Yes` on the second operand, so the product, the referenced-half rule and the rogue-value property are covered and this batch adds no separate test. What is *not* asserted is the reference contract faer does not implement: `?her` keeps the diagonal real on exit (its imaginary part dropped), while `matmul_with_conj` computes the algebraic `beta * C_ii + alpha * |x_i|^2`, so the imaginary part of `C_ii` survives `Accum::Add` (the same omission as `ZHERK`). `ZHPR`'s packed storage has no counterpart |
 | `ZCHK6` `ZHER2`/`ZHPR2` (complex only, `zblat2.f:169`) | none | no | two rank-1 terms, i.e. two calls, and `ZHPR2` is packed |
 | `ZCHK2` `ZHEMV`/`ZHBMV`/`ZHPMV` (complex only) | none | no | the Hermitian matvec siblings of the `SYMV` row above; the banded and packed storage has no counterpart |
 
@@ -112,16 +116,40 @@ does), and the complex-only rank updates are `ZCHK4` (`GERC`/`GERU`), `ZCHK5`
 | OpenBLAS file/check | faer counterpart | Port? | Reason |
 | --- | --- | --- | --- |
 | CBLAS row-major wrappers `c_{s,d,c,z}blas{1,2,3}.c` | views: `MatRef::transpose`, `MatMut::transpose_mut` | partly | the rank-1 test also runs a row-major destination (`transpose_mut` on a column-major buffer), which is the second `rank_update` branch; the numerical checks are the `test/` ones |
-| argument-error tests (`cblas_test.h`, `c_xerbla.c`, `blat2.f` `DCHKE`, `blat3.f` `DCHKE`) | `assert!`/panic preconditions in `matmul`, `matmul_with_conj`, `triangular_solve` | no | faer rejects a bad shape with a panic and has no XERBLA-style error return or info code |
+| argument-error tests (`cblas_test.h`, `c_xerbla.c`, `blat2.f` `DCHKE`, `blat3.f` `DCHKE`) | `assert!`/panic preconditions in `matmul`, `matmul_with_conj`, `triangular_solve` | ported (`blas_arguments.rs`) | faer rejects a bad shape with a panic and has no XERBLA-style error return or info code, so the port asserts the panic and the message naming the violated precondition instead of the argument index: an incompatible inner dimension (`matmul`), a mismatched `?dot` length, and a right-hand side whose row count does not match the triangle. `matmul_with_conj`'s destination-structure check has no arm, because removing it is not a safe mutation to run: the unguarded kernel would receive a non-square triangular destination |
 | `compare_sgemm_bgemm.c`, `compare_sgemm_sbgemm.c`, `compare_sgemm_shgemm.c`, `compare_sgemv_*.c` | none | no | bfloat16/half mixed-precision kernels do not exist in faer |
 | `xerbla_test.c`, `shgemm_test.c`, `test_laed3_nan.c`, `get_threading_model.c`, `wasm/` | none | no | OpenBLAS build and runtime specifics (XERBLA, SME kernels, its bundled LAPACK, thread-model query, wasm build) |
 
 ## What the ports establish
 
-Twelve test functions over four scalar types (`f64`, `f32`, `c64`, `c32`), 48
+Eighteen test functions over four scalar types (`f64`, `f32`, `c64`, `c32`), 72
 tests in the default (non-nightly) run: eight from the first batch (32 tests,
-`trmm`, `trsm`, `trsv`, rank-1 and rank-k) and four from the `GEMM`/`GEMV` batch
-(16 tests).
+`trmm`, `trsm`, `trsv`, rank-1 and rank-k), four from the `GEMM`/`GEMV` batch
+(16 tests), and six from this batch (24 tests: two `?dot`, one `?gerc` and three
+argument checks). The `matmul::blas::*` group is 56 of them.
+
+`?her` is the one column-4 name this batch does not add a test for: it is the
+`k = 1` arm of `?herk`, which the first batch's rank-k test already runs (see
+the `ZCHK5` row).
+
+This batch's six:
+
+| Test | Property |
+| --- | --- |
+| `matmul::blas::*::dot_matches_the_source_stride_sweep` | `?dot` over the driver's length list (`0 1 2 4`, plus 7) and its four increment pairs `(1, 1)`, `(2, -2)`, `(-2, 1)`, `(-1, -2)`, which are `INCXS(KI)` with `INCYS(KI)` in the same iteration; the buffer is NaN-filled between the referred entries and padded on both sides, so a kernel that ignores the increment reads a sentinel instead of the fixture. `?dotc` is the conjugated left-operand arm, and the two mixed arms the source cannot express run as well. Length 0 returns zero |
+| `matmul::blas::*::dot_reads_every_referenced_entry` | with the view's stride 1, 2 and -2, and on every conjugation arm, a NaN written into any referred entry of *either* operand reaches the sum as a NaN, and an infinity written there leaves it non-finite; so no referred entry, and no conjugation, can be skipped. The unreferred padding stays a NaN and does not reach the sum |
+| `matmul::blas::*::rank_one_update_conjugates_the_row_operand` | `?gerc` = `alpha * x * conj(y)^T + beta * A` for `Replace`/`Add` and `alpha` 0/1/-2/0.5 over `(m, n)` including 0, with `x` and `y` unchanged; the real types return immediately because the conjugation is the identity there, which is the `?geru` arm the first batch already covers |
+| `matmul::blas::*::matmul_panics_on_an_incompatible_inner_dimension` | a product whose inner dimensions disagree panics, and the panic names `lhs_ncols == rhs_nrows` |
+| `matmul::blas::*::inner_prod_panics_on_operands_of_different_length` | `?dot` of a length-3 row and a length-4 column panics, and the panic names the length check |
+| `matmul::blas::*::triangular_solve_panics_on_a_mismatched_right_hand_side` | a triangular solve whose right-hand side has the wrong row count panics, and the panic names `rhs.nrows() == triangular_lower.ncols()` |
+
+The three argument checks carry the shape rejection that the source's `DCHKE`
+reports through XERBLA. They are `should_panic` with the message as part of the
+assertion, so a panic anywhere else in the call does not pass them. Each shape
+is picked so that the unguarded call reads *less* than the arrays hold, which is
+what keeps the non-vacuity runs in bounds: `DCHKE` itself passes one-element
+arrays and relies on the routine rejecting the bad argument before touching
+them, a path faer does not have once the check is removed.
 
 The four `GEMM`/`GEMV` ones:
 
@@ -161,21 +189,21 @@ Counting the rows of the four tables above (30 checks):
 
 | Outcome | Checks | Which |
 | --- | --- | --- |
-| ported to a unit test on the default run | 9 | `GEMV`, `GEMM`, `TRMM`, `TRSM`, `TRMV`, `TRSV`, `GER`, `SYR`, `SYRK` |
-| partly (one arm of the check ported) | 3 | `ZGERC`/`ZGERU`, `ZHERK`, CBLAS row-major wrappers |
+| ported to a unit test on the default run | 12 | `GEMV`, `GEMM`, `TRMM`, `TRSM`, `TRMV`, `TRSV`, `GER`, `SYR`, `SYRK`, `DOT`, `ZGERC`/`ZGERU`, the XERBLA argument checks |
+| partly (one arm of the check ported) | 3 | `ZHERK` and `ZHER`/`ZHPR` (the real-diagonal convention is not implemented; `?hpr` has no counterpart), CBLAS row-major wrappers |
 | already covered by a faer unit test that predates this work | 2 | `ASUM`, `NRM2` |
 | helper group adapted (not translated) | 1 | `DMAKE`/`DMMCH`/`LDE`/`LDERES` |
-| not ported | 15 | `ISAMAX`, `DOT`, `AXPY`/`SCAL`/`ROT`/`COPY`/`SWAP`, `SYMV`/`HEMV`, `SYR2`, `HER`/`HPR`, `HER2`/`HPR2`, `SYMM`, `SYR2K`, `HER2K`, the 3m variants, XERBLA argument checks, mixed-precision comparisons, OpenBLAS build/runtime tests |
+| not ported | 12 | `ISAMAX`, `AXPY`/`SCAL`/`ROT`/`COPY`/`SWAP`, `SYMV`/`SBMV`/`SPMV`, `ZHEMV`/`ZHBMV`/`ZHPMV`, `SYR2`/`SPR2`, `ZHER2`/`ZHPR2`, `SYMM`, `SYR2K`, `ZHER2K`, the 3m variants, the mixed-precision comparisons, the OpenBLAS build/runtime tests |
 
-So 9 of the 30 inventoried checks are now covered by a test that runs by
-default and 2 were already covered. Of the 15 that are not ported, twelve have
-no faer API to call at all — banded and packed storage, symmetric/Hermitian
-structured multiply, the conjugate-transpose rank updates, the 3m variants,
-mixed precision, and OpenBLAS's own build diagnostics — while three do have a
-counterpart that no test reaches: `DOT` (`matmul::dot::inner_prod`), `HER`/`HPR`
-(`matmul_with_conj` with a conjugated row operand) and the XERBLA argument
-checks (faer's shape preconditions, which panic instead of returning an info
-code). Those three are next-batch candidates, not cases faer cannot express.
+So 12 of the 30 inventoried checks are now covered by a test that runs by
+default, 3 partly and 2 were already covered. All 12 that are not ported have no
+faer API to call at all — no index reduction (`ISAMAX`), no level-1 vector API,
+no symmetric or Hermitian structured multiply, no single kernel for the two-term
+updates (`SYR2`/`SYR2K`/`HER2`/`HER2K`), no packed storage, no 3m algorithm, no
+half/bfloat16 mixed precision, and OpenBLAS's own build diagnostics. The two
+counterparts this batch could reach — `DOT` and the XERBLA argument checks — now
+have their tests, and `?gerc`/`?her` joined the rank-1/rank-k tests that already
+had the kernel.
 
 ### Non-vacuity
 
@@ -190,6 +218,10 @@ tests, confirming the port goes red, and reverting:
 | rank-1 update (`rank_update` module) | the `Accum::Replace` arm writes nothing | `rank_one_update_matches_the_source_contract` |
 | unit-triangular base case | the sign of the 3x3 subdiagonal is flipped | every `trsm_*` test in all four dtypes |
 | `norm_l2` generic-stride fallback | the scaled accumulator is squared unscaled again (the #36 regression) | `test_norm_l2_strided_range` |
+| `?dot` strided path (`inner_prod`'s non-contiguous branch) | the operands are read as if they were contiguous from their first logical element | `dot_matches_the_source_stride_sweep`, `dot_reads_every_referenced_entry` |
+| `inner_prod_schoolbook`'s conjugation | the `(conj_lhs, conj_rhs)` match is replaced by `(No, No)` | `dot_matches_the_source_stride_sweep` (the `dotc` arm); the unconjugated arm stays green |
+| `matmul_with_conj`'s right-operand conjugation | `conj_rhs` reaches the kernel as `Conj::No` | `rank_one_update_conjugates_the_row_operand`; the unconjugated GER test stays green |
+| shape preconditions (`matmul`'s inner dimension, `ColRef::as_row_shape`, `triangular_solve`'s right-hand side) | each check is relaxed to `<=` or dropped | all three argument tests, one per check: `matmul_panics_on_an_incompatible_inner_dimension` and `triangular_solve_panics_on_a_mismatched_right_hand_side` then panic later with a different message, and `inner_prod_panics_on_operands_of_different_length` does not panic at all |
 
 The first batch's eight, for reference:
 
@@ -212,6 +244,14 @@ Which of these are new, and which overlap existing coverage:
   contract of the generic kernel (which entries are written, which guards
   survive), not the numerical value of the product. The rogue/NaN property in
   `blas_trmm.rs` and `blas_rank_update.rs` is therefore new on the default run.
+* `inner_prod` had no unit test of its own before `blas_dot.rs`: it ran only
+  inside the decompositions that call it, at their operand's layout — mostly
+  contiguous, though `householder.rs` and `svd/bidiag.rs` do call it with one
+  conjugated operand. The strided and reversed views, the mixed conjugation arms
+  and the sentinel-filled gaps are new on the default run.
+* the shape preconditions are reached by other tests only by accident, as a
+  panic in a test that expected one; `blas_arguments.rs` is the first place that
+  asserts *which* check fires.
 * `triangular_solve`'s own unit tests check subnormal pivots, and
   `linalg::tests::lapack_triangular` does place NaN in the unit diagonal and in
   the unreferenced triangle — but only in `lapack_triangular_cases`, which is
@@ -221,7 +261,8 @@ Which of these are new, and which overlap existing coverage:
 
 Not covered by any batch, and not claimed: banded and packed storage, symmetric
 and Hermitian structured multiply (`SYMM`/`SYMV`/`HEMV`), `SYR2`/`SYR2K`/
-`HER2K`, the 3m variants, mixed-precision comparisons, XERBLA-style argument
-validation, and the `#[ignore]`d full GEMM sweep. The source's `DMMCH` eps-ratio
+`HER2K`, the 3m variants, mixed-precision comparisons, `?her`'s real-diagonal
+convention, `matmul_with_conj`'s destination-structure precondition, and the
+`#[ignore]`d full GEMM sweep. The source's `DMMCH` eps-ratio
 checker is replaced by exact comparison, which is stricter for these integer
 fixtures but says nothing about accumulation error at scale.

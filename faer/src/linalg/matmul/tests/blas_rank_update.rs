@@ -16,6 +16,13 @@
 // complex types `?syrk` (A A^T) and `?herk` (A A^H) are separate routines and
 // separate arms here, since conjugation is what distinguishes them. SYR2K and
 // HER2K have no counterpart (they are two rank-k terms, i.e. two calls).
+//
+// `?gerc` (`alpha * x * conj(y)^T`, complex only) is the `Conj::Yes` arm of the
+// same rank-1 kernel and has its own test below. `?her` (`alpha * x *
+// conj(x)^T` into a triangular destination) is that kernel with `y = x`, i.e.
+// `?herk` with `k = 1`, which
+// `symmetric_rank_k_update_writes_only_the_stored_triangle` already runs at
+// `(n, k) = (1, 1)` and `(3, 1)`, so it gets no separate test.
 
 #[test]
 fn rank_one_update_matches_the_source_contract() {
@@ -201,6 +208,65 @@ fn symmetric_rank_k_update_writes_only_the_stored_triangle() {
 						);
 					}
 				}
+			}
+		}
+	}
+}
+#[test]
+fn rank_one_update_conjugates_the_row_operand() {
+	// ZCHK4: `?gerc` is `A = alpha * x * conj(y)^T + beta * A`, and `?geru` is
+	// the same call without the conjugation, which
+	// `rank_one_update_matches_the_source_contract` already covers. The two
+	// differ only for the complex types, so the real suites return immediately,
+	// as the TRSV conjugation port does.
+	if Scalar::IS_REAL {
+		return;
+	}
+	for (m, n) in [(0, 0), (1, 1), (2, 3), (3, 2), (4, 5)] {
+		for beta in [Accum::Replace, Accum::Add] {
+			for alpha in [z(0.0), z(1.0), z(-2.0), z(0.5)] {
+				let x = Mat::<Scalar>::from_fn(m, 1, |i, _| integer(i + 1, 0));
+				let y = Mat::<Scalar>::from_fn(n, 1, |j, _| integer(j + 2, 1));
+				// the conjugation is only observable when both parts of the
+				// operand are nonzero, which `integer` guarantees
+				let x_before = x.clone();
+				let y_before = y.clone();
+				let a = Mat::<Scalar>::from_fn(m, n, |i, j| integer(i + 3, j));
+				let mut dst = a.clone();
+				matmul_with_conj(
+					dst.as_mut(),
+					BlockStructure::Rectangular,
+					beta,
+					x.as_ref(),
+					BlockStructure::Rectangular,
+					Conj::No,
+					y.as_ref().transpose(),
+					BlockStructure::Rectangular,
+					Conj::Yes,
+					alpha,
+					Par::Seq,
+				);
+				check_blend(
+					"gerc",
+					&a,
+					&dst,
+					BlockStructure::Rectangular,
+					x_before.as_ref(),
+					BlockStructure::Rectangular,
+					Conj::No,
+					y_before.as_ref().transpose(),
+					BlockStructure::Rectangular,
+					Conj::Yes,
+					beta,
+					alpha,
+				);
+				crate::assert!(
+					exact(x.as_ref(), x_before.as_ref())
+						&& exact(y.as_ref(), y_before.as_ref()),
+					"gerc modified an operand: m={m} n={n} beta={beta:?} \
+					 alpha={:?}",
+					real(&alpha)
+				);
 			}
 		}
 	}
