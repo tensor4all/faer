@@ -313,6 +313,44 @@ pub fn tridiagonal_self_adjoint_evd<T: ComplexField>(
 	}
 	Ok(())
 }
+/// Scales the lower triangle of `a` by a power of two so that its largest
+/// entry is at least `sqrt(min_positive) / eps`, and returns the reciprocal
+/// factor, which takes the eigenvalues of the scaled matrix back to the input
+/// scale (`tensor4all/faer#358`).
+///
+/// The dense Hermitian reduction flushes Householder heads and tails below
+/// `min_positive` to zero, so a matrix whose entries sit near the bottom of
+/// the range loses its couplings before the tridiagonal solver (which has its
+/// own normalization) sees them. LAPACK's `dsyevr` scales by `rmin / anrm` for
+/// the same reason. A power of two keeps the scaling exact: multiplying a
+/// normal or subnormal number by `2^32` only moves its exponent, and the
+/// scaled entries stay far below the overflow threshold. The eigenvectors of
+/// `p * A` are those of `A`, so only the eigenvalues are unscaled.
+fn normalize_lower_range<T: ComplexField>(mut a: MatMut<'_, T>) -> T::Real {
+	let n = a.nrows();
+	let mut anorm = zero::<T::Real>();
+	for j in 0..n {
+		anorm = anorm.fmax(a.rb().col(j).subrows(j, n - j).norm_max());
+	}
+	let ref lo = min_positive::<T::Real>().sqrt() / eps::<T::Real>();
+	// a zero matrix needs no scaling, and its spectrum is exactly zero; a NaN
+	// norm also falls through the loop below unchanged
+	if anorm == zero() || !(anorm < *lo) {
+		return one();
+	}
+	let ref step = from_f64::<T::Real>(4294967296.0);
+	let mut p = one::<T::Real>();
+	while anorm < *lo {
+		anorm = anorm * step;
+		p = p * step;
+	}
+	for j in 0..n {
+		for i in j..n {
+			a[(i, j)] = a[(i, j)].mul_real(&p);
+		}
+	}
+	p.recip()
+}
 /// computes the matrix $A$'s eigendecomposition, assuming it is self-adjoint
 ///
 /// the eigenvalues are stored in $S$, and the eigenvectors in $U$ such that the
@@ -357,6 +395,7 @@ pub fn self_adjoint_evd<T: ComplexField>(
 	let (mut trid, stack) = unsafe { temp_mat_uninit::<T, _, _>(n, n, stack) };
 	let mut trid = trid.as_mat_mut();
 	trid.copy_from_triangular_lower(A);
+	let ref unscale = normalize_lower_range(trid.rb_mut());
 	let bs = linalg::qr::no_pivoting::factor::recommended_block_size::<T>(n, n);
 	let (mut householder, stack) =
 		unsafe { temp_mat_uninit::<T, _, _>(bs, n - 1, stack) };
@@ -399,7 +438,7 @@ pub fn self_adjoint_evd<T: ComplexField>(
 		None => {
 			tridiag_evd::qr_algorithm(diag.rb_mut(), offdiag.rb_mut(), None)?;
 			for i in 0..n {
-				s[i] = diag[i].to_cplx();
+				s[i] = (&diag[i] * unscale).to_cplx();
 			}
 			return Ok(());
 		},
@@ -470,7 +509,7 @@ pub fn self_adjoint_evd<T: ComplexField>(
 		stack,
 	);
 	for i in 0..n {
-		s[i] = diag[i].to_cplx();
+		s[i] = (&diag[i] * unscale).to_cplx();
 	}
 	Ok(())
 }
@@ -3382,3 +3421,168 @@ mod geev_scaling_tests {
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod lapack;
+
+#[cfg(test)]
+mod dense_range_tests {
+	//! Regression tests for `tensor4all/faer#358`: the dense Hermitian
+	//! reduction ran on the input as given, so a matrix whose entries sit near
+	//! the bottom of the floating-point range lost its couplings in the
+	//! Householder step and came back as `Ok(())` with a wrong (all-zero, or
+	//! all-equal) spectrum. Every scale below is a power of two, so `A / s` is
+	//! exact and the expected values are exact multiples of `s`.
+	use super::*;
+	use crate::assert;
+	use crate::c64;
+	use crate::dyn_stack::MemBuffer;
+
+	/// `f64::MIN_POSITIVE * 2^-1` (just below the normal range, like the
+	/// reported `2e-308`) and `f64::MIN_POSITIVE * 2^-30` (deep in the
+	/// subnormal range)
+	const SCALES: [f64; 2] =
+		[f64::MIN_POSITIVE / 2.0, f64::MIN_POSITIVE / (1u64 << 30) as f64];
+
+	/// runs `self_adjoint_evd` with and without eigenvectors, through the QR
+	/// backend (`usize::MAX`) and the divide-and-conquer backend (`2`), and
+	/// returns the eigenvalues of each run along with the eigenvectors of the
+	/// runs that computed them
+	fn evd<T: ComplexField<Real = f64>>(
+		a: MatRef<'_, T>,
+	) -> Vec<(String, Vec<f64>, Option<Mat<T>>)> {
+		let n = a.nrows();
+		let mut out = Vec::new();
+		for threshold in [usize::MAX, 2] {
+			for compute in [ComputeEigenvectors::No, ComputeEigenvectors::Yes] {
+				let mut params = Spec::<SelfAdjointEvdParams, T>::default();
+				params.recursion_threshold = threshold;
+				let mut w = Diag::<T>::zeros(n);
+				let mut u = Mat::<T>::zeros(n, n);
+				let mut mem = MemBuffer::new(self_adjoint_evd_scratch::<T>(
+					n,
+					compute,
+					ParShape::Seq,
+					params,
+				));
+				self_adjoint_evd(
+					a,
+					w.as_mut(),
+					if compute == ComputeEigenvectors::Yes {
+						Some(u.as_mut())
+					} else {
+						None
+					},
+					Par::Seq,
+					MemStack::new(&mut mem),
+					params,
+				)
+				.unwrap();
+				let label = format!("threshold {threshold}, {compute:?}");
+				let w = (0..n).map(|i| real(&w[i])).collect();
+				out.push((
+					label,
+					w,
+					(compute == ComputeEigenvectors::Yes).then_some(u),
+				));
+			}
+		}
+		out
+	}
+
+	/// checks `w / s` against `exact` entry by entry, and, where eigenvectors
+	/// were computed, that `U` is unitary and `U^H (A / s) U = diag(w / s)`
+	fn check<T: ComplexField<Real = f64>>(
+		unit: MatRef<'_, T>,
+		s: f64,
+		exact: &[f64],
+	) {
+		let n = unit.nrows();
+		let a = Mat::<T>::from_fn(n, n, |i, j| unit[(i, j)].mul_real(s));
+		for (label, w, u) in evd(a.as_ref()) {
+			for (k, (got, exact)) in w.iter().zip(exact).enumerate() {
+				assert!(
+					(got / s - exact).abs() <= 1e-12,
+					"s = {s:e}, {label}: eigenvalue {k}: got {:?} * s, exact \
+					 {exact:?} * s (all: {:?})",
+					got / s,
+					w.iter().map(|x| x / s).collect::<Vec<_>>(),
+				);
+			}
+			if let Some(u) = u {
+				let gram = u.adjoint() * &u;
+				let proj = u.adjoint() * unit * &u;
+				for i in 0..n {
+					for j in 0..n {
+						let id = if i == j { 1.0 } else { 0.0 };
+						let d = if i == j { w[i] / s } else { 0.0 };
+						assert!(
+							abs(&(&gram[(i, j)] - from_real::<T>(&id))) <= 1e-12,
+							"s = {s:e}, {label}: (U^H U)[{i}, {j}] = {:?}",
+							gram[(i, j)],
+						);
+						assert!(
+							abs(&(&proj[(i, j)] - from_real::<T>(&d))) <= 1e-12,
+							"s = {s:e}, {label}: (U^H (A / s) U)[{i}, {j}] = \
+							 {:?}, expected {d:?}",
+							proj[(i, j)],
+						);
+					}
+				}
+			}
+		}
+	}
+
+	/// the reported matrix `s * (J - I)`, at `n = 3` and `n = 5`: eigenvalues
+	/// `s * [-1, ..., -1, n - 1]`
+	#[test]
+	fn dense_symmetric_near_underflow() {
+		for n in [3, 5] {
+			let unit =
+				Mat::<f64>::from_fn(n, n, |i, j| if i == j { 0.0 } else { 1.0 });
+			let mut exact = vec![-1.0; n];
+			exact[n - 1] = (n - 1) as f64;
+			for s in SCALES {
+				check(unit.as_ref(), s, &exact);
+			}
+		}
+	}
+
+	/// the reported complex matrix `s * v v^H` with `v = [1, i, 1]`:
+	/// eigenvalues `s * [0, 0, 3]`; the bug returned `[s, s, s]`
+	#[test]
+	fn complex_hermitian_near_underflow() {
+		let v = [c64::new(1.0, 0.0), c64::new(0.0, 1.0), c64::new(1.0, 0.0)];
+		let unit = Mat::<c64>::from_fn(3, 3, |i, j| v[i] * v[j].conj());
+		for s in SCALES {
+			check(unit.as_ref(), s, &[0.0, 0.0, 3.0]);
+		}
+	}
+
+	/// control: the same magnitudes on a diagonal matrix round-trip exactly,
+	/// which shows the dense reduction, not the storage of the entries, is
+	/// what loses them
+	#[test]
+	fn diagonal_control_round_trips_exactly() {
+		let d = [2.0, -1.0, 3.0, 0.5];
+		for s in SCALES {
+			let mut sorted: Vec<f64> = d.iter().map(|x| x * s).collect();
+			sorted.sort_by(f64::total_cmp);
+			let a = Mat::<f64>::from_fn(4, 4, |i, j| if i == j { d[i] * s } else { 0.0 });
+			for (label, w, _) in evd(a.as_ref()) {
+				assert_eq!(w, sorted, "s = {s:e}, {label}");
+			}
+			let a = Mat::<c64>::from_fn(4, 4, |i, j| {
+				c64::new(if i == j { d[i] * s } else { 0.0 }, 0.0)
+			});
+			for (label, w, _) in evd(a.as_ref()) {
+				assert_eq!(w, sorted, "c64, s = {s:e}, {label}");
+			}
+		}
+	}
+
+	/// an exactly zero matrix still has the all-zero spectrum, with `Ok(())`
+	#[test]
+	fn zero_matrix_is_ok_with_zero_spectrum() {
+		for (label, w, _) in evd(Mat::<f64>::zeros(4, 4).as_ref()) {
+			assert_eq!(w, [0.0; 4], "{label}");
+		}
+	}
+}
