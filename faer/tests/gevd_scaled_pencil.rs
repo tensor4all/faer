@@ -222,29 +222,49 @@ fn sin_to_span(x: &[c64], basis: &[Vec<c64>]) -> f64 {
 
 /// The largest eigenvalue distance and eigenvector angle between `(s A, s B)`
 /// and `(A, B)`. Each eigenvalue of `scaled` is matched with the reference
-/// eigenvalues within `cluster` of it, and each eigenvector is measured against
-/// the span of the reference eigenvectors of that cluster (two vectors for the
-/// repeated pair). `None` when an eigenvector of `scaled` is not finite.
+/// eigenvalues within `cluster` of it. Each eigenvector is measured against the
+/// span of the reference eigenvectors of its cluster (two vectors for the
+/// repeated pair), and each reference eigenvector against the span of the
+/// scaled eigenvectors of its cluster, so a scaled result that loses a direction
+/// of a repeated eigenvalue's eigenspace fails too. A NaN distance counts as
+/// infinite.
 struct Diff {
 	lambda: f64,
 	left: f64,
 	right: f64,
 }
 
+/// `sin_to_span` of column `j` of `x` against the columns `ks` of `basis`;
+/// infinite when `ks` is empty or the distance is NaN.
+fn column_to_span(
+	x: &Mat<c64>,
+	j: usize,
+	basis: &Mat<c64>,
+	ks: &[usize],
+) -> f64 {
+	let n = x.nrows();
+	if ks.is_empty() {
+		return f64::INFINITY;
+	}
+	let col: Vec<c64> = (0..n).map(|i| x[(i, j)]).collect();
+	let basis: Vec<Vec<c64>> = ks
+		.iter()
+		.map(|&k| (0..n).map(|i| basis[(i, k)]).collect())
+		.collect();
+	let sin = sin_to_span(&col, &basis);
+	if sin.is_nan() { f64::INFINITY } else { sin }
+}
+
 fn compare(reference: &Gevd, scaled: &Gevd) -> Diff {
 	let n = reference.lambda.len();
 	let cluster = 1e-6;
+	let near = |x: c64, y: c64| (x - y).norm() <= cluster * (1.0 + x.norm());
 	let mut d = Diff {
 		lambda: 0.0,
 		left: 0.0,
 		right: 0.0,
 	};
 	for j in 0..n {
-		let near = |k: &usize| {
-			(reference.lambda[*k] - scaled.lambda[j]).norm()
-				<= cluster * (1.0 + scaled.lambda[j].norm())
-		};
-		let ks: Vec<usize> = (0..n).filter(near).collect();
 		let best = (0..n)
 			.map(|k| {
 				(reference.lambda[k] - scaled.lambda[j]).norm()
@@ -252,27 +272,16 @@ fn compare(reference: &Gevd, scaled: &Gevd) -> Diff {
 			})
 			.fold(f64::INFINITY, f64::min);
 		d.lambda = d.lambda.max(best);
-		for (side, u, uref) in [
-			(0, &scaled.left, &reference.left),
-			(1, &scaled.right, &reference.right),
-		] {
-			let x: Vec<c64> = (0..n).map(|i| u[(i, j)]).collect();
-			let basis: Vec<Vec<c64>> = ks
-				.iter()
-				.map(|&k| (0..n).map(|i| uref[(i, k)]).collect())
+	}
+	// scaled against reference, then reference against scaled
+	for (from, to) in [(scaled, reference), (reference, scaled)] {
+		for j in 0..n {
+			let ks: Vec<usize> = (0..n)
+				.filter(|&k| near(from.lambda[j], to.lambda[k]))
 				.collect();
-			let sin = if ks.is_empty() {
-				f64::INFINITY
-			} else {
-				sin_to_span(&x, &basis)
-			};
-			// NaN must not read as agreement
-			let sin = if sin.is_nan() { f64::INFINITY } else { sin };
-			if side == 0 {
-				d.left = d.left.max(sin);
-			} else {
-				d.right = d.right.max(sin);
-			}
+			d.left = d.left.max(column_to_span(&from.left, j, &to.left, &ks));
+			d.right =
+				d.right.max(column_to_span(&from.right, j, &to.right, &ks));
 		}
 	}
 	d
@@ -282,12 +291,18 @@ fn compare(reference: &Gevd, scaled: &Gevd) -> Diff {
 /// inexact, so `(s A, s B)` is `(A, B)` with each entry perturbed by up to
 /// `eps` relative, and the QZ adds an `O(n eps)` backward error; both move the
 /// eigenvalues and eigenvectors by `eps` times their condition numbers. These
-/// pencils are well conditioned: over every `s = 10^k` at which the scaled
-/// pencil is computed correctly the largest difference is `4.1e-15` (the scan
-/// below), so `1e-13` (about `450 eps`) leaves a margin of 25. It is tight
-/// enough to reject the gradual loss of precision before the old failure: with
-/// the unscaled complex division `two_pairs` was `9.0e-13` off at `1e-156` and
-/// `1.2e-10` off at `1e-157`.
+/// pencils are well conditioned.
+///
+/// Two scans are quoted here and their numbers must not be mixed. **With the
+/// fix** (this code, the scan below over every `s = 10^k` at which the scaled
+/// pencil is computed correctly) the largest difference is `4.1e-15`, and
+/// `3.7e-15` on a second host, so `1e-13` (about `450 eps`) leaves a margin of
+/// 25. **Before the fix** (the unscaled complex division, the failure this test
+/// guards) the same scan's largest passing difference is `1.06e-14` for
+/// `two_pairs` at `1e-155`, where this tolerance leaves a margin of 9.5, not 25;
+/// that near-miss is why the failure went unnoticed, and the losses just above
+/// it are what the test does catch: `9.0e-13` at `1e-156` and `1.2e-10` at
+/// `1e-157`.
 const TOL: f64 = 1e-13;
 
 fn check(s: f64) {
