@@ -76,7 +76,9 @@ counter**, not five.
      1.5-1.7x per node.
   2. Fewer passes per root: a `dlaed4`-style rational step, which LAPACK uses for this, in place of the
      current two-batch start, geometric bisection and secant. This is the only lever on the 1T budget: -30% is
-     12.8 -> at most about 9 passes per root at today's cost per term. The root finder is shared with
+     18.8 term evaluations per pole per root (12.8 passes, two of them 4-wide; 307456/(128x128)) down to at most
+     about 13.2, which is about 13 single-term passes, or 7.2 passes if the two batched passes are kept. The root
+     finder is shared with
      `bidiag_svd`, so either give the EVD its own finder or carry the SVD's accuracy suite through the change.
      About 3-5 days with the accuracy work.
   3. A cheaper pass: the pass is a scalar loop with one division per term. Evaluating several roots per pass
