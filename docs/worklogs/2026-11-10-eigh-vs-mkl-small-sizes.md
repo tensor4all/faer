@@ -45,8 +45,7 @@ cell ran in its own process.
 - **The measured consequence of that threshold, not a hypothesis:** `recursion_threshold = 16`
   (D&C at every size, the only knob, no code change) takes 16-32% off the f64 call and 13-26% off
   the c64 call at 8T for n = 64..128, turns the complex cells from a small loss into a win, and is
-  worth 8% at f64 n = 256, 3% at c64 n = 256 and 1% at n = 512. At 1T it is neutral at n = 64 and 96 and 9% (f64) /
-  4% (c64) better at n = 128. **Table C is the measurement**; the per-cell numbers are not repeated
+  worth 8% at f64 n = 256, 3% at c64 n = 256 and 1% at n = 512. At 1T it is -5% to +1% at n = 64 and 96 and 9% (f64) / 4% (c64) better at n = 128. **Table C is the measurement**; the per-cell numbers are not repeated
   here. So the default is not wrong at 1T; it is wrong at 8T, where D&C's merge is cheaper than a
   serial QR of the same tridiagonal, and slightly wrong at 8T above the band as well.
 - **Hypothesis (2) (thread start-up) is real but an order of magnitude too small to explain
@@ -79,12 +78,11 @@ cell ran in its own process.
   them. At f64 n = 256 8T the three rows already sum to more than the whole call (7.208 against
   6.649 ms), where no extra work can explain a negative remainder: that difference is unexplained,
   and each stage row takes its own timestamps;
-  (C) the threshold
-  knob; the samples behind them are in the CSV.
+  (C) the threshold knob; the samples behind all three are in the CSV.
 - **What remains unverified.**
   - Whether a parallel QR leaf (deflated blocks as tasks) beats lowering the threshold. The
     threshold knob is measured; a threaded QR is not, and it is the route that can move the 1T
-    gap at n = 64/96 too, where the knob is neutral. At n = 128 the knob already gives 9% (f64)
+    gap at n = 64/96, where the knob is between -5% and +1%. At n = 128 the knob already gives 9% (f64)
     and 4% (c64) at 1T, so it is not the only 1T improvement available.
   - How much of MKL's `?stedc` advantage is its merge implementation rather than its parallelism.
     At 1T MKL is 1.55-1.94x faster than faer's QR at n = 64..128 (f64), so part of the gap
@@ -257,8 +255,8 @@ Reproduction C.
 | c64 | 256 | 17.570 | 17.220 | 19.764 | 9.222 | 8.909 | 13.954 | +2% | +3% |
 | c64 | 512 | 105.428 | 104.920 | 131.838 | 41.147 | 40.811 | 85.127 | +0% | +1% |
 
-The CSV also holds the 20 `faer_tridiag_evd_t16` cell rows (this table's thr=16 arm); they are the source of that
-column and are cited rather than dropped.
+The CSV also holds 20 `faer_tridiag_evd_t16` rows: stage 2 measured under the same knob. No table here uses them —
+the knob's own arm is `faer_evd_t16` — and they are left in the file as recorded, not as a source for this table.
 
 ## Reproduction
 
