@@ -53,7 +53,8 @@ adds this record changes no source). Built `--no-default-features --features std
 - **1T is not strictly unchanged.** The serial path does the same arithmetic as before, and output bits
   match `main`. In the pristine builds, though, the branch's 1T call is +0.2% to +0.6% in both runs, with
   min-max ranges mostly not overlapping. In the instrumented builds the same cells are -0.7% to +0.1%, and
-  the secular phase per node is 0.986 to 1.002 of `main` at every level (table C). The pristine difference
+  the secular phase per node is 0.986 to 1.002 of `main` at every level in run 2, and 0.974 to 1.002 across
+  both runs (table C; run 1's level-2 cells for f64 n = 96 and c64 n = 96 are 0.980 and 0.974). The pristine difference
   lands in no phase and has the opposite sign under instrumentation. That is consistent with code layout,
   but not shown to be: it is reported as a measured +0.2% to +0.6%, not as "unchanged".
 
@@ -83,8 +84,9 @@ adds this record changes no source). Built `--no-default-features --features std
   - run 2 also checked after every process and drops a process that saw >= 3% busy afterwards: 7 of 120
     pristine and 22 of 120 instrumented processes, the cell keeping its remaining processes (at least 2).
   
-  Run 1 had no after-check and is kept complete. The two runs agree within 1% in every cell of every
-  table, so the numbers are not carried by the interference. They are still not a quiet-host acceptance
+  Run 1 had no after-check and is kept complete. The two runs agree within 1% in every cell except the
+  pristine f64 n = 64 8T branch cell (0.169 vs 0.172 ms, 1.8%); the 0.44x-0.49x conclusion there is
+  unchanged, but the runs are not identical to 1% everywhere. They are still not a quiet-host acceptance
   run.
 - **Not measured:**
   - MKL. The record's MKL numbers are from the Zen 5 host and are not comparable with this host's times,
