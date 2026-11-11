@@ -65,9 +65,27 @@ impl<T: ComplexField> Auto<T> for SvdParams {
 /// bidiagonalisation reads and writes rows at every step. 64 more bytes per column spread a row over
 /// the sets; measured on the bidiagonalisation alone at eight threads: 512 18.6 -> 15.3 ms, 256
 /// 5.3 -> 4.8 ms, with 500 and 520 at 14.6 and 15.8.
+///
+/// the decision is taken on the column stride the allocation will have, not on `m`: `temp_mat_uninit`
+/// rounds the row count up to its alignment (8 `f64` for a 64-byte alignment), so a 511-row `f64` copy
+/// gets a 512-element (4 KiB) stride although `511 * 8` is not a multiple of 1 KiB. the padding is one
+/// alignment unit, so the padded stride is the rounded one plus 64 bytes.
 fn work_rows<T>(m: usize) -> usize {
 	let size = core::mem::size_of::<T>();
-	if size > 0 && (m * size) % 1024 == 0 {
+	if size == 0 {
+		return m;
+	}
+	let align = crate::mat::matown::align_for(
+		size,
+		core::mem::align_of::<T>(),
+		core::mem::needs_drop::<T>(),
+	);
+	let stride = if align > size {
+		m.msrv_next_multiple_of(align / size)
+	} else {
+		m
+	};
+	if (stride * size) % 1024 == 0 {
 		m + 64usize.div_ceil(size)
 	} else {
 		m
@@ -1338,6 +1356,33 @@ mod tests {
 		check::<c32>(c32::new(0.0, 1.0), 1e-5);
 		check::<f64>(1.0, 1e-13);
 		check::<c64>(c64::new(0.0, 1.0), 1e-13);
+	}
+	/// the column stride of the work copy, as allocated, is never a multiple of 1 KiB; in
+	/// particular a 511-row `f64` copy, whose stride is rounded up to 512 elements, is padded.
+	#[test]
+	fn work_copy_stride_never_aliases_l1_sets() {
+		fn stride_bytes<T: ComplexField>(m: usize) -> usize {
+			let rows = work_rows::<T>(m);
+			let mut mem = MemBuffer::new(temp_mat_scratch::<T>(rows, 2));
+			let (work, _) = unsafe {
+				temp_mat_uninit::<T, _, _>(rows, 2, MemStack::new(&mut mem))
+			};
+			let work = work.as_mat_ref();
+			assert!(work.nrows() >= m);
+			work.col_stride() as usize * core::mem::size_of::<T>()
+		}
+		fn check<T: ComplexField>() {
+			for m in 1..=2100 {
+				let bytes = stride_bytes::<T>(m);
+				assert!(bytes % 1024 != 0, "m = {m}: stride {bytes} B");
+			}
+		}
+		assert_eq!(stride_bytes::<f64>(511), 520 * 8);
+		assert_eq!(stride_bytes::<f64>(500), 504 * 8);
+		check::<f32>();
+		check::<f64>();
+		check::<c32>();
+		check::<c64>();
 	}
 	#[test]
 	fn test_tiny_diagonal_at_split() {
