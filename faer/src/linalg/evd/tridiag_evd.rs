@@ -449,7 +449,7 @@ fn divide_and_conquer_recurse<T: RealField>(
 	let ref dmax = permuted_diag.norm_max();
 	let ref zmax = permuted_z.norm_max();
 	let ref eps = eps::<T>();
-	let ref tol = from_f64::<T>(8.0) * eps * dmax.fmax(zmax);
+	let ref tol = from_f64::<T>(8.0) * eps * dmax;
 	if &rho * zmax <= *tol {
 		let (mut tmp_tl, mut tmp_tr, mut tmp_bl, mut tmp_br) =
 			tmp.rb_mut().split_at_mut(n1, n1);

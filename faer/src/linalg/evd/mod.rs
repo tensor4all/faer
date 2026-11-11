@@ -3583,12 +3583,13 @@ mod dense_range_tests {
 	const SCALES_F32: [f32; 2] =
 		[f32::from_bits(1), f32::MIN_POSITIVE / (1u32 << 20) as f32];
 
-	/// runs `self_adjoint_evd` on the three paths it has: eigenvalues only
+	/// runs `self_adjoint_evd` on the four paths it has: eigenvalues only
 	/// (always the QR backend), eigenvectors through the QR backend
 	/// (`recursion_threshold = usize::MAX`), and eigenvectors through the
-	/// divide-and-conquer backend (`recursion_threshold = 2`, for `n >= 2`;
-	/// at `n = 1` this run takes the QR backend again). Returns the eigenvalues
-	/// of each run (widened to `f64`, which is exact) along with the
+	/// divide-and-conquer backend at the top split (`recursion_threshold = 2`,
+	/// for `n >= 2`; at `n = 1` this run takes the QR backend again) and with
+	/// an eight-entry leaf (`recursion_threshold = 8`, for `n > 8`). Returns
+	/// the eigenvalues of each run (widened to `f64`, which is exact) along with the
 	/// eigenvectors of the runs that computed them.
 	fn evd<T: ComplexField>(
 		a: MatRef<'_, T>,
@@ -3602,6 +3603,7 @@ mod dense_range_tests {
 			(usize::MAX, ComputeEigenvectors::No),
 			(usize::MAX, ComputeEigenvectors::Yes),
 			(2, ComputeEigenvectors::Yes),
+			(8, ComputeEigenvectors::Yes),
 		] {
 			{
 				let mut params = Spec::<SelfAdjointEvdParams, T>::default();
@@ -3724,6 +3726,34 @@ mod dense_range_tests {
 				check(unit.as_ref(), s, &exact, 1e-12);
 			}
 		}
+	}
+
+	/// a full-spectrum fixture at `n = 9` whose eigenvalues are `1 - 2 i / 8`,
+	/// scaled to `sqrt(MIN_POSITIVE)`. The dense reduction scales this to the
+	/// bottom of the normal range, not to one, so the divide-and-conquer
+	/// merge must not treat the coupling `rho` as negligible against an
+	/// absolute `eps`. Before the tolerance was made relative to the leaf
+	/// eigenvalues only, the merge deflated every entry and returned the
+	/// union of the two halves' spectra (a few percent off here).
+	#[test]
+	fn dense_divide_and_conquer_near_underflow() {
+		let n = 9;
+		let mut q = Mat::<f64>::identity(n, n);
+		for i in 1..n {
+			for j in 0..n {
+				let (x, y) = (q[(i - 1, j)], q[(i, j)]);
+				q[(i - 1, j)] = 0.6 * x - 0.8 * y;
+				q[(i, j)] = 0.8 * x + 0.6 * y;
+			}
+		}
+		let exact: Vec<f64> =
+			(0..n).map(|i| -1.0 + 2.0 * i as f64 / (n - 1) as f64).collect();
+		let d = Mat::<f64>::from_fn(n, n, |i, j| {
+			if i == j { exact[i] } else { 0.0 }
+		});
+		let unit = &q * &d * q.transpose();
+		let s = f64::MIN_POSITIVE.sqrt();
+		check(unit.as_ref(), s, &exact, 1e-12);
 	}
 
 	/// the reported complex matrix `s * v v^H`: eigenvalues `s * [0, 0, 3]`;
