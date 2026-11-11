@@ -1,0 +1,11 @@
+[package]
+name = "rm391"
+version = "0.1.0"
+edition = "2021"
+[features]
+instr = []
+default = ["instr"]
+[dependencies]
+faer = { package = "t4a-faer", path = "../src/faer", default-features = false, features = ["std", "rayon", "threadteam"] }
+[profile.release]
+debug = 1
