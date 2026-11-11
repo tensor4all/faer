@@ -1,5 +1,5 @@
 // Driver for the OpenBLAS BLAS-level matmul ports (GEMM, GEMV, TRMM, DOT,
-// rank-k update, rank-1 update, argument checks). Provenance and the source
+// rank-k update, rank-1 update, the CBLAS row-major layouts, argument checks). Provenance and the source
 // revision are recorded in each case file and in docs/blas-test-inventory.md.
 use crate::internal_prelude::*;
 use crate::linalg::matmul::dot::inner_prod;
@@ -24,6 +24,7 @@ macro_rules! suite {
 			include!("blas_rank_update.rs");
 			include!("blas_gemm.rs");
 			include!("blas_dot.rs");
+			include!("blas_row_major.rs");
 			include!("blas_arguments.rs");
 		}
 	};

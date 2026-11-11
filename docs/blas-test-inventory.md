@@ -7,11 +7,11 @@ and part of [#166](https://github.com/tensor4all/faer/issues/166). Port
 completion and numerical success are separate: this file records what was
 ported, what has no counterpart, and what stays unported.
 
-Three batches have landed: the triangular, rank-update and `norm_l2` ports
+Four batches have landed: the triangular, rank-update and `norm_l2` ports
 ([#349](https://github.com/tensor4all/faer/pull/349)), the `GEMM`/`GEMV` boundary
-port ([#373](https://github.com/tensor4all/faer/pull/373)), and the remainder
-port (`?dot`, `?gerc`, and the argument checks). Which batch a row belongs to is
-in its `Port?` column.
+port ([#373](https://github.com/tensor4all/faer/pull/373)), the remainder port
+(`?dot`, `?gerc`, and the argument checks), and the CBLAS row-major layouts.
+Which batch a row belongs to is in its `Port?` column.
 
 ## Source and licence
 
@@ -37,6 +37,7 @@ Adapted files and the material changes to each are recorded in their headers:
 | `faer/src/linalg/tests/blas_trsm_cases.rs` | `test/blat3.f` `DCHK3` (`DTRSM`); `test/blat2.f` `DCHK3` (`DTRSV`) |
 | `faer/src/linalg/matmul/tests/blas_gemm.rs` | `test/blat3.f` `DCHK1` (`DGEMM`); `test/blat2.f` `DCHK1` (`DGEMV`) |
 | `faer/src/linalg/matmul/tests/blas_dot.rs` | `test/blat1.f` `CHECK2` (`?dot`, `?dotc`, `?dotu`) |
+| `faer/src/linalg/matmul/tests/blas_row_major.rs` | `ctest/c_{s,d,c,z}blas3.c`, the `CblasRowMajor` wrappers of `GEMM`, `TRMM` and `SYRK`/`HERK` |
 | `faer/src/linalg/matmul/tests/blas_arguments.rs` | `test/blat2.f` and `test/blat3.f` `DCHKE`; `test/xerbla_test.c`, `ctest/c_xerbla.c` and `ctest/cblas_test.h` |
 
 Material adaptations, common to these suites: the source's random
@@ -115,24 +116,32 @@ does), and the complex-only rank updates are `ZCHK4` (`GERC`/`GERU`), `ZCHK5`
 
 | OpenBLAS file/check | faer counterpart | Port? | Reason |
 | --- | --- | --- | --- |
-| CBLAS row-major wrappers `c_{s,d,c,z}blas{1,2,3}.c` | views: `MatRef::transpose`, `MatMut::transpose_mut` | partly | the rank-1 test also runs a row-major destination (`transpose_mut` on a column-major buffer), which is the second `rank_update` branch; the numerical checks are the `test/` ones |
+| CBLAS row-major wrappers `c_{s,d,c,z}blas{1,2,3}.c` | views: `MatRef::transpose`, `MatMut::transpose_mut` | ported for the products' destinations (`blas_row_major.rs`); the rank-1 row-major destination by `blas_rank_update.rs`; the level-1 wrappers take no layout parameter, so nothing to port there | `CblasRowMajor` copies its arguments into row-major buffers, so the kernel sees a destination whose row stride is the leading dimension and whose column stride is 1 -- the other way round from a column-major `Mat`. `GEMM` (destination; its operands are row-major views too, a layout the `'T'`/`'C'` arms of `blas_gemm.rs` already reach), `TRMM` (both sides, `N`/`T`/`C`, all six block structures) and `SYRK`/`HERK` (both triangles, four arms, both `Accum` values) now run that destination layout. `TRSM` needed no new arm: the right-side solves of `trsm_recovers_the_exact_solution_with_an_implicit_diagonal` hand the solver a transposed buffer, which is the same layout (a mutation that assumes a column-major right-hand side reddens that test). The level-1 wrappers (`c_*blas1.c`) have no row-major/column-major parameter at all -- they wrap `?dot`, `?asum` and `?nrm2`, whose faer counterparts this file already records -- so there is no layout arm to port |
 | argument-error tests (`cblas_test.h`, `c_xerbla.c`, `blat2.f` `DCHKE`, `blat3.f` `DCHKE`) | `assert!`/panic preconditions in `matmul`, `matmul_with_conj`, `triangular_solve` | ported (`blas_arguments.rs`) | faer rejects a bad shape with a panic and has no XERBLA-style error return or info code, so the port asserts the panic and the message naming the violated precondition instead of the argument index: an incompatible inner dimension (`matmul`), a mismatched `?dot` length, and a right-hand side whose row count does not match the triangle. `matmul_with_conj`'s destination-structure check has no arm, because removing it is not a safe mutation to run: the unguarded kernel would receive a non-square triangular destination |
 | `compare_sgemm_bgemm.c`, `compare_sgemm_sbgemm.c`, `compare_sgemm_shgemm.c`, `compare_sgemv_*.c` | none | no | bfloat16/half mixed-precision kernels do not exist in faer |
 | `xerbla_test.c`, `shgemm_test.c`, `test_laed3_nan.c`, `get_threading_model.c`, `wasm/` | none | no | OpenBLAS build and runtime specifics (XERBLA, SME kernels, its bundled LAPACK, thread-model query, wasm build) |
 
 ## What the ports establish
 
-Eighteen test functions over four scalar types (`f64`, `f32`, `c64`, `c32`), 72
-tests in the default (non-nightly) run: eight from the first batch (32 tests,
+Twenty-one test functions over four scalar types (`f64`, `f32`, `c64`, `c32`),
+84 tests in the default (non-nightly) run: eight from the first batch (32 tests,
 `trmm`, `trsm`, `trsv`, rank-1 and rank-k), four from the `GEMM`/`GEMV` batch
-(16 tests), and six from this batch (24 tests: two `?dot`, one `?gerc` and three
-argument checks). The `matmul::blas::*` group is 56 of them.
+(16 tests), six from the `?dot`/`?gerc`/argument batch (24 tests), and three from
+the row-major batch (12 tests). The `matmul::blas::*` group is 68 of them.
 
 `?her` is the one column-4 name this batch does not add a test for: it is the
 `k = 1` arm of `?herk`, which the first batch's rank-k test already runs (see
 the `ZCHK5` row).
 
-This batch's six:
+The row-major batch's three:
+
+| Test | Property |
+| --- | --- |
+| `matmul::blas::*::gemm_writes_a_row_major_destination` | `?gemm` with the destination *and* both operands in row-major storage: `C = alpha*A*B + beta*C` equals the independently accumulated product for both `Accum` values and `alpha` 0/1/-2/0.5 over the shape set that includes 0 and the non-square ones, with both operands unchanged |
+| `matmul::blas::*::trmm_writes_a_row_major_destination` | `?trmm` into a row-major destination, for all six block structures, both sides, `N`/`T`/`C` and four `alpha`, against the independently accumulated product; the triangular operand and the rectangular one are unchanged |
+| `matmul::blas::*::rank_k_update_writes_a_row_major_triangle` | `?syrk`/`?herk` with the stored triangle in a row-major square: the four trans/conjugation arms, both triangles, both `Accum` values and four `alpha`, with the unreferenced triangle still holding NaN |
+
+The `?dot`/`?gerc`/argument batch's six:
 
 | Test | Property |
 | --- | --- |
@@ -189,14 +198,14 @@ Counting the rows of the four tables above (30 checks):
 
 | Outcome | Checks | Which |
 | --- | --- | --- |
-| ported to a unit test on the default run | 12 | `GEMV`, `GEMM`, `TRMM`, `TRSM`, `TRMV`, `TRSV`, `GER`, `SYR`, `SYRK`, `DOT`, `ZGERC`/`ZGERU`, the XERBLA argument checks |
-| partly (one arm of the check ported) | 3 | `ZHERK` and `ZHER`/`ZHPR` (the real-diagonal convention is not implemented; `?hpr` has no counterpart), CBLAS row-major wrappers |
+| ported to a unit test on the default run | 13 | `GEMV`, `GEMM`, `TRMM`, `TRSM`, `TRMV`, `TRSV`, `GER`, `SYR`, `SYRK`, `DOT`, `ZGERC`/`ZGERU`, the XERBLA argument checks, the CBLAS row-major wrappers |
+| partly (one arm of the check ported) | 2 | `ZHERK` and `ZHER`/`ZHPR` (the real-diagonal convention is not implemented; `?hpr` has no counterpart) |
 | already covered by a faer unit test that predates this work | 2 | `ASUM`, `NRM2` |
 | helper group adapted (not translated) | 1 | `DMAKE`/`DMMCH`/`LDE`/`LDERES` |
 | not ported | 12 | `ISAMAX`, `AXPY`/`SCAL`/`ROT`/`COPY`/`SWAP`, `SYMV`/`SBMV`/`SPMV`, `ZHEMV`/`ZHBMV`/`ZHPMV`, `SYR2`/`SPR2`, `ZHER2`/`ZHPR2`, `SYMM`, `SYR2K`, `ZHER2K`, the 3m variants, the mixed-precision comparisons, the OpenBLAS build/runtime tests |
 
-So 12 of the 30 inventoried checks are now covered by a test that runs by
-default, 3 partly and 2 were already covered. All 12 that are not ported have no
+So 13 of the 30 inventoried checks are now covered by a test that runs by
+default, 2 partly and 2 were already covered. All 12 that are not ported have no
 faer API to call at all — no index reduction (`ISAMAX`), no level-1 vector API,
 no symmetric or Hermitian structured multiply, no single kernel for the two-term
 updates (`SYR2`/`SYR2K`/`HER2`/`HER2K`), no packed storage, no 3m algorithm, no
@@ -221,6 +230,7 @@ tests, confirming the port goes red, and reverting:
 | `?dot` strided path (`inner_prod`'s non-contiguous branch) | the operands are read as if they were contiguous from their first logical element | `dot_matches_the_source_stride_sweep`, `dot_reads_every_referenced_entry` |
 | `inner_prod_schoolbook`'s conjugation | the `(conj_lhs, conj_rhs)` match is replaced by `(No, No)` | `dot_matches_the_source_stride_sweep` (the `dotc` arm); the unconjugated arm stays green |
 | `matmul_with_conj`'s right-operand conjugation | `conj_rhs` reaches the kernel as `Conj::No` | `rank_one_update_conjugates_the_row_operand`; the unconjugated GER test stays green |
+| row-major destination (`matmul_imp`'s small-product call and `triangular::matmul_with_conj`) | the kernel is handed the destination's strides as if it were column-major | `gemm_writes_a_row_major_destination`, `trmm_writes_a_row_major_destination`, `rank_k_update_writes_a_row_major_triangle`, and every ported test whose destination has a padded leading dimension (`trmm_reads_and_writes_nothing_outside_its_operands`) |
 | shape preconditions (`matmul`'s inner dimension, `ColRef::as_row_shape`, `triangular_solve`'s right-hand side) | each check is relaxed to `<=` or dropped | all three argument tests, one per check: `matmul_panics_on_an_incompatible_inner_dimension` and `triangular_solve_panics_on_a_mismatched_right_hand_side` then panic later with a different message, and `inner_prod_panics_on_operands_of_different_length` does not panic at all |
 
 The first batch's eight, for reference:
@@ -252,6 +262,14 @@ Which of these are new, and which overlap existing coverage:
 * the shape preconditions are reached by other tests only by accident, as a
   panic in a test that expected one; `blas_arguments.rs` is the first place that
   asserts *which* check fires.
+* every earlier *product* port handed the kernel a column-major `Mat` as
+  destination -- the padded-parent tests pad the leading dimension but keep the
+  row stride at 1 -- with two exceptions that are already in the tree: the
+  rank-1 update's row-major destination (`blas_rank_update.rs`) and the TRSM
+  port's row-major right-hand side (`blas_trsm_cases.rs`). The row-major
+  *operands* are not new either: `blas_gemm.rs` reaches them through the
+  `'T'`/`'C'` arms of `viewed`. What `blas_row_major.rs` adds is the row-major
+  destination for `GEMM`, `TRMM` and the rank-k update.
 * `triangular_solve`'s own unit tests check subnormal pivots, and
   `linalg::tests::lapack_triangular` does place NaN in the unit diagonal and in
   the unreferenced triangle — but only in `lapack_triangular_cases`, which is
@@ -262,7 +280,8 @@ Which of these are new, and which overlap existing coverage:
 Not covered by any batch, and not claimed: banded and packed storage, symmetric
 and Hermitian structured multiply (`SYMM`/`SYMV`/`HEMV`), `SYR2`/`SYR2K`/
 `HER2K`, the 3m variants, mixed-precision comparisons, `?her`'s real-diagonal
-convention, `matmul_with_conj`'s destination-structure precondition, and the
-`#[ignore]`d full GEMM sweep. The source's `DMMCH` eps-ratio
+convention, `matmul_with_conj`'s destination-structure precondition, the CBLAS
+row-major wrappers of the level-1 functions (their routines take no layout
+parameter), and the `#[ignore]`d full GEMM sweep. The source's `DMMCH` eps-ratio
 checker is replaced by exact comparison, which is stricter for these integer
 fixtures but says nothing about accumulation error at scale.
