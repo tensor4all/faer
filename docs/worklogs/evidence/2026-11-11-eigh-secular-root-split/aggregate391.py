@@ -18,10 +18,15 @@ GROUPS = {
     'e': ['leaf'],
     'other': ['split', 'outer_pre', 'dc_wrap', 'outer_post'],
 }
+# phases timed around the whole solve on the calling thread (instrumentation.patch: `outer_pre` and
+# `outer_post` once per call, `dc_wrap` twice: the set-up before the recursion and the rescale after
+# it); every other phase is lapped once per recursion node
+WRAPPER = {'outer_pre', 'dc_wrap', 'outer_post'}
 CELLS = [(d, n, t) for d in ['f64', 'c64'] for n in [64, 96, 128] for t in [1, 8]]
 
 
 DROPPED = defaultdict(int)
+KEPT = defaultdict(int)  # (file, variant, dtype, n, T) -> processes the medians are taken over
 
 
 def load(path):
@@ -36,6 +41,8 @@ def load(path):
                 DROPPED[(path, r[0], r[1], int(r[2]), int(r[3]))] += 1
             continue
         v, d, n, t, rep, key, level, phase, value = r
+        if key == 'calls':
+            KEPT[(path, v, d, int(n), int(t))] += 1
         rows[(v, d, int(n), int(t), key, level, phase)].append(value)
     return rows
 
@@ -45,6 +52,16 @@ def med(rows, *k):
     if not xs:
         return None
     return statistics.median(float(x) for x in xs)
+
+
+def kept_table():
+    print()
+    print('## processes per cell (the medians above are over these; 5 started per cell)')
+    files = sorted({k[0] for k in KEPT})
+    print('| dtype | n | T | ' + ' | '.join(f'{f} {v}' for f in files for v in ('main', 'branch')) + ' |')
+    print('| --- | ---: | ---: |' + ' ---: |' * (2 * len(files)))
+    for d, n, t in CELLS:
+        print(f'| {d} | {n} | {t} | ' + ' | '.join(str(KEPT[(f, v, d, n, t)]) for f in files for v in ('base', 'head')) + ' |')
 
 
 def main():
@@ -76,6 +93,7 @@ def main():
           max(float(x) for k, xs in pr.items() if k[4] == 'allocs_per_call' for x in xs))
     if not ins:
         print('dropped processes (busy after):', dict(DROPPED))
+        kept_table()
         return
     print()
     print('## critical path by phase group, instrumented builds (ms)')
@@ -102,7 +120,12 @@ def main():
                         nodes = med(ins, v, d, n, t, 'nodes', str(l), p)
                         if ns is None or not nodes:
                             continue
-                        per = ns / nodes if t > 1 else ns
+                        # a wrapper phase's laps are sequential on the calling thread, never
+                        # concurrent nodes: they are summed, not divided by their count
+                        if t > 1 and p not in WRAPPER:
+                            per = ns / nodes
+                        else:
+                            per = ns
                         s += per * (factor[l] if t > 1 else 1.0)
                 tot[g] = s / 1e6
             est = sum(tot.values())
@@ -126,6 +149,7 @@ def main():
             print(f'| {d} | {n} | {t} | {l} | {nb:.0f} | {b:.4f} | {h:.4f} | {h / b:.3f} |')
     print()
     print('dropped processes (busy after):', dict(DROPPED))
+    kept_table()
 
 
 main()
