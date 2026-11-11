@@ -40,13 +40,22 @@ so this is where it shows; a vendor's `?gebrd` at 512 matches our 500.
 ## The team is the caller's, and it is held across the work
 
 `Par::Team` is the exclusive authority over the reserved members of a `threadteam` team. A reserved
-member spins for a bounded budget and then parks; on x86-64 the budget is 300,000 polls (about 3-7 ms
-depending on the core's `PAUSE`), so a sequence of regions closer together than that pays no wake and
-a longer gap parks the members once. Each keeps the range it had in the previous region, so a core's
-L2 keeps its slice of the trailing block across them: the blocked bidiagonalisation's two products
-per step went 10.3 and 10.6 ms to 2.7 and 3.7 ms at 512, 8T, with nothing but the reservation
-(`docs/worklogs/2026-10-23-blocked-bidiag.md`; the reservation was a spindle group there, the
-mechanism threadteam kept when it replaced it).
+member spins for a bounded budget of polls and then parks. The budget is the pool's, not faer's
+(threadteam 0.5.1 as locked in `Cargo.lock`; `faer/Cargo.toml` requires `^0.5.1`):
+
+* by default 300,000 polls on x86-64 (about 3-7 ms depending on the core's `PAUSE`) and 2^21 on
+  aarch64 (`SPIN_POLLS_DEFAULT`, threadteam `src/pool.rs`), unless the caller sets
+  `PoolBuilder::spin_polls`;
+* at most 100 polls when the scope is oversubscribed, that is when it has more participants than
+  CPUs in the caller's set (`THROTTLED_POLLS`, threadteam `src/park.rs`), whatever the pool's setting.
+
+With the default budget on a scope that is not oversubscribed, a sequence of regions closer together
+than the budget pays no wake and a longer gap parks the members once. On an oversubscribed scope the
+window is 100 polls, so only regions issued almost back to back avoid a wake. Each member keeps the
+range it had in the previous region, so a core's L2 keeps its slice of the trailing block across
+them: the blocked bidiagonalisation's two products per step went 10.3 and 10.6 ms to 2.7 and 3.7 ms
+at 512, 8T, with nothing but the reservation (`docs/worklogs/2026-10-23-blocked-bidiag.md`; the
+reservation was a spindle group there, the mechanism threadteam kept when it replaced it).
 
 The library never builds a team; the width, the lifetime and the thread count are the caller's
 (`faer::team` is the route, not the policy). A caller that runs parallel work repeatedly owns the
