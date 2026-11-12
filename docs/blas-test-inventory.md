@@ -1,15 +1,15 @@
 # OpenBLAS BLAS-level test inventory
 
 Bounded Rust adaptation of the checks in OpenBLAS `test/` and `ctest/`, as a
-follow-up to [#31](https://github.com/tensor4all/faer/issues/31) (the LAPACK
+follow-up to [#31](https://github.com/tensor4all/colmat-rs/issues/31) (the LAPACK
 `lapack-netlib/TESTING` validation in [lapack-validation.md](lapack-validation.md))
-and part of [#166](https://github.com/tensor4all/faer/issues/166). Port
+and part of [#166](https://github.com/tensor4all/colmat-rs/issues/166). Port
 completion and numerical success are separate: this file records what was
 ported, what has no counterpart, and what stays unported.
 
 Four batches have landed: the triangular, rank-update and `norm_l2` ports
-([#349](https://github.com/tensor4all/faer/pull/349)), the `GEMM`/`GEMV` boundary
-port ([#373](https://github.com/tensor4all/faer/pull/373)), the remainder port
+([#349](https://github.com/tensor4all/colmat-rs/pull/349)), the `GEMM`/`GEMV` boundary
+port ([#373](https://github.com/tensor4all/colmat-rs/pull/373)), the remainder port
 (`?dot`, `?gerc`, and the argument checks), and the CBLAS row-major layouts.
 Which batch a row belongs to is in its `Port?` column.
 
@@ -73,7 +73,7 @@ exposes them.
 | `CHECK1` `SASUM`/`DASUM`, `SCASUM`/`DZASUM` | `reductions::norm_l1` (`abs1`, so the complex entries are `\|re\|+\|im\|`) | covered | `norm_l1::tests::test_norm_l1` runs its contiguous `f64` fixtures and, through `check_strided_complex`, a `c64` and a `c32` vector whose row stride is above 1 (the source's `incx = 2` half, which takes the strided fallback rather than the SIMD path). The source's 5-entry lengths and its negative strides are not ported |
 | `CHECK2` `SDOT`/`DDOT`/`CDOTU`/`ZDOTU`, `CDOTC`/`ZDOTC` | `matmul::dot::inner_prod` | ported (`blas_dot.rs`) | the length list `NS = 0 1 2 4` and the increment lists (`INCXS = 1 2 -2 -1`, `INCYS = 1 -2 1 -2`) are the driver's own (`blat1.f:347-350`); the increment is the view's stride and a negative one is the same view built from its last element, and `?dotc` is `Conj::Yes` on the left operand. The source's 5-entry fixture and its scaled tolerance become an exact-integer fixture and an exact sum |
 | `CHECK2`/`CHECK3` `SAXPY`/`SCOPY`/`SSWAP`/`SSCAL`/`SROT`/`SROTG`, `CSSCAL`/`ZDSCAL`/`CROTG`/`CSROT` | none | no | no level-1 vector API in faer (the source sweeps `incx`/`incy` over {1, 2, -2, -1}) |
-| `CHECK1` `SNRM2`/`DNRM2`/`SCNRM2`/`DZNRM2` | `reductions::norm_l2`, `MatRef::norm_l2`, `ColRef::norm_l2` | covered | the source check is `n = 0..4` with `incx` 1/2 and small values; `norm_l2::tests::test_norm_l2_strided_range` already reads a stride-2 row view, and the exponent-range half of the property is [#36](https://github.com/tensor4all/faer/issues/36) / [faer-008](../upstream-reports/faer-008-norm-l2-strided-range/README.md) |
+| `CHECK1` `SNRM2`/`DNRM2`/`SCNRM2`/`DZNRM2` | `reductions::norm_l2`, `MatRef::norm_l2`, `ColRef::norm_l2` | covered | the source check is `n = 0..4` with `incx` 1/2 and small values; `norm_l2::tests::test_norm_l2_strided_range` already reads a stride-2 row view, and the exponent-range half of the property is [#36](https://github.com/tensor4all/colmat-rs/issues/36) / [faer-008](../upstream-reports/faer-008-norm-l2-strided-range/README.md) |
 
 ### Level 2 — `test/{s,d,c,z}blat2.f` (`DCHK1`-`DCHK6`), `ctest/c_*blat2c.c`
 

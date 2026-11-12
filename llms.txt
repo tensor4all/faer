@@ -31,5 +31,5 @@ The crate was published as `t4a-faer` up to 0.33.0 and renamed in 0.34.0.
 
 ## Repository
 
-- GitHub: https://github.com/tensor4all/faer
+- GitHub: https://github.com/tensor4all/colmat-rs
 - Language: Rust (edition 2021), workspace at the repository root.

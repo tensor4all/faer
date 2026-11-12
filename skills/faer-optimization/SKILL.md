@@ -54,7 +54,7 @@ in `rules/common/performance.md` (tensor4all-agent-rules) at the largest thread 
 with, 64 and more, not only at evo's 8. In this fork the recurring traps are:
 
 - a column split where every task reads the whole Householder basis or panel (`p × size` traffic,
-  tensor4all/faer#90); pack or stage the shared operand once, or split in two dimensions;
+  tensor4all/colmat-rs#90); pack or stage the shared operand once, or split in two dimensions;
 - a row split into one partial per thread with a serial combine (`O(p)` memory and combine);
 - a constant task cap ("at most four tasks") or a threshold tuned at one thread count.
 

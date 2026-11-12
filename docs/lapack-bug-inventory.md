@@ -1,7 +1,7 @@
 # Defects found by the LAPACK validation
 
 This page lists every defect that the bounded LAPACK validation found. That validation is
-[docs/lapack-validation.md](lapack-validation.md), run by `scripts/run-lapack-validation.py`; tensor4all/faer#31 tracks the plan.
+[docs/lapack-validation.md](lapack-validation.md), run by `scripts/run-lapack-validation.py`; tensor4all/colmat-rs#31 tracks the plan.
 The page also lists the defects in the checker itself, the defects found elsewhere that the suite now carries as regression evidence, what remains, and what the suite does not cover.
 
 Inventory date: 2026-10-30, on `main` `56e5d95` (t4a-faer 0.27.0).
@@ -108,7 +108,7 @@ Each family carries the fix's test as regression evidence.
 ## What remains
 
 * **Ledger:** no known failure; the ledger is empty.
-* **Open plan:** tensor4all/faer#31 (the validation plan) is still open.
+* **Open plan:** tensor4all/colmat-rs#31 (the validation plan) is still open.
 * **GET34 rejection contract:** it now runs. LAPACK `dget34`'s own records give 148 rejected swaps per real type. It found rows 15 and 16.
 * **Host:** the nightly runs on x86_64 (ubuntu-latest). A weekly aarch64 lane (`lapack-validation-aarch64.yml`, `ubuntu-24.04-arm` and `macos-latest`) runs the same families. The lane also runs the three strict-triangle tests below and the #58 allocation test with `--ignored`; that test is the known per-call allocation of the `gemm` crate fallback ([gemm-001](../upstream-reports/gemm-001-per-call-allocation/)), to be replaced by #56. It is reported as a warning and does not fail the lane. Its results are in the pull request that added the lane.
 * **Strict-triangle tests:** they failed on aarch64, in the weekly lane's first run on `ubuntu-24.04-arm` and `macos-latest`. They passed on x86_64 only because the x86 kernel never takes the generic path. They found row 17, which is now fixed, and the tests run both routes on every host.

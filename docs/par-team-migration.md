@@ -219,7 +219,7 @@ a region runs in parallel when `estimate >= PAYS * sections * dispatch_cost(widt
 
 ## After #85: the team is the only route
 
-tensor4all/faer#85 removed the second parallel route. The sections above describe the design as it
+tensor4all/colmat-rs#85 removed the second parallel route. The sections above describe the design as it
 was when it landed, including the `Rayon` variant and its `cfg` fallback; what stands now is:
 
 ```rust
@@ -243,4 +243,4 @@ pub enum ParShape { Seq, Team(NonZeroUsize, DispatchCosts) }
   instead of a `Par` by value: a C caller cannot own a scoped team token, so the crate borrows the
   pool the handle owns (`Pool::into_team` per call, `Team::into_pool` before the call returns, a
   `NULL` handle is `Par::Seq`) and leaves no team behind. It is back in the workspace and builds
-  (tensor4all/faer#98, tensor4all/faer#333).
+  (tensor4all/colmat-rs#98, tensor4all/colmat-rs#333).

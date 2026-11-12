@@ -140,7 +140,7 @@ one row when AVX-512F, or AVX2 plus FMA, is detected (`:1692-1709`); a native sc
 kernel — another target, a missing instruction set, or `std` off — fills and re-enters
 (`:1786-1793`); and other scalars compute each element in place (`:1795-1810`). The original claim — that the replace entry's dispatch is kept — was wrong in both
 directions, so an overwrite-only entry has to restore the dispatch by hand, and only where the fill
-it was avoiding is smaller than the kernel it lands on (tensor4all/faer#200). That last condition is
+it was avoiding is smaller than the kernel it lands on (tensor4all/colmat-rs#200). That last condition is
 guidance, not a rule the dispatch applies: the worklog measured it for `m = 1` on a few shapes and
 found `m = 2/8/16` unchanged (`docs/worklogs/2026-11-03-matmul-uninit-thin.md`), so measure before
 relying on it elsewhere.

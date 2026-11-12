@@ -6,7 +6,7 @@ authors = ["sarah quiñones <sarah@veganb.tw>"]
 description.workspace = true
 documentation.workspace = true
 readme = "../README.md"
-repository = "https://github.com/tensor4all/faer"
+repository = "https://github.com/tensor4all/colmat-rs"
 license = "MIT AND BSD-3-Clause"
 keywords.workspace = true
 categories.workspace = true
@@ -98,7 +98,7 @@ std = [
 # AVX-512 kernels at run time. The target features are stable from Rust 1.89, so this does not need
 # the nightly compiler any more - but it is not a default feature yet: with `pulp/x86-v4` the
 # library returns non-finite factors on this host (full-pivot LU `test_gh238`, QZ, matrix-free SVD,
-# single-threaded), which is tensor4all/faer#86's open question. A build without it selects AVX2.
+# single-threaded), which is tensor4all/colmat-rs#86's open question. A build without it selects AVX2.
 x86-v4 = [
   "pulp/x86-v4",
   "gemm/x86-v4",

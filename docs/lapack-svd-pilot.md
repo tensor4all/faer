@@ -1,6 +1,6 @@
 # Focused f32/f64/c32/c64 LAPACK SVD validation
 
-This is the first bounded Rust adaptation for [#31](https://github.com/tensor4all/faer/issues/31).
+This is the first bounded Rust adaptation for [#31](https://github.com/tensor4all/colmat-rs/issues/31).
 It exercises faer's low-level `svd` interface with selected LAPACK matrix
 families and correctness checks. It requires neither OpenBLAS nor a Fortran
 compiler. It is not the complete LAPACK SVD suite.
@@ -344,7 +344,7 @@ with debug info disabled, and fork production code at
 
 Both failures have orthogonality ratio `6.755399441055744e15` against threshold
 50. Reconstruction did not fail. They reproduce existing
-[#41](https://github.com/tensor4all/faer/issues/41); the full-factor QR path
+[#41](https://github.com/tensor4all/colmat-rs/issues/41); the full-factor QR path
 leaves prior entries in its top-right output block. The port preserves the
 failing checks and does not include a production fix.
 

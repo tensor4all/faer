@@ -37,7 +37,7 @@ keep this fork aligned with faer and keep upstream rebases manageable.
   in the scheduled suite.
 - Broader ports of OpenBLAS's bundled `lapack-netlib/TESTING/` are candidates
   for future nightly validation, tracked in
-  [#31](https://github.com/tensor4all/faer/issues/31). This suite is planned;
+  [#31](https://github.com/tensor4all/colmat-rs/issues/31). This suite is planned;
   its absence is not an additional gate on current PRs. Retain small regression
   cases in ordinary tests when failures can be reduced.
 

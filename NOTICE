@@ -7,7 +7,7 @@ Upstream project
   License: MIT (see LICENSE)
 
 This fork
-  https://github.com/tensor4all/faer
+  https://github.com/tensor4all/colmat-rs
   Maintained by tensor4all contributors.
 
 The source in this repository is upstream faer plus tensor4all modifications.

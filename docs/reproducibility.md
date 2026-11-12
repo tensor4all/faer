@@ -1,6 +1,6 @@
 # Reproducibility: bitwise results are promised at a fixed thread count
 
-Owner decision, 2026-11-08 ([tensor4all/faer#327](https://github.com/tensor4all/faer/issues/327)).
+Owner decision, 2026-11-08 ([tensor4all/colmat-rs#327](https://github.com/tensor4all/colmat-rs/issues/327)).
 
 ## What is promised
 
@@ -62,7 +62,7 @@ differently.
 ## Measured, not promised
 
 Observed on an AMD EPYC 7713P (Zen 3, AVX2+FMA), as recorded in
-[tensor4all/faer#327](https://github.com/tensor4all/faer/issues/327). This is a record of what the
+[tensor4all/colmat-rs#327](https://github.com/tensor4all/colmat-rs/issues/327). This is a record of what the
 mechanism does, not a contract:
 
 The numbers below are the ones recorded in that issue; it carries the host description, the sizes and

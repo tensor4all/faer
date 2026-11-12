@@ -9,7 +9,7 @@ assignees: ''
 
 **Review rules**
 
-- [ ] I have read the [faer fork review rules](https://github.com/tensor4all/faer/blob/main/docs/review-rules.md).
+- [ ] I have read the [colmat review rules](https://github.com/tensor4all/colmat-rs/blob/main/docs/review-rules.md).
 
 **Describe the bug**
 A clear and concise description of what the bug is.

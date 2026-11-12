@@ -20,7 +20,7 @@ Answer these in the PR description first; they decide which tests exist.
 | Scratch | `*_scratch` query must be exact; a caller-sized `MemStack` must not be overrun and must not be padded "just in case". |
 | Parallel route | `Par::Seq` and `Par::Team` must both run, and the results must agree within the family's tolerance. Bitwise equality is a fixed-thread-count promise only, never across thread counts ([reproducibility.md](reproducibility.md)). |
 | Failure | What `Err` / `NonConvergence` leaves in the outputs, and whether inputs are allowed to be left unspecified. |
-| Allocation | Nothing on the heap per call in a steady-state call (see [tensor4all/faer#111](https://github.com/tensor4all/faer/issues/111)); per-thread reusable working memory is allowed and is documented as such. |
+| Allocation | Nothing on the heap per call in a steady-state call (see [tensor4all/colmat-rs#111](https://github.com/tensor4all/colmat-rs/issues/111)); per-thread reusable working memory is allowed and is documented as such. |
 | Provenance | Is any arithmetic, test oracle or fixture adapted from LAPACK, OpenBLAS, Eigen, or another project? Record project, revision, file, routine and the material changes at the port site. |
 
 ## 2. The layers a new routine touches
@@ -101,7 +101,7 @@ Then:
   source's dimension and safe-minimum factors. **Do not loosen an absolute tolerance so the test
   passes** ([review-rules.md](review-rules.md)). If a dimension-dependent threshold is genuinely
   needed, make it a maintainer decision and record it (the `20 * max(1, sqrt(n / 16))` decision in
-  [#112](https://github.com/tensor4all/faer/issues/112) is the precedent).
+  [#112](https://github.com/tensor4all/colmat-rs/issues/112) is the precedent).
 - Exercise the four native types, views/reused buffers, and sequential plus dedicated 2-/4-thread
   groups.
 - Update the inventory table in [lapack-validation.md](lapack-validation.md): filter suffix, port

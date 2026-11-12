@@ -186,8 +186,8 @@
 //! on the problem and the width it is given) and how the work is partitioned (some routines split
 //! by the participant count itself, such as the trailing update of the tridiagonalization), so two
 //! widths can group the same sum differently. See
-//! [docs/reproducibility.md](https://github.com/tensor4all/faer/blob/main/docs/reproducibility.md)
-//! (tensor4all/faer#327).
+//! [docs/reproducibility.md](https://github.com/tensor4all/colmat-rs/blob/main/docs/reproducibility.md)
+//! (tensor4all/colmat-rs#327).
 //!
 //! with the `threadteam` feature (on by default) a team is a reservation the caller owns: its members spin while the reservation is held,
 //! instead of being woken for every region, and the token hands each region the authority to

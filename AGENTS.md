@@ -74,7 +74,7 @@ file-layout and test-placement overrides to the shared rules.
   module (`faer/src/linalg/qr/mod.rs`), then `FAER_FFI=1 cargo +nightly build -p
   faer-ffi` for `faer-ffi/faer.h`, whose doc comments carry the crate name.
 * `faer-ffi` is in the workspace and builds the C API (cbindgen build); its parallel boundary is
-  a caller-owned team handle, never a `Par` by value (tensor4all/faer#98).
+  a caller-owned team handle, never a `Par` by value (tensor4all/colmat-rs#98).
 * Each crate directory keeps a `LICENSE` copy so the published archive ships
   the MIT text (`license-file` plus `license` makes Cargo warn).
 * Do not carry unrelated formatting churn or dependency bumps. Every extra diff
@@ -108,7 +108,7 @@ file-layout and test-placement overrides to the shared rules.
 
 ## Working Memory In Parallel Code
 
-The allocation rule (tensor4all/faer#111) forbids heap allocation **per call**. A steady-state call
+The allocation rule (tensor4all/colmat-rs#111) forbids heap allocation **per call**. A steady-state call
 allocates nothing, and `faer/tests/no_step_alloc.rs` guards this. The rule does not require that
 every byte come from the caller's scratch.
 

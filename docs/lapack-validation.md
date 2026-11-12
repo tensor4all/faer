@@ -1,6 +1,6 @@
 # LAPACK numerical validation inventory
 
-This is a bounded Rust adaptation of the candidates in [#31](https://github.com/tensor4all/faer/issues/31).
+This is a bounded Rust adaptation of the candidates in [#31](https://github.com/tensor4all/colmat-rs/issues/31).
 Port completion and numerical success are separate.
 
 Every defect the validation found, with its issue, fix, release, regression test and upstream
