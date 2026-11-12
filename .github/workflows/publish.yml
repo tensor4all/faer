@@ -1,12 +1,16 @@
 name: publish
 
-# Operator-triggered release: a human pushes a `v<faer version>` tag (for
-# example `v0.24.4`), or runs this workflow by hand. Publishing needs a
+# Operator-triggered release: a human pushes a `v<colmat version>` tag (for
+# example `v0.34.0`), or runs this workflow by hand. Publishing needs a
 # CRATES_IO_API_TOKEN secret.
 #
-# `colmat` resolves `colmat-traits` from the registry, so traits goes first.
-# A crate whose version is already on crates.io is skipped, so a release that
-# bumps only one of the two still succeeds.
+# `colmat` resolves `colmat-traits` from the registry, so traits goes first, and
+# each upload is followed by a wait until the crates.io API reports that version
+# (cargo's sparse index follows it):
+# uploading `colmat` before its dependency is resolvable fails the release with
+# traits already published. A crate whose version is already on crates.io is
+# skipped, so a release that bumps only one of the two - or a rerun after a
+# partial release - still succeeds.
 #
 # A `dry-run-only` dispatch does not upload, so it can only preflight crates
 # whose dependencies are already on the registry. It cannot validate the first
@@ -51,14 +55,30 @@ jobs:
           TRAITS_VERSION: ${{ steps.versions.outputs.traits }}
           COLMAT_VERSION: ${{ steps.versions.outputs.colmat }}
         run: |
+          served() {
+            # Timeouts, so a stalled connection cannot outlive the deadline below.
+            curl -sf --connect-timeout 5 --max-time 10 \
+                 -H "User-Agent: tensor4all-colmat-release" \
+                 "https://crates.io/api/v1/crates/$1/$2" > /dev/null
+          }
           publish() {
             local crate="$1" version="$2"
-            if curl -sf -H "User-Agent: tensor4all-colmat-release" \
-                 "https://crates.io/api/v1/crates/${crate}/${version}" > /dev/null; then
+            if served "${crate}" "${version}"; then
               echo "${crate} ${version} is already published; skipping"
-            else
-              cargo publish -p "${crate}"
+              return
             fi
+            cargo publish -p "${crate}"
+            # A publish returns before the registry serves the new version, and
+            # `colmat` cannot resolve `colmat-traits` until it does.
+            local deadline=$((SECONDS + 900))
+            until served "${crate}" "${version}"; do
+              if (( SECONDS >= deadline )); then
+                echo "crates.io did not serve ${crate} ${version} within 15 minutes" >&2
+                exit 1
+              fi
+              sleep 10
+            done
+            echo "${crate} ${version} is served by crates.io"
           }
           publish colmat-traits "$TRAITS_VERSION"
           publish colmat "$COLMAT_VERSION"
